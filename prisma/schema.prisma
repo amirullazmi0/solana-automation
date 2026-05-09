@@ -1,0 +1,26 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TradeStatus {
+  OPEN
+  CLOSED
+}
+
+model Trade {
+  id                Int         @id @default(autoincrement())
+  tokenMint         String
+  slotNumber        Int
+  entryPrice        Float
+  highestPrice      Float
+  trailingStopPrice Float
+  status            TradeStatus @default(OPEN)
+  amountInSol       Float
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+}
