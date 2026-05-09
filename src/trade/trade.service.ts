@@ -23,8 +23,11 @@ export class TradeService implements OnModuleInit {
   private positionSizeUSD: number;
   private slippageBps = 100;
 
-  // Cache for resolved IPs to bypass DNS issues
-  private ipCache: Record<string, string> = {};
+  // Cache for resolved IPs with hardcoded fallbacks for Jupiter
+  private ipCache: Record<string, string> = {
+    'quote-api.jup.ag': '104.26.11.233', // Cloudflare fallback IP 1
+    'tokens.jup.ag': '104.26.10.233'     // Cloudflare fallback IP 2
+  };
 
   constructor(
     private configService: ConfigService,
@@ -74,25 +77,34 @@ export class TradeService implements OnModuleInit {
    * Helper to resolve DNS using Google DNS-over-HTTPS if standard lookup fails
    */
   private async resolveDns(hostname: string): Promise<string> {
-    if (this.ipCache[hostname]) return this.ipCache[hostname];
+    if (this.ipCache[hostname] && hostname !== 'quote-api.jup.ag') return this.ipCache[hostname];
 
     try {
-      this.logger.log(`[DNS] Resolving ${hostname} via Cloudflare DoH...`);
-      const response = await axios.get(`https://1.1.1.1/dns-query?name=${hostname}&type=A`, {
-        headers: { 'accept': 'application/dns-json' }
-      });
+      this.logger.log(`[DNS] Resolving ${hostname} via Cloudflare/Google DoH...`);
+      // Try Cloudflare first
+      let response = await axios.get(`https://1.1.1.1/dns-query?name=${hostname}&type=A`, {
+        headers: { 'accept': 'application/dns-json' },
+        timeout: 5000
+      }).catch(() => null);
+
+      // If Cloudflare fails, try Google
+      if (!response) {
+        response = await axios.get(`https://8.8.8.8/resolve?name=${hostname}&type=A`, {
+          timeout: 5000
+        }).catch(() => null);
+      }
       
-      const ip = response.data.Answer?.[0]?.data;
-      if (ip) {
+      const ip = response?.data?.Answer?.[0]?.data;
+      if (ip && /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) {
         this.logger.log(`[DNS] Resolved ${hostname} to ${ip}`);
         this.ipCache[hostname] = ip;
         return ip;
       }
-      throw new Error('No IP found in DoH response');
     } catch (error) {
-      this.logger.warn(`[DNS] DoH failed for ${hostname}, falling back to system DNS...`);
-      return hostname; // Fallback to original hostname
+      this.logger.warn(`[DNS] DoH failed for ${hostname}, using hardcoded/system fallback...`);
     }
+
+    return this.ipCache[hostname] || hostname; 
   }
 
   async attemptBuy(tokenMint: string) {
