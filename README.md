@@ -1,4 +1,4 @@
-# 🦅 Solana Sniper & Scalper Bot v2.0
+# 🦅 Solana Sniper & Scalper Bot v2.0  
 
 ![Solana Sniper](https://img.shields.io/badge/Solana-Sniper-blueviolet?style=for-the-badge&logo=solana)
 ![Status](https://img.shields.io/badge/Status-Active-success?style=for-the-badge)
