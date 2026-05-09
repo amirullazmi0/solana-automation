@@ -2,8 +2,7 @@ name: Deploy to CapRover
 
 on:
   push:
-    branches:
-      - production  # Deploy hanya jalan saat push ke branch production
+    branches: ["*"] # Jalan di branch MANA SAJA untuk tes
 
 jobs:
   deploy:

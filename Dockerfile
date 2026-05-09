@@ -36,5 +36,5 @@ ENV NODE_ENV=production
 # Expose port
 EXPOSE 4000
 
-# Jalankan migrasi baru kemudian start bot
-CMD npx prisma migrate deploy && node dist/main.js
+# Jalankan bot langsung
+CMD ["node", "dist/main.js"]
