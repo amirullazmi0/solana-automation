@@ -1,40 +1,25 @@
-# Step 1: Build Image
-FROM node:20-alpine AS builder
-
-WORKDIR /app
-
-# Install dependencies
-COPY package.json yarn.lock ./
-RUN yarn install --frozen-lockfile
-
-# Copy source and prisma schema
-COPY . .
-
-# Generate Prisma Client (PENTING)
-RUN npx prisma generate
-
-# Build the NestJS app
-RUN yarn build
-
-# Step 2: Production Image
 FROM node:20-alpine
 
 WORKDIR /app
 
-# Install openssl for Prisma on Alpine
+# Install openssl for Prisma
 RUN apk add --no-cache openssl
 
-# Copy built assets and production dependencies
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/prisma ./prisma
+# Copy package files
+COPY package.json yarn.lock* ./
 
-# Set environment variables
-ENV NODE_ENV=production
+# Install ALL dependencies (termasuk devDependencies untuk start:dev)
+RUN yarn install
+
+# Copy all files
+COPY . .
+
+# Generate Prisma Client
+RUN npx prisma generate
 
 # Expose port
 EXPOSE 4000
 
-# Jalankan bot langsung
-CMD ["node", "dist/main.js"]
+# Jalankan langsung menggunakan start:dev
+# Ini akan mengompile otomatis saat jalan
+CMD ["yarn", "start:dev"]
