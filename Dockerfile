@@ -34,7 +34,7 @@ COPY --from=builder /app/prisma ./prisma
 ENV NODE_ENV=production
 
 # Expose port
-EXPOSE 3000
+EXPOSE 4000
 
 # Jalankan migrasi baru kemudian start bot
 CMD npx prisma migrate deploy && node dist/main.js
