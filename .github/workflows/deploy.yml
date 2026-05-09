@@ -16,6 +16,6 @@ jobs:
       - name: Deploy to CapRover
         uses: caprover/deploy-from-github@v1.1.2
         with:
-          server: ${{ secrets.CAPROVER_SERVER }}
-          app: ${{ secrets.CAPROVER_APP_NAME }}
-          token: ${{ secrets.CAPROVER_APP_TOKEN }}
+          server: 'https://captain.apps.arulize.com'
+          app: 'my-solona-bot'
+          token: ${{ secrets.CAPROVER_TOKEN }}
