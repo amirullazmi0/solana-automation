@@ -141,6 +141,7 @@ export class PriceMonitorService {
                 }
             }
         } catch (error) {
+            this.logger.debug(`[PriceMonitor] DexScreener error for ${tokenMint}: ${error.message}`);
             this.logger.error(`[PriceMonitor] All price sources failed for ${tokenMint}`);
         }
 
