@@ -6,6 +6,8 @@ import { Response } from 'express';
 
 @Controller()
 export class AppController {
+    private readonly logger = new Logger(AppController.name);
+
     constructor(
         private readonly appService: AppService,
         private readonly tradeService: TradeService,
@@ -34,7 +36,7 @@ export class AppController {
                     });
                 }
             } else {
-                this.analyzerService['logger'].warn(`[FORCE BUY] Bypassing safety checks for ${tokenMint}`);
+                this.logger.warn(`[FORCE BUY] Bypassing safety checks for ${tokenMint}`);
             }
 
             // Trigger buy asynchronously
