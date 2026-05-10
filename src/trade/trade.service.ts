@@ -224,9 +224,11 @@ export class TradeService implements OnModuleInit {
                     lookup: async (h, o, cb) => {
                         try {
                             const ip = await this.resolveDns(h);
+                            // @ts-ignore - Node.js callback type mismatch
                             cb(null, ip, 4);
                         } catch (e) {
-                            cb(e, null, 4);
+                            // @ts-ignore
+                            cb(e, undefined, 4);
                         }
                     }
                 }),
