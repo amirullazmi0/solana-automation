@@ -51,10 +51,9 @@ export class AnalyzerService {
                 return false;
             }
 
-            // 4. Check if Liquidity > $5,000
+            // 4. Check if Liquidity > $500
             const hasEnoughLiquidity = await this.checkLiquidity(tokenMint);
             if (!hasEnoughLiquidity) {
-                this.logger.warn(`[${tokenMint}] Liquidity is less than $5,000.`);
                 return false;
             }
 
@@ -110,14 +109,14 @@ export class AnalyzerService {
 
             const pairs = response.data.pairs;
             if (!pairs || pairs.length === 0) {
-                this.logger.warn(`[${tokenMint}] No liquidity pairs found on DexScreener.`);
-                return false;
+                this.logger.log(`[${tokenMint}] Token not yet on DexScreener, skipping liquidity check to allow sniping.`);
+                return true;
             }
 
             // Get liquidity in USD from the first pair
             const liquidity = pairs[0].liquidity?.usd || 0;
-            if (liquidity < 1000) {
-                this.logger.warn(`[${tokenMint}] Low liquidity: $${liquidity.toFixed(2)} USD`);
+            if (liquidity < 500) {
+                this.logger.warn(`[${tokenMint}] Low liquidity: $${liquidity.toFixed(2)} USD (Min $500)`);
                 return false;
             }
 
