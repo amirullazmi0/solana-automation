@@ -17,8 +17,9 @@ COPY . .
 # Generate Prisma Client
 RUN npx prisma generate
 RUN yarn build
+RUN ls -R dist
 
 # Expose port
 EXPOSE 3000
 
-CMD ["node", "dist/main"]
+CMD ["yarn", "start:prod"]
