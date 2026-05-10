@@ -207,24 +207,28 @@ export class TradeService implements OnModuleInit {
         try {
             if (retryCount === 0) await new Promise((res) => setTimeout(res, Math.random() * 2000));
 
-            // Use DoH to resolve Jupiter IP since VPS DNS is broken
+            // Jurus Pamungkas: Override DNS di level Node.js
             const hostname = 'quote-api.jup.ag';
-            const ip = await this.resolveDns(hostname);
-            
-            // If DoH worked, use IP, otherwise fallback to hostname (which might fail but it's our last hope)
-            const baseUrl = ip && ip !== hostname ? `https://${ip}` : `https://${hostname}`;
+            const baseUrl = `https://${hostname}`;
 
-            this.logger.log(`[Jupiter] Fetching quote for ${side} via ${baseUrl} (Attempt ${retryCount + 1})...`);
+            this.logger.log(`[Jupiter] Fetching quote for ${side} (Attempt ${retryCount + 1})...`);
 
             const config = {
                 timeout: 20000,
                 headers: { 
-                    'Host': hostname, // MUST be set when using IP
                     'Accept-Encoding': 'gzip, deflate, br' 
                 },
                 httpsAgent: new https.Agent({
-                    family: 4, // Force IPv4
-                    rejectUnauthorized: false, // Required when using IP with HTTPS
+                    family: 4,
+                    // Kita paksa Node.js cari IP lewat DoH kita sendiri
+                    lookup: async (h, o, cb) => {
+                        try {
+                            const ip = await this.resolveDns(h);
+                            cb(null, ip, 4);
+                        } catch (e) {
+                            cb(e, null, 4);
+                        }
+                    }
                 }),
             };
 
