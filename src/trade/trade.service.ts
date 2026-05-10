@@ -21,11 +21,8 @@ export class TradeService implements OnModuleInit {
     private readonly positionSizeUSD: number;
     private readonly slippageBps: number;
 
-    // Cache for resolved IPs with hardcoded fallbacks for Jupiter (Cloudflare Anycast)
+    // Cache for resolved IPs
     private ipCache: Record<string, string> = {
-        'quote-api.jup.ag': '104.26.11.233',
-        'tokens.jup.ag': '104.26.10.233',
-        'api.jup.ag': '104.26.11.233',
         '1.1.1.1': '1.1.1.1',
         '8.8.8.8': '8.8.8.8',
     };
