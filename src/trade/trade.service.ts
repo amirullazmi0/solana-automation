@@ -207,20 +207,17 @@ export class TradeService implements OnModuleInit {
         try {
             if (retryCount === 0) await new Promise((res) => setTimeout(res, Math.random() * 2000));
 
-            // Attempt to resolve IP to bypass DNS blocking
+            // Use hostname directly for Jupiter as direct IP access is blocked by Cloudflare LB
             const hostname = 'quote-api.jup.ag';
-            const ip = await this.resolveDns(hostname);
-
-            const baseUrl = ip === hostname ? `https://${hostname}` : `https://${ip}`;
+            const baseUrl = `https://${hostname}`;
 
             this.logger.log(`[Jupiter] Fetching quote for ${side} (Attempt ${retryCount + 1})...`);
 
             const config = {
                 timeout: 20000,
-                headers: { Host: hostname }, // Crucial when using IP directly
+                headers: { 'Accept-Encoding': 'gzip, deflate, br' },
                 httpsAgent: new https.Agent({
-                    rejectUnauthorized: false,
-                    family: 4, // Force IPv4
+                    family: 4, // Force IPv4 for VPS stability
                 }),
             };
 
