@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Res, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Param, Query, Res, HttpStatus } from '@nestjs/common';
 import { AppService } from './app.service';
 import { TradeService } from './trade/trade.service';
 import { AnalyzerService } from './analyzer/analyzer.service';
@@ -18,16 +18,26 @@ export class AppController {
     }
 
     @Get('buy/:mint')
-    async manualBuy(@Param('mint') tokenMint: string, @Res() res: Response) {
+    async manualBuy(
+        @Param('mint') tokenMint: string,
+        @Query('force') force: string,
+        @Res() res: Response,
+    ) {
         try {
-            const isSafe = await this.analyzerService.isTokenSafeToBuy(tokenMint);
-            if (!isSafe) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    message: `Token ${tokenMint} failed safety checks (RugCheck or Authority checks). Buy aborted.`,
-                });
+            const isForced = force === 'true';
+
+            if (!isForced) {
+                const isSafe = await this.analyzerService.isTokenSafeToBuy(tokenMint);
+                if (!isSafe) {
+                    return res.status(HttpStatus.BAD_REQUEST).json({
+                        message: `Token ${tokenMint} failed safety checks (RugCheck or Authority checks). Buy aborted. Use ?force=true to bypass.`,
+                    });
+                }
+            } else {
+                this.analyzerService['logger'].warn(`[FORCE BUY] Bypassing safety checks for ${tokenMint}`);
             }
 
-            // Trigger buy asynchronously so we don't block the HTTP response too long
+            // Trigger buy asynchronously
             await this.tradeService.attemptBuy(tokenMint);
 
             return res.status(HttpStatus.OK).json({
