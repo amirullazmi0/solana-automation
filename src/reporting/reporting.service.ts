@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { Connection, PublicKey, Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
+import axios from 'axios';
 
 @Injectable()
 export class ReportingService implements OnModuleInit {
@@ -85,14 +86,54 @@ export class ReportingService implements OnModuleInit {
             return;
         }
 
+        await this.sendMessage('🔍 *Fetching real-time prices, please wait...*');
+
         let statusMsg = '📊 *Current Portfolio:*\n\n';
-        openTrades.forEach((trade) => {
+        
+        for (const trade of openTrades) {
+            const currentPrice = await this.fetchCurrentPrice(trade.tokenMint);
+            const profit = currentPrice 
+                ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100 
+                : 0;
+            
+            const priceDisplay = currentPrice ? `$${currentPrice.toFixed(8)}` : '(N/A)';
+            const profitDisplay = currentPrice ? `${profit >= 0 ? '+' : ''}${profit.toFixed(2)}%` : '(N/A)';
+            const emoji = profit >= 0 ? '📈' : '📉';
+
             statusMsg += `Slot ${trade.slotNumber}: \`${trade.tokenMint}\`\n`;
-            statusMsg += `Entry: \`$${trade.entryPrice}\` | Current: (Calculating...)\n`;
-            statusMsg += `Stop: \`$${trade.trailingStopPrice.toFixed(6)}\`\n\n`;
-        });
+            statusMsg += `Entry: \`$${trade.entryPrice.toFixed(8)}\` | Current: \`${priceDisplay}\` ${emoji}\n`;
+            statusMsg += `Profit/Loss: *${profitDisplay}*\n`;
+            statusMsg += `Stop: \`$${trade.trailingStopPrice.toFixed(8)}\`\n\n`;
+        }
 
         await this.sendMessage(statusMsg);
+    }
+
+    private async fetchCurrentPrice(tokenMint: string): Promise<number | null> {
+        try {
+            // Coba Jupiter dulu (Metis/Paid)
+            const apiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
+            const response = await axios.get(`https://api.jup.ag/price/v2?ids=${tokenMint}`, {
+                timeout: 5000,
+                headers: { 'x-api-key': apiKey }
+            }).catch(() => null);
+
+            if (response?.data?.data?.[tokenMint]?.price) {
+                return parseFloat(response.data.data[tokenMint].price);
+            }
+
+            // Fallback ke DexScreener
+            const dexResponse = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
+                timeout: 5000
+            }).catch(() => null);
+
+            if (dexResponse?.data?.pairs?.[0]?.priceUsd) {
+                return parseFloat(dexResponse.data.pairs[0].priceUsd);
+            }
+        } catch (error) {
+            this.logger.error(`Error fetching price for report: ${error.message}`);
+        }
+        return null;
     }
 
     private async handleBalanceRequest() {
