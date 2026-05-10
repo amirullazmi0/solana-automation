@@ -118,6 +118,14 @@ export class TradeService implements OnModuleInit {
     }
 
     async attemptBuy(tokenMint: string): Promise<{ success: boolean; message: string }> {
+        // 1. Cek apakah sudah punya koin ini (OPEN)
+        const existing = await this.prismaService.trade.findFirst({
+            where: { tokenMint, status: 'OPEN' }
+        });
+        if (existing) {
+            return { success: false, message: `Already holding ${tokenMint}` };
+        }
+
         const openTradesCount = await this.prismaService.trade.count({ where: { status: 'OPEN' } });
         if (openTradesCount >= this.totalSlots) {
             return { success: false, message: 'All trading slots are full.' };
