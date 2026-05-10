@@ -25,8 +25,20 @@ export class AnalyzerService {
         try {
             const mintPublicKey = new PublicKey(tokenMint);
 
-            // Fetch Mint Info once
-            const mintInfo = await getMint(this.connection, mintPublicKey);
+            // Fetch Mint Info with simple retry (Solana propagation delay)
+            let mintInfo;
+            for (let i = 0; i < 3; i++) {
+                try {
+                    mintInfo = await getMint(this.connection, mintPublicKey);
+                    break;
+                } catch (e) {
+                    if (i === 2) {
+                        this.logger.warn(`[${tokenMint}] Could not fetch mint info after 3 attempts: ${e.message}`);
+                        return false;
+                    }
+                    await new Promise((resolve) => setTimeout(resolve, 1000));
+                }
+            }
 
             // 1. Check if Mint Authority is disabled
             if (mintInfo.mintAuthority !== null) {
@@ -47,7 +59,6 @@ export class AnalyzerService {
             // 3. RugCheck API Integration
             const isRugCheckPassed = await this.checkRugCheckAPI(tokenMint);
             if (!isRugCheckPassed) {
-                this.logger.warn(`[${tokenMint}] Failed RugCheck validation.`);
                 return false;
             }
 
@@ -57,10 +68,11 @@ export class AnalyzerService {
                 return false;
             }
 
-            this.logger.log(`[${tokenMint}] Passed all safety filters.`);
+            this.logger.log(`[${tokenMint}] ✅ Passed all safety filters.`);
             return true;
         } catch (error) {
-            this.logger.error(`[${tokenMint}] Error analyzing token: ${error.message}`);
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`[${tokenMint}] Error analyzing token: ${errorMsg}`);
             return false; // Fail safe
         }
     }
