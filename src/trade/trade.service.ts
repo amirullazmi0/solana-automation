@@ -258,10 +258,16 @@ export class TradeService implements OnModuleInit {
 
             return { success: true, entryPrice: entryPrice || 1 };
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
+            let message = error.message;
+            if (error.response?.data) {
+                message = JSON.stringify(error.response.data);
+            }
             this.logger.error(`[Jupiter] Swap Error: ${message}`);
+            
             if (retryCount < 2) {
-                await new Promise((res) => setTimeout(res, 3000));
+                const backoff = 3000 * (retryCount + 1);
+                this.logger.log(`[Jupiter] Retrying in ${backoff}ms...`);
+                await new Promise((res) => setTimeout(res, backoff));
                 return this.executeJupiterSwap(inputMint, outputMint, amount, side, retryCount + 1);
             }
             return { success: false, entryPrice: 0 };
