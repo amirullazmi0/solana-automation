@@ -19,6 +19,6 @@ RUN npx prisma generate
 RUN yarn build
 
 # Expose port
-EXPOSE 4000
+EXPOSE 3000
 
 CMD ["node", "dist/main"]
