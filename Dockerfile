@@ -17,8 +17,5 @@ COPY . .
 # Generate Prisma Client
 RUN npx prisma generate
 
-# Expose port
-EXPOSE 3000
-
-# Balik ke start:dev sesuai permintaan user
-CMD ["yarn", "start:dev"]
+# Sinkronkan DB dan nyalakan bot
+CMD ["sh", "-c", "npx prisma db push && yarn start:dev"]

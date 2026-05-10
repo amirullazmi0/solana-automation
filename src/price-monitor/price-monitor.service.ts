@@ -30,8 +30,8 @@ export class PriceMonitorService {
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
 
-    // Runs every 2 seconds
-    @Interval(2000)
+    // Ambil harga setiap 5 detik (dikurangi dari 2 detik biar nggak kena rate limit 429)
+    @Interval(5000)
     async monitorPrices() {
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN' },
