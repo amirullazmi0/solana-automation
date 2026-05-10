@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, Res, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Param, Query, Res, HttpStatus, Logger } from '@nestjs/common';
 import { AppService } from './app.service';
 import { TradeService } from './trade/trade.service';
 import { AnalyzerService } from './analyzer/analyzer.service';
