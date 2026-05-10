@@ -15,10 +15,13 @@ enum TradeStatus {
 model Trade {
   id                Int         @id @default(autoincrement())
   tokenMint         String
+  symbol            String?     @default("UNKNOWN")
   slotNumber        Int
   entryPrice        Float
   highestPrice      Float
   trailingStopPrice Float
+  exitPrice         Float?
+  profitUsd         Float?
   status            TradeStatus @default(OPEN)
   amountInSol       Float
   createdAt         DateTime    @default(now())

@@ -99,8 +99,10 @@ export class ReportingService implements OnModuleInit {
             const priceDisplay = currentPrice ? `$${currentPrice.toFixed(8)}` : '(N/A)';
             const profitDisplay = currentPrice ? `${profit >= 0 ? '+' : ''}${profit.toFixed(2)}%` : '(N/A)';
             const emoji = profit >= 0 ? '📈' : '📉';
+            const displaySymbol = trade.symbol && trade.symbol !== 'UNKNOWN' ? trade.symbol : 'UNKNOWN';
 
-            statusMsg += `Slot ${trade.slotNumber}: \`${trade.tokenMint}\`\n`;
+            statusMsg += `Slot ${trade.slotNumber}: *${displaySymbol}*\n`;
+            statusMsg += `Mint: \`${trade.tokenMint}\`\n`;
             statusMsg += `Entry: \`$${trade.entryPrice.toFixed(8)}\` | Current: \`${priceDisplay}\` ${emoji}\n`;
             statusMsg += `Profit/Loss: *${profitDisplay}*\n`;
             statusMsg += `Stop: \`$${trade.trailingStopPrice.toFixed(8)}\`\n\n`;
@@ -154,13 +156,15 @@ export class ReportingService implements OnModuleInit {
         }
     }
 
-    async sendBuyAlert(tokenMint: string, price: number, slotUsed: number) {
-        const message = `🚀 *BUY ALERT*\nToken: \`${tokenMint}\`\nPrice: \`$${price}\`\nSlot Used: \`${slotUsed}\``;
+    async sendBuyAlert(tokenMint: string, price: number, slotUsed: number, symbol?: string) {
+        const displaySymbol = symbol || 'UNKNOWN';
+        const message = `🚀 *BUY ALERT*\nToken: *${displaySymbol}*\nMint: \`${tokenMint}\`\nPrice: \`$${price.toFixed(8)}\`\nSlot Used: \`${slotUsed}\``;
         await this.sendMessage(message);
     }
 
-    async sendTrailingAlert(tokenMint: string, newStopPrice: number, currentPrice: number) {
-        const message = `📈 *TRAILING STOP UPDATED*\nToken: \`${tokenMint}\`\nNew Stop: \`$${newStopPrice}\`\nCurrent Price: \`$${currentPrice}\``;
+    async sendTrailingAlert(tokenMint: string, newStopPrice: number, currentPrice: number, symbol?: string) {
+        const displaySymbol = symbol || 'UNKNOWN';
+        const message = `📈 *TRAILING STOP UPDATED*\nToken: *${displaySymbol}*\nNew Stop: \`$${newStopPrice.toFixed(8)}\`\nCurrent Price: \`$${currentPrice.toFixed(8)}\``;
         await this.sendMessage(message);
     }
 
@@ -169,10 +173,12 @@ export class ReportingService implements OnModuleInit {
         sellPrice: number,
         netProfitPercent: number,
         isStopLoss: boolean,
+        symbol?: string,
     ) {
+        const displaySymbol = symbol || 'UNKNOWN';
         const emoji = netProfitPercent >= 0 ? '💰' : '🛑';
         const reason = isStopLoss ? 'Stop Loss Triggered' : 'Take Profit Triggered';
-        const message = `${emoji} *SELL ALERT* (${reason})\nToken: \`${tokenMint}\`\nSell Price: \`$${sellPrice}\`\nNet Profit: \`${netProfitPercent}%\``;
+        const message = `${emoji} *SELL ALERT* (${reason})\nToken: *${displaySymbol}*\nSell Price: \`$${sellPrice.toFixed(8)}\`\nNet Profit: \`${netProfitPercent.toFixed(2)}%\``;
         await this.sendMessage(message);
     }
 

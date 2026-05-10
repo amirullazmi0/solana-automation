@@ -166,9 +166,11 @@ export class TradeService implements OnModuleInit {
         );
 
         if (success && entryPrice > 0) {
+            const symbol = await this.fetchTokenSymbol(tokenMint);
             await this.prismaService.trade.create({
                 data: {
                     tokenMint,
+                    symbol,
                     slotNumber: slotToUse,
                     entryPrice,
                     highestPrice: entryPrice,
@@ -177,9 +179,9 @@ export class TradeService implements OnModuleInit {
                     amountInSol,
                 },
             });
-            this.logger.log(`[Slot ${slotToUse}] Successfully bought ${tokenMint}`);
-            await this.reportingService.sendBuyAlert(tokenMint, entryPrice, slotToUse);
-            return { success: true, message: `Successfully bought ${tokenMint} at slot ${slotToUse}` };
+            this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
+            await this.reportingService.sendBuyAlert(tokenMint, entryPrice, slotToUse, symbol);
+            return { success: true, message: `Successfully bought ${symbol} at slot ${slotToUse}` };
         }
 
         return { success: false, message: `Swap failed: ${error || 'Unknown error'}` };
@@ -198,17 +200,27 @@ export class TradeService implements OnModuleInit {
         );
 
         if (success) {
+            const profit = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
+            // Estimasi profit dalam USD: (Sisa Token * (Harga Jual - Harga Beli))
+            const estimatedProfitUsd = (this.positionSizeUSD / trade.entryPrice) * (currentPrice - trade.entryPrice);
+
             await this.prismaService.trade.update({
                 where: { id: tradeId },
-                data: { status: 'CLOSED' },
+                data: { 
+                    status: 'CLOSED',
+                    exitPrice: currentPrice,
+                    profitUsd: estimatedProfitUsd
+                },
             });
-            const profit = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
+            
             await this.reportingService.sendSellAlert(
                 trade.tokenMint,
                 currentPrice,
                 profit,
                 isStopLoss,
+                trade.symbol || undefined,
             );
+            this.logger.log(`[Slot ${trade.slotNumber}] Position CLOSED. Profit: ${profit.toFixed(2)}% ($${estimatedProfitUsd.toFixed(2)})`);
         }
     }
 
@@ -300,6 +312,16 @@ export class TradeService implements OnModuleInit {
                 return this.executeJupiterSwap(inputMint, outputMint, amount, side, retryCount + 1);
             }
             return { success: false, entryPrice: 0, error: message };
+        }
+    private async fetchTokenSymbol(tokenMint: string): Promise<string> {
+        try {
+            const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
+                timeout: 5000,
+            });
+            const symbol = response.data?.pairs?.[0]?.baseToken?.symbol;
+            return symbol ? `$${symbol}` : 'UNKNOWN';
+        } catch {
+            return 'UNKNOWN';
         }
     }
 }

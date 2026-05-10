@@ -171,7 +171,7 @@ export class PriceMonitorService {
                 });
 
                 this.logger.log(`[Slot ${trade.slotNumber}] New High: $${currentPrice}. TSL: $${newTrailingStop}`);
-                await this.reportingService.sendTrailingAlert(trade.tokenMint, newTrailingStop, currentPrice);
+                await this.reportingService.sendTrailingAlert(trade.tokenMint, newTrailingStop, currentPrice, trade.symbol || undefined);
             }
         }
 
