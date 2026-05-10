@@ -6,7 +6,7 @@ WORKDIR /app
 RUN apk add --no-cache openssl
 
 # Copy package files
-COPY package.json yarn.lock* ./
+COPY package.json yarn.lock ./
 
 # Install ALL dependencies (termasuk devDependencies untuk start:dev)
 RUN yarn install
