@@ -39,7 +39,14 @@ export class TradeService implements OnModuleInit {
         this.totalCapital = Number.parseFloat(this.configService.get<string>('TOTAL_CAPITAL', '20'));
         this.reserveAmount = Number.parseFloat(this.configService.get<string>('RESERVE_AMOUNT', '5'));
         this.totalSlots = Number.parseInt(this.configService.get<string>('TOTAL_SLOTS', '4'), 10);
-        this.positionSizeUSD = (this.totalCapital - this.reserveAmount) / this.totalSlots;
+        
+        const directSize = this.configService.get<string>('POSITION_SIZE_USD');
+        if (directSize) {
+            this.positionSizeUSD = Number.parseFloat(directSize);
+        } else {
+            this.positionSizeUSD = (this.totalCapital - this.reserveAmount) / this.totalSlots;
+        }
+
         this.slippageBps = Number.parseInt(this.configService.get<string>('SLIPPAGE_BPS', '100'), 10);
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
 
