@@ -11,20 +11,20 @@ import { TradeModule } from './trade/trade.module';
 import { PriceMonitorModule } from './price-monitor/price-monitor.module';
 
 @Module({
-  imports: [
-    ConfigModule.forRoot({
-      isGlobal: true,
-      envFilePath: '.env',
-    }),
-    ScheduleModule.forRoot(),
-    PrismaModule,
-    ReportingModule,
-    AnalyzerModule,
-    ScannerModule,
-    TradeModule,
-    PriceMonitorModule,
-  ],
-  controllers: [AppController],
-  providers: [AppService],
+    imports: [
+        ConfigModule.forRoot({
+            isGlobal: true,
+            envFilePath: '.env',
+        }),
+        ScheduleModule.forRoot(),
+        PrismaModule,
+        ReportingModule,
+        AnalyzerModule,
+        ScannerModule,
+        TradeModule,
+        PriceMonitorModule,
+    ],
+    controllers: [AppController],
+    providers: [AppService],
 })
 export class AppModule {}
