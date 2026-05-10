@@ -187,7 +187,10 @@ export class TradeService implements OnModuleInit {
       const config = { 
         timeout: 20000, 
         headers: { 'Host': hostname }, // Crucial when using IP directly
-        httpsAgent: new https.Agent({ rejectUnauthorized: false }) // Might be needed if cert validation fails on IP
+        httpsAgent: new https.Agent({ 
+          rejectUnauthorized: false,
+          family: 4 // Force IPv4
+        }) 
       };
 
       const quoteUrl = `${baseUrl}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${this.slippageBps}`;
