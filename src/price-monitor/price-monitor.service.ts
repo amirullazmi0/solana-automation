@@ -85,6 +85,7 @@ export class PriceMonitorService {
     }
 
     private async getCurrentPrice(tokenMint: string): Promise<number | null> {
+        // 1. Coba Jupiter Price API dulu (VIP/Paid)
         try {
             const hostname = 'api.jup.ag';
             const response = await axios.get(`https://${hostname}/price/v2?ids=${tokenMint}`, {
@@ -106,13 +107,44 @@ export class PriceMonitorService {
             if (data.data && data.data[tokenMint] && data.data[tokenMint].price) {
                 return parseFloat(data.data[tokenMint].price);
             }
-
-            return null;
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logger.error(`[PriceMonitor] Failed to fetch price for ${tokenMint}: ${message}`);
-            return null;
+            // Jika 404, artinya koin terlalu baru bagi Jupiter, lanjut ke DexScreener
+            if (!axios.isAxiosError(error) || error.response?.status !== 404) {
+                this.logger.debug(`Jupiter Price API error for ${tokenMint}: ${error.message}`);
+            }
         }
+
+        // 2. Fallback ke DexScreener (Sangat cepat buat koin baru)
+        try {
+            const hostname = 'api.dexscreener.com';
+            const response = await axios.get(`https://${hostname}/latest/dex/tokens/${tokenMint}`, {
+                timeout: 5000,
+                httpsAgent: new https.Agent({
+                    family: 4,
+                    lookup: async (h, o, cb) => {
+                        try {
+                            const ip = await this.resolveDns(h);
+                            if (ip) cb(null, ip, 4);
+                            else lookup(h, o, cb);
+                        } catch (e) { cb(e as Error, '', 4); }
+                    }
+                })
+            });
+
+            const pairs = response.data.pairs;
+            if (pairs && pairs.length > 0) {
+                // Ambil harga dari pair pertama (biasanya yang paling liquid)
+                const price = parseFloat(pairs[0].priceUsd);
+                if (price > 0) {
+                    this.logger.log(`[PriceMonitor] Used DexScreener fallback for ${tokenMint}: $${price}`);
+                    return price;
+                }
+            }
+        } catch (error) {
+            this.logger.error(`[PriceMonitor] All price sources failed for ${tokenMint}`);
+        }
+
+        return null;
     }
 
     private async evaluateTrade(trade: Trade, currentPrice: number) {
