@@ -17,7 +17,7 @@ export class AnalyzerService {
     };
 
     constructor(private readonly configService: ConfigService) {
-        const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
+        const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
         this.connection = new Connection(rpcEndpoint, 'confirmed');
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
