@@ -151,14 +151,17 @@ export class PriceMonitorService {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
 
         // 1. Check Stop Loss (10% drop from entry)
+        // Jika koin belum pernah naik signifikan (Trailing belum aktif)
         const hardStopLossPrice = trade.entryPrice - trade.entryPrice * 0.1;
-        if (currentPrice <= hardStopLossPrice && trade.highestPrice <= trade.entryPrice * 1.05) {
-            this.logger.warn(`[Slot ${trade.slotNumber}] Stop Loss Triggered at $${currentPrice}`);
-            await this.tradeService.executeSell(trade.id, currentPrice, true);
-            return;
+        if (trade.highestPrice <= trade.entryPrice * 1.05) {
+            if (currentPrice <= hardStopLossPrice) {
+                this.logger.warn(`[Slot ${trade.slotNumber}] Hard Stop Loss Triggered at $${currentPrice} (-10%)`);
+                await this.tradeService.executeSell(trade.id, currentPrice, true);
+                return;
+            }
         }
 
-        // 2. Trailing Take Profit (TTP) Logic
+        // 2. Update Trailing Stop if price hits new highs (Profit >= 5%)
         if (profitPercent >= 5) {
             if (currentPrice > trade.highestPrice) {
                 const newTrailingStop = currentPrice - currentPrice * (this.trailingDistancePercent / 100);
@@ -173,8 +176,9 @@ export class PriceMonitorService {
         }
 
         // 3. Execute Sell if price drops to or below Trailing Stop
-        if (currentPrice <= trade.trailingStopPrice && profitPercent >= 5) {
-            this.logger.log(`[Slot ${trade.slotNumber}] TTP Triggered at $${currentPrice}`);
+        // PENTING: Hapus syarat profitPercent >= 5 supaya kalau harga terjun bebas tetap terjual!
+        if (currentPrice <= trade.trailingStopPrice) {
+            this.logger.log(`[Slot ${trade.slotNumber}] Trailing Stop Triggered at $${currentPrice}`);
             await this.tradeService.executeSell(trade.id, currentPrice, false);
         }
     }
