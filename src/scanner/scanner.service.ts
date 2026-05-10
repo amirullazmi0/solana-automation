@@ -130,7 +130,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     if (!this.seenTokens.has(mint)) {
                         this.seenTokens.add(mint);
                         this.logger.log(`🔍 [DexScreener] New Token Profile: ${mint}`);
-                        this.processNewToken(mint);
+                        // Gunakan await supaya tidak membombardir RPC
+                        await this.processNewToken(mint);
+                        // Kasih jeda 1 detik antar koin dari DexScreener
+                        await new Promise((res) => setTimeout(res, 1000));
                     }
                 }
         } catch {
@@ -140,7 +143,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     }
 
     private async processNewToken(tokenMint: string) {
-        await new Promise((res) => setTimeout(res, Math.random() * 2000));
+        // Tambah jitter jadi 1-5 detik untuk meratakan beban RPC
+        const jitter = Math.floor(Math.random() * 4000) + 1000;
+        await new Promise((res) => setTimeout(res, jitter));
 
         try {
             const isSafe = await this.analyzerService.isTokenSafeToBuy(tokenMint);

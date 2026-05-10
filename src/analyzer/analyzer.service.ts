@@ -27,16 +27,25 @@ export class AnalyzerService {
 
             // Fetch Mint Info with simple retry (Solana propagation delay)
             let mintInfo;
-            for (let i = 0; i < 3; i++) {
+            let lastError;
+            for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
                     mintInfo = await getMint(this.connection, mintPublicKey);
                     break;
                 } catch (e) {
-                    if (i === 2) {
-                        this.logger.warn(`[${tokenMint}] Could not fetch mint info after 3 attempts: ${e.message}`);
+                    lastError = e;
+                    const isRateLimit = e.message?.includes('429') || e.toString().includes('429');
+                    const delay = isRateLimit ? 2000 * attempt : 500 * attempt;
+                    
+                    if (isRateLimit) {
+                        this.logger.warn(`[${tokenMint}] RPC Rate limit hit. Backing off for ${delay}ms...`);
+                    }
+
+                    if (attempt === 3) {
+                        this.logger.warn(`[${tokenMint}] Could not fetch mint info after 3 attempts: ${lastError.message}`);
                         return false;
                     }
-                    await new Promise((resolve) => setTimeout(resolve, 1000));
+                    await new Promise((resolve) => setTimeout(resolve, delay));
                 }
             }
 
