@@ -143,7 +143,7 @@ export class TradeService implements OnModuleInit {
 
         this.logger.log(`[Slot ${slotToUse}] Attempting to buy ${tokenMint} with ${amountInSol.toFixed(4)} SOL`);
 
-        const { success, entryPrice } = await this.executeJupiterSwap(
+        const { success, entryPrice, error } = await this.executeJupiterSwap(
             WRAPPED_SOL_MINT,
             tokenMint,
             amountInLamports,
@@ -167,7 +167,7 @@ export class TradeService implements OnModuleInit {
             return { success: true, message: `Successfully bought ${tokenMint} at slot ${slotToUse}` };
         }
 
-        return { success: false, message: 'Swap failed on Jupiter. Check logs for details.' };
+        return { success: false, message: `Swap failed: ${error || 'Unknown error'}` };
     }
 
     async executeSell(tradeId: number, currentPrice: number, isStopLoss: boolean) {
@@ -203,7 +203,7 @@ export class TradeService implements OnModuleInit {
         amount: number,
         side: 'BUY' | 'SELL',
         retryCount = 0,
-    ): Promise<{ success: boolean; entryPrice: number }> {
+    ): Promise<{ success: boolean; entryPrice: number; error?: string }> {
         try {
             if (retryCount === 0) await new Promise((res) => setTimeout(res, Math.random() * 2000));
 
@@ -270,7 +270,7 @@ export class TradeService implements OnModuleInit {
                 await new Promise((res) => setTimeout(res, backoff));
                 return this.executeJupiterSwap(inputMint, outputMint, amount, side, retryCount + 1);
             }
-            return { success: false, entryPrice: 0 };
+            return { success: false, entryPrice: 0, error: message };
         }
     }
 }
