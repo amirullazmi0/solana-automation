@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { getMint } from '@solana/spl-token';
 import axios from 'axios';
+import * as https from 'https';
 
 @Injectable()
 export class AnalyzerService {
@@ -86,12 +87,60 @@ export class AnalyzerService {
         }
     }
 
+    private async resolveDns(hostname: string): Promise<string> {
+        try {
+            // Try Cloudflare first
+            let response = await axios
+                .get(`https://1.1.1.1/dns-query?name=${hostname}&type=A`, {
+                    headers: { accept: 'application/dns-json' },
+                    timeout: 5000,
+                    httpsAgent: new https.Agent({ family: 4 }),
+                })
+                .catch(() => null);
+
+            // If Cloudflare fails, try Google
+            if (!response) {
+                response = await axios
+                    .get(`https://8.8.8.8/resolve?name=${hostname}&type=A`, {
+                        timeout: 5000,
+                        httpsAgent: new https.Agent({ family: 4 }),
+                    })
+                    .catch(() => null);
+            }
+
+            const ip = response?.data?.Answer?.[0]?.data;
+            if (ip && /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) {
+                return ip;
+            }
+        } catch {
+            // Silence DNS errors
+        }
+        return hostname;
+    }
+
+    private getHttpsAgent() {
+        return new https.Agent({
+            family: 4,
+            lookup: async (h, o, cb) => {
+                try {
+                    const ip = await this.resolveDns(h);
+                    cb(null, ip as string, 4);
+                } catch (e) {
+                    cb(e as Error, '', 4);
+                }
+            }
+        });
+    }
+
     private async checkRugCheckAPI(tokenMint: string): Promise<boolean> {
         try {
             this.logger.log(`[${tokenMint}] Fetching RugCheck report via Axios...`);
             const response = await axios.get(
                 `https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report/summary`,
-                { timeout: 10000 },
+                { 
+                    timeout: 10000,
+                    httpsAgent: this.getHttpsAgent()
+                },
             );
 
             const data = response.data;
@@ -125,7 +174,10 @@ export class AnalyzerService {
             this.logger.log(`[${tokenMint}] Checking liquidity via DexScreener...`);
             const response = await axios.get(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
-                { timeout: 5000 },
+                { 
+                    timeout: 5000, 
+                    httpsAgent: this.getHttpsAgent()
+                },
             );
 
             const pairs = response.data.pairs;
