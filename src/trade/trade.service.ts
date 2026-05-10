@@ -24,6 +24,9 @@ export class TradeService implements OnModuleInit {
 
     // Cache for resolved IPs
     private ipCache: Record<string, string> = {
+        'quote-api.jup.ag': '104.26.11.233', // Cloudflare IP 1
+        'api.jup.ag': '104.26.10.233',      // Cloudflare IP 2
+        'tokens.jup.ag': '172.67.74.132',   // Cloudflare IP 3
         '1.1.1.1': '1.1.1.1',
         '8.8.8.8': '8.8.8.8',
     };

@@ -9,6 +9,10 @@ import * as https from 'https';
 export class AnalyzerService {
     private readonly logger = new Logger(AnalyzerService.name);
     private readonly connection: Connection;
+    private ipCache: Record<string, string> = {
+        'api.rugcheck.xyz': '104.26.0.126',
+        'api.dexscreener.com': '104.26.8.188',
+    };
 
     constructor(private readonly configService: ConfigService) {
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
@@ -88,6 +92,7 @@ export class AnalyzerService {
     }
 
     private async resolveDns(hostname: string): Promise<string> {
+        if (this.ipCache[hostname]) return this.ipCache[hostname];
         try {
             // Try Cloudflare first
             let response = await axios
