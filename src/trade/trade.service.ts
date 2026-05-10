@@ -41,7 +41,7 @@ export class TradeService implements OnModuleInit {
         this.totalSlots = Number.parseInt(this.configService.get<string>('TOTAL_SLOTS', '4'), 10);
         this.positionSizeUSD = (this.totalCapital - this.reserveAmount) / this.totalSlots;
         this.slippageBps = Number.parseInt(this.configService.get<string>('SLIPPAGE_BPS', '100'), 10);
-        this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY');
+        this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
 
         this.setupWalletAndConnection();
     }
