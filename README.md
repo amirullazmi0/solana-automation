@@ -1,10 +1,11 @@
-# 🦅 Solana Sniper & Scalper Bot v2.0
+# 🦅 Solana Sniper & Scalper Bot v2.1
 
 ![Solana Sniper](https://img.shields.io/badge/Solana-Sniper-blueviolet?style=for-the-badge&logo=solana)
 ![Status](https://img.shields.io/badge/Status-Active-success?style=for-the-badge)
 ![Network](https://img.shields.io/badge/Network-Mainnet-orange?style=for-the-badge)
+![Agent](https://img.shields.io/badge/Agent-Antigravity-blue?style=for-the-badge)
 
-Bot Sniper Solana otomatis yang dirancang untuk kecepatan tinggi, keamanan maksimal, dan manajemen portofolio interaktif via Telegram. Bot ini memantau koin baru secara real-time dan melakukan eksekusi cerdas berdasarkan filter keamanan.
+Bot Sniper Solana otomatis yang dirancang untuk kecepatan tinggi, keamanan maksimal, dan manajemen portofolio interaktif via Telegram. Bot ini memantau koin baru secara real-time dan melakukan eksekusi cerdas berdasarkan filter keamanan yang ketat.
 
 ---
 
@@ -18,12 +19,17 @@ Bot Sniper Solana otomatis yang dirancang untuk kecepatan tinggi, keamanan maksi
 ### 🛡️ Keamanan & Proteksi
 - **3-Layer Security Filter**: Sistem filtrasi otomatis sebelum melakukan pembelian.
 - **RugCheck API**: Validasi skor keamanan token untuk menghindari "Rug Pull".
+- **Liquidity Analysis**: Verifikasi likuiditas via **DexScreener** (Minimal **$1.000 USD**) untuk memastikan pintu keluar (exit) yang aman.
 - **Authority Check**: Memastikan Mint & Freeze Authority sudah dicabut oleh owner token.
-- **Liquidity Analysis**: Memastikan likuiditas memadai sebelum masuk ke posisi.
 
-### 🌐 Infrastruktur & Konektivitas
-- **Network Resilience**: Dilengkapi dengan **DNS-over-HTTPS (DoH)** dan pemaksaan jalur **IPv4** untuk menembus pemblokiran ISP terhadap API Crypto.
+### 🌐 Infrastruktur & Konektivitas (Resilience)
+- **Anti-Blocking System**: Menggunakan jalur **IPv4 Forced** untuk stabilitas koneksi di VPS.
+- **DNS Hardening**: Multi-layer resolution menggunakan **Hardcoded IP fallback** untuk Jupiter API dan **DNS-over-HTTPS (DoH)** via Cloudflare/Google.
 - **Telegram Command Center**: Kontrol penuh via Telegram (`/status`, `/balance`) dan notifikasi real-time setiap ada transaksi.
+
+### 🤖 AI Agent Integration
+- **Antigravity Rules**: Menggunakan folder `.agents` untuk standarisasi kode (No `any` types, 4-space indentation).
+- **Automated Commit**: Alur kerja Git otomatis berbasis context untuk menjaga riwayat pengembangan yang profesional.
 
 ---
 
@@ -34,7 +40,6 @@ Bot Sniper Solana otomatis yang dirancang untuk kecepatan tinggi, keamanan maksi
 - **ORM**: [Prisma](https://www.prisma.io/)
 - **Blockchain**: [Solana Web3.js](https://solana-labs.github.io/solana-web3.js/) & [Jupiter SDK](https://jup.ag/)
 - **Deployment**: [Docker](https://www.docker.com/) & [CapRover](https://caprover.com/)
-- **CI/CD**: GitHub Actions (Configured)
 
 ---
 
@@ -69,14 +74,11 @@ yarn start:dev
 
 ---
 
-## 🚢 Deployment ke VPS (CapRover)
+## 🔄 Workflow Pengembangan
 
-Proyek ini telah dikonfigurasi untuk berjalan di lingkungan Docker melalui CapRover:
-1. Pastikan `DATABASE_URL` dan variabel lainnya sudah diatur di **App Config** CapRover.
-2. Gunakan perintah berikut untuk deploy dari lokal:
-   ```bash
-   yarn deploy:vps
-   ```
+Gunakan perintah ini jika Anda menggunakan asisten AI Antigravity:
+- **`/commit`** : Melakukan commit otomatis dengan pesan berbasis konteks per-kerjaan.
+- **`yarn deploy:vps`** : Deploy otomatis ke server CapRover.
 
 ---
 
@@ -86,5 +88,5 @@ Proyek ini telah dikonfigurasi untuk berjalan di lingkungan Docker melalui CapRo
 
 ---
 
-**Author**: Antigravity AI Assistant for [User Name]
+**Author**: Amirull Azmi & Antigravity (Google DeepMind)
 **License**: MIT
