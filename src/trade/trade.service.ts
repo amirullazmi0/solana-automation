@@ -6,6 +6,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
 import axios from 'axios';
 import * as https from 'https';
+import { lookup } from 'dns';
 
 const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -75,7 +76,7 @@ export class TradeService implements OnModuleInit {
     /**
      * Helper to resolve DNS using Google DNS-over-HTTPS if standard lookup fails
      */
-    private async resolveDns(hostname: string): Promise<string> {
+    private async resolveDns(hostname: string): Promise<string | null> {
         if (this.ipCache[hostname]) return this.ipCache[hostname];
 
         try {
@@ -106,12 +107,10 @@ export class TradeService implements OnModuleInit {
                 return ip;
             }
         } catch {
-            this.logger.warn(
-                `[DNS] DoH failed for ${hostname}, using hardcoded/system fallback...`,
-            );
+            // Silence DNS errors
         }
 
-        return this.ipCache[hostname] || hostname;
+        return null;
     }
 
     async attemptBuy(tokenMint: string): Promise<{ success: boolean; message: string }> {
@@ -221,7 +220,12 @@ export class TradeService implements OnModuleInit {
                     lookup: async (h, o, cb) => {
                         try {
                             const ip = await this.resolveDns(h);
-                            cb(null, ip as string, 4);
+                            if (ip) {
+                                cb(null, ip, 4);
+                            } else {
+                                // Fallback ke system DNS jika DoH gagal
+                                lookup(h, o, cb);
+                            }
                         } catch (e) {
                             cb(e as Error, '', 4);
                         }
