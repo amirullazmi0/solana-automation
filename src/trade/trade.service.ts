@@ -313,6 +313,7 @@ export class TradeService implements OnModuleInit {
             }
             return { success: false, entryPrice: 0, error: message };
         }
+    }
     private async fetchTokenSymbol(tokenMint: string): Promise<string> {
         try {
             const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
