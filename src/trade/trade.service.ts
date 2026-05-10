@@ -207,17 +207,24 @@ export class TradeService implements OnModuleInit {
         try {
             if (retryCount === 0) await new Promise((res) => setTimeout(res, Math.random() * 2000));
 
-            // Use hostname directly for Jupiter as direct IP access is blocked by Cloudflare LB
+            // Use DoH to resolve Jupiter IP since VPS DNS is broken
             const hostname = 'quote-api.jup.ag';
-            const baseUrl = `https://${hostname}`;
+            const ip = await this.resolveDns(hostname);
+            
+            // If DoH worked, use IP, otherwise fallback to hostname (which might fail but it's our last hope)
+            const baseUrl = ip && ip !== hostname ? `https://${ip}` : `https://${hostname}`;
 
-            this.logger.log(`[Jupiter] Fetching quote for ${side} (Attempt ${retryCount + 1})...`);
+            this.logger.log(`[Jupiter] Fetching quote for ${side} via ${baseUrl} (Attempt ${retryCount + 1})...`);
 
             const config = {
                 timeout: 20000,
-                headers: { 'Accept-Encoding': 'gzip, deflate, br' },
+                headers: { 
+                    'Host': hostname, // MUST be set when using IP
+                    'Accept-Encoding': 'gzip, deflate, br' 
+                },
                 httpsAgent: new https.Agent({
-                    family: 4, // Force IPv4 for VPS stability
+                    family: 4, // Force IPv4
+                    rejectUnauthorized: false, // Required when using IP with HTTPS
                 }),
             };
 
