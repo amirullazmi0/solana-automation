@@ -15,28 +15,31 @@ export class TradeService implements OnModuleInit {
     private connection: Connection;
     private wallet: Keypair;
 
-    private totalCapital: number;
-    private reserveAmount: number;
-    private totalSlots: number;
-    private positionSizeUSD: number;
-    private slippageBps = 100;
+    private readonly totalCapital: number;
+    private readonly reserveAmount: number;
+    private readonly totalSlots: number;
+    private readonly positionSizeUSD: number;
+    private readonly slippageBps: number;
 
-    // Cache for resolved IPs with hardcoded fallbacks for Jupiter
+    // Cache for resolved IPs with hardcoded fallbacks for Jupiter (Cloudflare Anycast)
     private ipCache: Record<string, string> = {
-        'quote-api.jup.ag': '104.26.11.233', // Cloudflare fallback IP 1
-        'tokens.jup.ag': '104.26.10.233', // Cloudflare fallback IP 2
+        'quote-api.jup.ag': '104.26.11.233',
+        'tokens.jup.ag': '104.26.10.233',
+        'api.jup.ag': '104.26.11.233',
+        '1.1.1.1': '1.1.1.1',
+        '8.8.8.8': '8.8.8.8',
     };
 
     constructor(
-        private configService: ConfigService,
-        private prismaService: PrismaService,
-        private reportingService: ReportingService,
+        private readonly configService: ConfigService,
+        private readonly prismaService: PrismaService,
+        private readonly reportingService: ReportingService,
     ) {
-        this.totalCapital = parseFloat(this.configService.get<string>('TOTAL_CAPITAL', '20'));
-        this.reserveAmount = parseFloat(this.configService.get<string>('RESERVE_AMOUNT', '5'));
-        this.totalSlots = parseInt(this.configService.get<string>('TOTAL_SLOTS', '4'), 10);
+        this.totalCapital = Number.parseFloat(this.configService.get<string>('TOTAL_CAPITAL', '20'));
+        this.reserveAmount = Number.parseFloat(this.configService.get<string>('RESERVE_AMOUNT', '5'));
+        this.totalSlots = Number.parseInt(this.configService.get<string>('TOTAL_SLOTS', '4'), 10);
         this.positionSizeUSD = (this.totalCapital - this.reserveAmount) / this.totalSlots;
-        this.slippageBps = parseInt(this.configService.get<string>('SLIPPAGE_BPS', '100'), 10);
+        this.slippageBps = Number.parseInt(this.configService.get<string>('SLIPPAGE_BPS', '100'), 10);
 
         this.setupWalletAndConnection();
     }
@@ -76,8 +79,7 @@ export class TradeService implements OnModuleInit {
      * Helper to resolve DNS using Google DNS-over-HTTPS if standard lookup fails
      */
     private async resolveDns(hostname: string): Promise<string> {
-        if (this.ipCache[hostname] && hostname !== 'quote-api.jup.ag')
-            return this.ipCache[hostname];
+        if (this.ipCache[hostname]) return this.ipCache[hostname];
 
         try {
             this.logger.log(`[DNS] Resolving ${hostname} via Cloudflare/Google DoH...`);
@@ -86,6 +88,7 @@ export class TradeService implements OnModuleInit {
                 .get(`https://1.1.1.1/dns-query?name=${hostname}&type=A`, {
                     headers: { accept: 'application/dns-json' },
                     timeout: 5000,
+                    httpsAgent: new https.Agent({ family: 4 }),
                 })
                 .catch(() => null);
 
@@ -94,6 +97,7 @@ export class TradeService implements OnModuleInit {
                 response = await axios
                     .get(`https://8.8.8.8/resolve?name=${hostname}&type=A`, {
                         timeout: 5000,
+                        httpsAgent: new https.Agent({ family: 4 }),
                     })
                     .catch(() => null);
             }
