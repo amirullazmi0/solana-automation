@@ -39,11 +39,11 @@ export class AppController {
                 this.logger.warn(`[FORCE BUY] Bypassing safety checks for ${tokenMint}`);
             }
 
-            // Trigger buy asynchronously
-            await this.tradeService.attemptBuy(tokenMint);
+            const result = await this.tradeService.attemptBuy(tokenMint);
 
             return res.status(HttpStatus.OK).json({
-                message: `Token ${tokenMint} passed safety checks! Buy order dispatched to Jupiter. Check your Telegram/Console for results.`,
+                message: `Token ${tokenMint} processed!`,
+                result,
             });
         } catch (error) {
             return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });

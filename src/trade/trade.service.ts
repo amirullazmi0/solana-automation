@@ -117,9 +117,11 @@ export class TradeService implements OnModuleInit {
         return this.ipCache[hostname] || hostname;
     }
 
-    async attemptBuy(tokenMint: string) {
+    async attemptBuy(tokenMint: string): Promise<{ success: boolean; message: string }> {
         const openTradesCount = await this.prismaService.trade.count({ where: { status: 'OPEN' } });
-        if (openTradesCount >= this.totalSlots) return;
+        if (openTradesCount >= this.totalSlots) {
+            return { success: false, message: 'All trading slots are full.' };
+        }
 
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN' },
@@ -135,8 +137,11 @@ export class TradeService implements OnModuleInit {
             }
         }
 
-        const amountInSol = this.positionSizeUSD / 150;
+        // Calculate amount in SOL (Price is currently hardcoded for estimation)
+        const amountInSol = this.positionSizeUSD / 150; 
         const amountInLamports = Math.floor(amountInSol * 1_000_000_000);
+
+        this.logger.log(`[Slot ${slotToUse}] Attempting to buy ${tokenMint} with ${amountInSol.toFixed(4)} SOL`);
 
         const { success, entryPrice } = await this.executeJupiterSwap(
             WRAPPED_SOL_MINT,
@@ -159,7 +164,10 @@ export class TradeService implements OnModuleInit {
             });
             this.logger.log(`[Slot ${slotToUse}] Successfully bought ${tokenMint}`);
             await this.reportingService.sendBuyAlert(tokenMint, entryPrice, slotToUse);
+            return { success: true, message: `Successfully bought ${tokenMint} at slot ${slotToUse}` };
         }
+
+        return { success: false, message: 'Swap failed on Jupiter. Check logs for details.' };
     }
 
     async executeSell(tradeId: number, currentPrice: number, isStopLoss: boolean) {
