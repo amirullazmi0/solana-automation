@@ -16,10 +16,9 @@ COPY . .
 
 # Generate Prisma Client
 RUN npx prisma generate
+RUN yarn build
 
 # Expose port
 EXPOSE 4000
 
-# Jalankan langsung menggunakan start:dev
-# Ini akan mengompile otomatis saat jalan
-CMD ["yarn", "start:dev"]
+CMD ["node", "dist/main"]
