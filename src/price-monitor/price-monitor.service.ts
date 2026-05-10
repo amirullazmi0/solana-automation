@@ -5,11 +5,18 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TradeService } from '../trade/trade.service';
 import { ReportingService } from '../reporting/reporting.service';
 import { Trade } from '@prisma/client';
+import axios from 'axios';
+import * as https from 'https';
+import { lookup } from 'dns';
 
 @Injectable()
 export class PriceMonitorService {
     private readonly logger = new Logger(PriceMonitorService.name);
     private readonly trailingDistancePercent: number;
+    private readonly jupiterApiKey: string;
+    private ipCache: Record<string, string> = {
+        'api.jup.ag': '18.239.105.107',
+    };
 
     constructor(
         private readonly configService: ConfigService,
@@ -20,6 +27,7 @@ export class PriceMonitorService {
         this.trailingDistancePercent = parseFloat(
             this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '0.5'),
         );
+        this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
 
     // Runs every 2 seconds
@@ -34,8 +42,11 @@ export class PriceMonitorService {
         for (const trade of openTrades) {
             try {
                 const currentPrice = await this.getCurrentPrice(trade.tokenMint);
-
-                await this.evaluateTrade(trade, currentPrice);
+                
+                // Jika harga gagal diambil (null/0), jangan evaluasi agar tidak panic sell
+                if (currentPrice && currentPrice > 0) {
+                    await this.evaluateTrade(trade, currentPrice);
+                }
             } catch (error) {
                 this.logger.error(
                     `Error monitoring price for ${trade.tokenMint}: ${error.message}`,
@@ -44,29 +55,63 @@ export class PriceMonitorService {
         }
     }
 
-    private async getCurrentPrice(tokenMint: string): Promise<number> {
+    private async resolveDns(hostname: string): Promise<string | null> {
+        if (this.ipCache[hostname]) return this.ipCache[hostname];
         try {
-            // Fetch current price from Jupiter Price API V2
-            const response = await fetch(`https://api.jup.ag/price/v2?ids=${tokenMint}`);
+            let response = await axios
+                .get(`https://1.1.1.1/dns-query?name=${hostname}&type=A`, {
+                    headers: { accept: 'application/dns-json' },
+                    timeout: 5000,
+                    httpsAgent: new https.Agent({ family: 4 }),
+                })
+                .catch(() => null);
 
-            if (!response.ok) {
-                this.logger.error(`Failed to fetch price for ${tokenMint}: ${response.statusText}`);
-                return 0; // Return 0 so it doesn't trigger false sells
+            if (!response) {
+                response = await axios
+                    .get(`https://8.8.8.8/resolve?name=${hostname}&type=A`, {
+                        timeout: 5000,
+                        httpsAgent: new https.Agent({ family: 4 }),
+                    })
+                    .catch(() => null);
             }
 
-            const json = await response.json();
+            const ip = response?.data?.Answer?.[0]?.data;
+            if (ip && /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) {
+                this.ipCache[hostname] = ip;
+                return ip;
+            }
+        } catch { /* Silence */ }
+        return null;
+    }
 
-            if (json.data && json.data[tokenMint] && json.data[tokenMint].price) {
-                return parseFloat(json.data[tokenMint].price);
+    private async getCurrentPrice(tokenMint: string): Promise<number | null> {
+        try {
+            const hostname = 'api.jup.ag';
+            const response = await axios.get(`https://${hostname}/price/v2?ids=${tokenMint}`, {
+                timeout: 5000,
+                headers: { 'x-api-key': this.jupiterApiKey },
+                httpsAgent: new https.Agent({
+                    family: 4,
+                    lookup: async (h, o, cb) => {
+                        try {
+                            const ip = await this.resolveDns(h);
+                            if (ip) cb(null, ip, 4);
+                            else lookup(h, o, cb);
+                        } catch (e) { cb(e as Error, '', 4); }
+                    }
+                })
+            });
+
+            const data = response.data;
+            if (data.data && data.data[tokenMint] && data.data[tokenMint].price) {
+                return parseFloat(data.data[tokenMint].price);
             }
 
-            return 0;
+            return null;
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            this.logger.error(
-                `[PriceMonitor] Error fetching price for ${tokenMint}: ${message}`,
-            );
-            return 0;
+            this.logger.error(`[PriceMonitor] Failed to fetch price for ${tokenMint}: ${message}`);
+            return null;
         }
     }
 
@@ -76,45 +121,28 @@ export class PriceMonitorService {
         // 1. Check Stop Loss (10% drop from entry)
         const hardStopLossPrice = trade.entryPrice - trade.entryPrice * 0.1;
         if (currentPrice <= hardStopLossPrice && trade.highestPrice <= trade.entryPrice * 1.05) {
-            // Execute Stop Loss if we haven't reached TTP activation (5% profit)
             this.logger.warn(`[Slot ${trade.slotNumber}] Stop Loss Triggered at $${currentPrice}`);
             await this.tradeService.executeSell(trade.id, currentPrice, true);
             return;
         }
 
         // 2. Trailing Take Profit (TTP) Logic
-        // Activate TTP when profit >= 5%
         if (profitPercent >= 5) {
             if (currentPrice > trade.highestPrice) {
-                // Price climbed, update highest price and trailing stop price
-                const newTrailingStop =
-                    currentPrice - currentPrice * (this.trailingDistancePercent / 100);
-
+                const newTrailingStop = currentPrice - currentPrice * (this.trailingDistancePercent / 100);
                 await this.prismaService.trade.update({
                     where: { id: trade.id },
-                    data: {
-                        highestPrice: currentPrice,
-                        trailingStopPrice: newTrailingStop,
-                    },
+                    data: { highestPrice: currentPrice, trailingStopPrice: newTrailingStop },
                 });
 
-                this.logger.log(
-                    `[Slot ${trade.slotNumber}] New Highest Price: $${currentPrice}. Updated Trailing Stop: $${newTrailingStop}`,
-                );
-                await this.reportingService.sendTrailingAlert(
-                    trade.tokenMint,
-                    newTrailingStop,
-                    currentPrice,
-                );
+                this.logger.log(`[Slot ${trade.slotNumber}] New High: $${currentPrice}. TSL: $${newTrailingStop}`);
+                await this.reportingService.sendTrailingAlert(trade.tokenMint, newTrailingStop, currentPrice);
             }
         }
 
         // 3. Execute Sell if price drops to or below Trailing Stop
-        // (Only applies if TTP has activated, or we use the initial -10% stop loss)
         if (currentPrice <= trade.trailingStopPrice && profitPercent >= 5) {
-            this.logger.log(
-                `[Slot ${trade.slotNumber}] Trailing Take Profit Triggered at $${currentPrice}`,
-            );
+            this.logger.log(`[Slot ${trade.slotNumber}] TTP Triggered at $${currentPrice}`);
             await this.tradeService.executeSell(trade.id, currentPrice, false);
         }
     }

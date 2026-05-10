@@ -9,16 +9,17 @@ import * as https from 'https';
 export class AnalyzerService {
     private readonly logger = new Logger(AnalyzerService.name);
     private readonly connection: Connection;
+    private readonly jupiterApiKey: string;
     private ipCache: Record<string, string> = {
+        'api.jup.ag': '18.239.105.107',
         'api.rugcheck.xyz': '104.26.0.126',
         'api.dexscreener.com': '104.26.8.188',
     };
 
     constructor(private readonly configService: ConfigService) {
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
-        if (rpcEndpoint) {
-            this.connection = new Connection(rpcEndpoint, 'confirmed');
-        }
+        this.connection = new Connection(rpcEndpoint, 'confirmed');
+        this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
 
     /**
