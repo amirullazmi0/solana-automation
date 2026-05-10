@@ -21,12 +21,12 @@ export class TradeService implements OnModuleInit {
     private readonly totalSlots: number;
     private readonly positionSizeUSD: number;
     private readonly slippageBps: number;
+    private readonly jupiterApiKey: string;
 
     // Cache for resolved IPs
     private ipCache: Record<string, string> = {
-        'quote-api.jup.ag': '104.26.11.233', // Cloudflare IP 1
-        'api.jup.ag': '104.26.10.233',      // Cloudflare IP 2
-        'tokens.jup.ag': '172.67.74.132',   // Cloudflare IP 3
+        'api.jup.ag': '18.239.105.107',     // Jupiter Paid Endpoint (AWS)
+        'quote-api.jup.ag': '104.26.11.233', // Fallback
         '1.1.1.1': '1.1.1.1',
         '8.8.8.8': '8.8.8.8',
     };
@@ -41,6 +41,7 @@ export class TradeService implements OnModuleInit {
         this.totalSlots = Number.parseInt(this.configService.get<string>('TOTAL_SLOTS', '4'), 10);
         this.positionSizeUSD = (this.totalCapital - this.reserveAmount) / this.totalSlots;
         this.slippageBps = Number.parseInt(this.configService.get<string>('SLIPPAGE_BPS', '100'), 10);
+        this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY');
 
         this.setupWalletAndConnection();
     }
@@ -206,8 +207,8 @@ export class TradeService implements OnModuleInit {
         try {
             if (retryCount === 0) await new Promise((res) => setTimeout(res, Math.random() * 2000));
 
-            // Jurus Pamungkas: Override DNS di level Node.js
-            const hostname = 'quote-api.jup.ag';
+            // Jurus Pamungkas: Pakai Paid Endpoint & API Key
+            const hostname = 'api.jup.ag';
             const baseUrl = `https://${hostname}`;
 
             this.logger.log(`[Jupiter] Fetching quote for ${side} (Attempt ${retryCount + 1})...`);
@@ -215,7 +216,8 @@ export class TradeService implements OnModuleInit {
             const config = {
                 timeout: 20000,
                 headers: { 
-                    'Accept-Encoding': 'gzip, deflate, br' 
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'x-api-key': this.jupiterApiKey
                 },
                 httpsAgent: new https.Agent({
                     family: 4,
@@ -236,7 +238,7 @@ export class TradeService implements OnModuleInit {
                 }),
             };
 
-            const quoteUrl = `${baseUrl}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${this.slippageBps}`;
+            const quoteUrl = `${baseUrl}/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${this.slippageBps}`;
             const quoteResponse = await axios.get(quoteUrl, config);
             const quoteData = quoteResponse.data;
 
@@ -246,7 +248,7 @@ export class TradeService implements OnModuleInit {
             }
 
             const swapResponse = await axios.post(
-                `${baseUrl}/v6/swap`,
+                `${baseUrl}/swap/v1/swap`,
                 {
                     quoteResponse: quoteData,
                     userPublicKey: this.wallet.publicKey.toString(),
