@@ -87,6 +87,7 @@ export class PriceMonitorService {
                     liquidity: pair.liquidity?.usd || 0 
                 };
             }
+            return null;
         } catch (error) {
             this.logger.debug(`[PriceMonitor] DexScreener error for ${tokenMint}: ${error.message}`);
             return null;
@@ -118,7 +119,11 @@ export class PriceMonitorService {
                 this.ipCache[hostname] = ip;
                 return ip;
             }
-        } catch { /* Silence */ }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error(`[${hostname}] DNS resolution failed: ${message}. Safety skip.`);
+            return null;
+         }
         return null;
     }
 

@@ -177,8 +177,9 @@ export class AnalyzerService {
             }
             return true;
         } catch (error) {
-            this.logger.error(`[${tokenMint}] RugCheck API error: ${error.message}`);
-            return true; // Fail open
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error(`[${tokenMint}] RugCheck API unreachable: ${message}. Safety skip.`);
+            return false; // Fail-safe: Jangan beli kalau status koin tidak bisa diverifikasi
         }
     }
 }
