@@ -40,7 +40,39 @@ Bot trading Solana otomatis yang didesain untuk kecepatan tinggi, keamanan maksi
 
 ---
 
-## ⚙️ Cara Pakai Singkat
+## 🏗️ Project Structure (The Architecture)
+
+Bot ini menggunakan arsitektur modular NestJS yang dipisahkan berdasarkan fungsinya:
+
+### 1. 🔍 **The Hunter** (`src/scanner/`)
+- **File**: `scanner.service.ts`
+- **Tugas**: Memantau Pump.fun & Raydium secara real-time via WebSocket. Jika ada koin baru, bot akan memantau progresnya selama 3 menit sebelum memutuskan beli.
+
+### 2. 🧠 **The Brain** (`src/analyzer/`)
+- **File**: `analyzer.service.ts`
+- **Tugas**: Filter "God Mode". Melakukan pengecekan berjenjang:
+    1. **DexScreener**: Cek Volume, Buys, dan Velocity.
+    2. **Solana RPC**: Cek Authority (Mint/Freeze).
+    3. **RugCheck**: Verifikasi akhir keamanan token.
+
+### 3. ⚔️ **The Executioner** (`src/trade/`)
+- **File**: `trade.service.ts`
+- **Tugas**: Melakukan transaksi (Buy/Sell) menggunakan **Jupiter V6 API** dengan optimasi **Priority Fee** untuk kecepatan maksimal.
+
+### 4. 🛡️ **The Guardian** (`src/price-monitor/`)
+- **File**: `price-monitor.service.ts`
+- **Tugas**: Monitoring real-time setiap 5 detik untuk koin yang sedang dipegang:
+    - **Anti-Slow Rug**: Panic sell jika likuiditas ditarik > 15%.
+    - **Trailing Stop**: Mengunci profit secara dinamis.
+    - **Patience Logic**: Mencegah panic sell dalam 60 detik pertama.
+
+### 📱 **The Messenger** (`src/reporting/`)
+- **File**: `reporting.service.ts`
+- **Tugas**: Mengirim laporan lengkap ke Telegram (Buy, Sell, Trailing Update, PnL).
+
+---
+
+## ⚙️ Cara Pakai & Konfigurasi
 1. Konfigurasi `.env` (RPC, Wallet, Strategy).
 2. `yarn build` & `npx prisma db push`.
 3. `yarn start:dev` atau `yarn deploy:vps`.
