@@ -25,8 +25,9 @@ export class TradeService implements OnModuleInit {
 
     // Cache for resolved IPs
     private ipCache: Record<string, string> = {
-        'api.jup.ag': '18.239.105.107',     // Jupiter Paid Endpoint (AWS)
-        'quote-api.jup.ag': '104.26.11.233', // Fallback
+        'api.jup.ag': '18.239.105.107',       // Jupiter Main
+        'quote-api.jup.ag': '104.26.11.233',   // Jupiter Quote Fallback
+        'price.jup.ag': '104.26.10.233',       // Jupiter Price API
         '1.1.1.1': '1.1.1.1',
         '8.8.8.8': '8.8.8.8',
     };
@@ -281,7 +282,10 @@ export class TradeService implements OnModuleInit {
                     userPublicKey: this.wallet.publicKey.toString(),
                     wrapAndUnwrapSol: true,
                     dynamicComputeUnitLimit: true,
-                    prioritizationFeeLamports: 'auto',
+                    // "Pecah Telur" Mode: Bayar 2x lebih mahal biar nyalip antrean
+                    prioritizationFeeLamports: {
+                        autoMultiplier: 2
+                    },
                 },
                 config,
             );
@@ -293,9 +297,18 @@ export class TradeService implements OnModuleInit {
 
             const txid = await this.connection.sendRawTransaction(transaction.serialize(), {
                 skipPreflight: true,
-                maxRetries: 3,
+                maxRetries: 5, // Tambah retry kirim
             });
-            await this.connection.confirmTransaction(txid, 'confirmed');
+            
+            this.logger.log(`[Jupiter] Transaction sent: ${txid}. Waiting for confirmation...`);
+            
+            // Konfirmasi lebih agresif
+            const latestBlockhash = await this.connection.getLatestBlockhash();
+            await this.connection.confirmTransaction({
+                signature: txid,
+                blockhash: latestBlockhash.blockhash,
+                lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
+            }, 'confirmed');
 
             return { success: true, entryPrice: entryPrice || 1 };
         } catch (error) {
