@@ -29,40 +29,42 @@ export class AnalyzerService {
      * Safety filter to check if token is safe and trending.
      */
     async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: { liquidity: number; marketCap: number } }> {
-        this.logger.log(`Analyzing token ${tokenMint}...`);
-
         try {
+            // 1. CEK TRACTION DULU (DexScreener - REST API)
+            // Ini menghemat jatah RPC karena kita cuma lanjut kalau koinnya beneran rame.
+            const traction = await this.checkMarketTraction(tokenMint);
+            if (!traction.passed) return { safe: false };
+
+            this.logger.log(`[${tokenMint}] 🔥 Traction detected (Velocity: ${traction.velocity?.toFixed(2)}). Checking safety...`);
+
+            // 2. CEK AUTHORITY (Solana RPC)
             const mintPublicKey = new PublicKey(tokenMint);
             let mintInfo;
             
-            // Fetch Mint Info
             for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
                     mintInfo = await getMint(this.connection, mintPublicKey);
                     break;
                 } catch (e) {
-                    this.logger.error(`[${tokenMint}] Failed to fetch mint info: ${e.message}`);
-                    const delay = 500 * attempt;
+                    const isRateLimit = e.message?.includes('429');
+                    const delay = isRateLimit ? 2000 * attempt : 500 * attempt;
+                    
+                    if (isRateLimit) this.logger.warn(`[${tokenMint}] RPC Rate Limit! Waiting ${delay}ms...`);
                     if (attempt === 3) return { safe: false };
                     await new Promise((resolve) => setTimeout(resolve, delay));
                 }
             }
 
-            // 1. Check Authority
             if (mintInfo.mintAuthority !== null || mintInfo.freezeAuthority !== null) {
                 this.logger.warn(`[${tokenMint}] Authority still enabled. Skip.`);
                 return { safe: false };
             }
 
-            // 2. RugCheck API
+            // 3. RUGCHECK (REST API)
             const isRugCheckPassed = await this.checkRugCheckAPI(tokenMint);
             if (!isRugCheckPassed) return { safe: false };
 
-            // 3. Market Traction & Velocity (Trending Check)
-            const traction = await this.checkMarketTraction(tokenMint);
-            if (!traction.passed) return { safe: false };
-
-            this.logger.log(`[${tokenMint}] ✅ Passed all safety & trending filters. Velocity: ${traction.velocity?.toFixed(2)}`);
+            this.logger.log(`[${tokenMint}] ✅ Passed all filters. Ready to buy!`);
             return { 
                 safe: true, 
                 metadata: { 
