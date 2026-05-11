@@ -1,92 +1,53 @@
-# 🦅 Solana Sniper & Scalper Bot v2.1
+# 🤖 Solana Sniper & Trend Hunter Bot (Predator Edition)
 
-![Solana Sniper](https://img.shields.io/badge/Solana-Sniper-blueviolet?style=for-the-badge&logo=solana)
-![Status](https://img.shields.io/badge/Status-Active-success?style=for-the-badge)
-![Network](https://img.shields.io/badge/Network-Mainnet-orange?style=for-the-badge)
-![Agent](https://img.shields.io/badge/Agent-Antigravity-blue?style=for-the-badge)
-
-Bot Sniper Solana otomatis yang dirancang untuk kecepatan tinggi, keamanan maksimal, dan manajemen portofolio interaktif via Telegram. Bot ini memantau koin baru secara real-time dan melakukan eksekusi cerdas berdasarkan filter keamanan yang ketat.
+Bot trading Solana otomatis yang didesain untuk kecepatan tinggi, keamanan maksimal, dan strategi trading yang cerdas. Tidak hanya sekadar "nyerok" koin baru, bot ini mencari koin yang beneran rame (**Trending**).
 
 ---
 
-## 🚀 Fitur Unggulan
+## 🚀 Fitur Utama (Current Capabilities)
 
-### 🎯 Core Trading
-- **Ultra-Fast Sniping**: Memantau koin baru (new pairs) langsung dari WebSocket **Pump.fun** dan pool **Raydium**.
-- **Smart Execution**: Integrasi **Jupiter V6 API** untuk harga swap terbaik dan slippage yang dinamis.
-- **Profit Management**: Fitur **Trailing Stop Loss** otomatis untuk mengunci profit maksimal saat harga terbang.
+### 1. 🔍 Multi-Platform Real-time Scanner
+- **Pump.fun Sniper**: Mendeteksi koin baru lahir via PumpPortal WebSocket.
+- **Raydium WSS Scanner**: Mendeteksi pool baru di Raydium secara instan.
+- **DexScreener Fallback**: Polling otomatis untuk menangkap token profil terbaru.
 
-### 🛡️ Keamanan & Proteksi
-- **3-Layer Security Filter**: Sistem filtrasi otomatis sebelum melakukan pembelian.
-- **RugCheck API**: Validasi skor keamanan token untuk menghindari "Rug Pull".
-- **Liquidity Analysis**: Verifikasi likuiditas via **DexScreener** (Minimal **$1.000 USD**) untuk memastikan pintu keluar (exit) yang aman.
-- **Authority Check**: Memastikan Mint & Freeze Authority sudah dicabut oleh owner token.
+### 2. 💎 Smart Diamond Hands (Intelligent Exit)
+- **Smart Stop Loss**: Tidak akan panik jual jika koin sedang minus tapi **Buy Pressure** masih tinggi (Hold for Rebound).
+- **Dynamic Trailing Stop**: Mengunci profit secara otomatis saat harga naik, memberikan ruang koin untuk terus terbang.
+- **Configurable Risk**: Batas rugi (Stop Loss) bisa diatur fleksibel lewat `.env`.
 
-### 🌐 Infrastruktur & Konektivitas (Resilience)
-- **Anti-Blocking System**: Menggunakan jalur **IPv4 Forced** untuk stabilitas koneksi di VPS.
-- **DNS Hardening**: Multi-layer resolution menggunakan **Hardcoded IP fallback** untuk Jupiter API dan **DNS-over-HTTPS (DoH)** via Cloudflare/Google.
-- **Telegram Command Center**: Kontrol penuh via Telegram (`/status`, `/balance`) dan notifikasi real-time setiap ada transaksi.
+### 3. 🔥 Trend Hunter Logic
+- **Market Traction Check**: Hanya membeli koin yang memiliki **Volume, Likuiditas, dan Transaksi** yang valid dalam 5 menit terakhir.
+- **Anti-Sepi Retry**: Memantau koin baru selama 3 menit pertama; jika meledak, bot langsung masuk. Jika sepi, bot akan mengabaikannya.
 
-### 🤖 AI Agent Integration
-- **Antigravity Rules**: Menggunakan folder `.agents` untuk standarisasi kode (No `any` types, 4-space indentation).
-- **Automated Commit**: Alur kerja Git otomatis berbasis context untuk menjaga riwayat pengembangan yang profesional.
+### 4. 🛡️ Infrastructure Hardening
+- **Helius Private RPC**: Koneksi stabil dan cepat menggunakan Private RPC & WSS.
+- **DNS Hardening**: Menggunakan fallback DoH (Cloudflare/Google) untuk menghindari blokir ISP pada API Jupiter/RugCheck.
+- **IPv4 Force**: Dioptimalkan untuk kestabilan koneksi di VPS.
+
+### 5. 📊 Real-time Reporting & Analytics
+- **Telegram Alerts**: Laporan instan via Telegram lengkap dengan simbol token, harga entry, harga exit, dan persentase profit/loss (PnL).
+- **Trade History**: Menyimpan data perdagangan lengkap (termasuk simbol dan exit price) ke database PostgreSQL.
 
 ---
 
 ## 🛠️ Tech Stack
-
-- **Framework**: [NestJS](https://nestjs.com/) (Node.js)
-- **Database**: [PostgreSQL](https://www.postgresql.org/)
-- **ORM**: [Prisma](https://www.prisma.io/)
-- **Blockchain**: [Solana Web3.js](https://solana-labs.github.io/solana-web3.js/) & [Jupiter SDK](https://jup.ag/)
-- **Deployment**: [Docker](https://www.docker.com/) & [CapRover](https://caprover.com/)
-
----
-
-## 📦 Instalasi & Penggunaan
-
-### 1. Persiapan Lokal
-```bash
-git clone <your-repo-url>
-cd solana-automation
-yarn install
-```
-
-### 2. Konfigurasi Environment
-Buat file `.env` dan lengkapi datanya:
-```env
-DATABASE_URL="postgresql://user:pass@host:port/db"
-PRIVATE_KEY="your_base58_private_key"
-RPC_ENDPOINT="https://api.mainnet-beta.solana.com"
-WSS_ENDPOINT="wss://api.mainnet-beta.solana.com"
-TELEGRAM_BOT_TOKEN="your_bot_token"
-TELEGRAM_CHAT_ID="your_chat_id"
-```
-
-### 3. Jalankan Bot
-```bash
-# Sinkronisasi database
-npx prisma db push
-
-# Jalankan mode development
-yarn start:dev
-```
+- **Framework**: NestJS (Node.js)
+- **Database**: Prisma ORM with PostgreSQL
+- **Blockchain**: Solana Web3.js (@solana/web3.js)
+- **DEX Integration**: Jupiter V6 API, PumpPortal, DexScreener, RugCheck.
+- **Deployment**: CapRover / Docker
 
 ---
 
-## 🔄 Workflow Pengembangan
-
-Gunakan perintah ini jika Anda menggunakan asisten AI Antigravity:
-- **`/commit`** : Melakukan commit otomatis dengan pesan berbasis konteks per-kerjaan.
-- **`yarn deploy:vps`** : Deploy otomatis ke server CapRover.
-
----
-
-## 🤖 Perintah Telegram
-- `/status` : Melihat daftar trade aktif, profit/loss berjalan, dan status bot.
-- `/balance` : Cek saldo SOL pada wallet yang digunakan bot.
+## ⚙️ Cara Pakai Singkat
+1. Konfigurasi `.env` (RPC, Wallet, Strategy).
+2. `yarn build` & `npx prisma db push`.
+3. `yarn start:dev` atau `yarn deploy:vps`.
 
 ---
 
-**Author**: Amirull Azmi & Antigravity (Google DeepMind)
-**License**: MIT
+## ⚠️ Disclaimer
+Trading koin meme memiliki risiko sangat tinggi. Bot ini hanyalah alat bantu. Selalu gunakan **"Uang Dingin"** dan lakukan riset mandiri sebelum trading.
+
+**Developed with ❤️ by Antigravity for Amirull** 🦾🚀
