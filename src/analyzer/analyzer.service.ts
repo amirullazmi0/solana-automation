@@ -78,11 +78,11 @@ export class AnalyzerService {
             return { 
                 safe: true, 
                 metadata: { 
-                    liquidity: traction.liquidity || 0, 
-                    marketCap: traction.marketCap || 0,
-                    socials: traction.socials
+                    liquidity: (traction as any).liquidity || 0, 
+                    marketCap: (traction as any).marketCap || 0,
+                    socials: (traction as any).socials
                 } 
-            };
+            } as any;
         } catch (error) {
             this.logger.error(`[${tokenMint}] Analysis failed: ${error.message}`);
             return { safe: false };

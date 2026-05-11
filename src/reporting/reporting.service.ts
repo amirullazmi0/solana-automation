@@ -200,7 +200,7 @@ export class ReportingService implements OnModuleInit {
             try {
                 await this.bot.sendMessage(this.chatId, message, { 
                     parse_mode: 'Markdown',
-                    ...options
+                    ...(options as any)
                 });
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
