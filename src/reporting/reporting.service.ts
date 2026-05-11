@@ -156,10 +156,23 @@ export class ReportingService implements OnModuleInit {
         }
     }
 
-    async sendBuyAlert(tokenMint: string, price: number, slotUsed: number, symbol?: string) {
+    async sendBuyAlert(tokenMint: string, price: number, slotUsed: number, symbol?: string, socials?: { twitter?: string, telegram?: string, website?: string }) {
         const displaySymbol = symbol || 'UNKNOWN';
         const message = `🚀 *BUY ALERT*\nToken: *${displaySymbol}*\nMint: \`${tokenMint}\`\nPrice: \`$${price.toFixed(8)}\`\nSlot Used: \`${slotUsed}\``;
-        await this.sendMessage(message);
+        
+        const buttons = [];
+        if (socials?.twitter) buttons.push({ text: '🐦 Twitter', url: socials.twitter });
+        if (socials?.telegram) buttons.push({ text: '📱 Telegram', url: socials.telegram });
+        if (socials?.website) buttons.push({ text: '🌐 Website', url: socials.website });
+        buttons.push({ text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` });
+
+        const options = buttons.length > 0 ? {
+            reply_markup: {
+                inline_keyboard: [buttons]
+            }
+        } : {};
+
+        await this.sendMessage(message, options);
     }
 
     async sendTrailingAlert(tokenMint: string, newStopPrice: number, currentPrice: number, symbol?: string) {
@@ -182,10 +195,13 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(message);
     }
 
-    private async sendMessage(message: string) {
+    private async sendMessage(message: string, options: any = {}) {
         if (this.bot && this.chatId) {
             try {
-                await this.bot.sendMessage(this.chatId, message, { parse_mode: 'Markdown' });
+                await this.bot.sendMessage(this.chatId, message, { 
+                    parse_mode: 'Markdown',
+                    ...options
+                });
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
                 this.logger.error(`Failed to send telegram message: ${message}`);

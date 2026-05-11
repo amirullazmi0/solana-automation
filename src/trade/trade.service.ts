@@ -125,7 +125,7 @@ export class TradeService implements OnModuleInit {
         return null;
     }
 
-    async attemptBuy(tokenMint: string, metadata?: { liquidity: number, marketCap: number }): Promise<{ success: boolean; message: string }> {
+    async attemptBuy(tokenMint: string, metadata?: { liquidity: number, marketCap: number, socials?: any }): Promise<{ success: boolean; message: string }> {
         // 1. Cek apakah sudah punya koin ini (OPEN)
         const existing = await this.prismaService.trade.findFirst({
             where: { tokenMint, status: 'OPEN' }
@@ -183,7 +183,7 @@ export class TradeService implements OnModuleInit {
                 },
             });
             this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
-            await this.reportingService.sendBuyAlert(tokenMint, entryPrice, slotToUse, symbol);
+            await this.reportingService.sendBuyAlert(tokenMint, entryPrice, slotToUse, symbol, metadata?.socials);
             return { success: true, message: `Successfully bought ${symbol} at slot ${slotToUse}` };
         }
 

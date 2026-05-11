@@ -69,7 +69,8 @@ export class AnalyzerService {
                 safe: true, 
                 metadata: { 
                     liquidity: traction.liquidity || 0, 
-                    marketCap: traction.marketCap || 0 
+                    marketCap: traction.marketCap || 0,
+                    socials: traction.socials
                 } 
             };
         } catch (error) {
@@ -80,11 +81,11 @@ export class AnalyzerService {
 
     private async checkMarketTraction(tokenMint: string): Promise<{ passed: boolean; liquidity?: number; marketCap?: number; velocity?: number }> {
         try {
-            const minLiq = parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
-            const minVol = parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '2000'));
-            const minBuys = parseInt(this.configService.get<string>('MIN_BUY_COUNT', '15'));
-            const minVLR = parseFloat(this.configService.get<string>('MIN_VL_RATIO', '2.0'));
-            const minVelocity = parseFloat(this.configService.get<string>('MIN_VOLUME_MCAP_RATIO', '0.1'));
+            const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
+            const minVol = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '2000'));
+            const minBuys = Number.parseInt(this.configService.get<string>('MIN_BUY_COUNT', '15'));
+            const minVLR = Number.parseFloat(this.configService.get<string>('MIN_VL_RATIO', '2.0'));
+            const minVelocity = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_MCAP_RATIO', '0.1'));
 
             this.logger.log(`[${tokenMint}] Checking market traction via DexScreener...`);
             const response = await axios.get(
@@ -117,7 +118,12 @@ export class AnalyzerService {
                 passed: true, 
                 liquidity, 
                 marketCap,
-                velocity 
+                velocity,
+                socials: {
+                    twitter: pair.info?.socials?.find(s => s.type === 'twitter')?.url,
+                    telegram: pair.info?.socials?.find(s => s.type === 'telegram')?.url,
+                    website: pair.info?.websites?.[0]?.url
+                }
             };
         } catch (error) {
             this.logger.error(`[${tokenMint}] Traction check failed: ${error.message}`);
