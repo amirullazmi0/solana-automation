@@ -154,12 +154,18 @@ export class PriceMonitorService {
 
     private async evaluateTrade(trade: Trade, currentPrice: number) {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
+        const holdingTimeSeconds = (Date.now() - new Date(trade.createdAt).getTime()) / 1000;
 
         // 1. Smart Stop Loss Check (Hanya jalan jika profit belum pernah sentuh 5%)
         const stopLossThreshold = trade.entryPrice - trade.entryPrice * (this.stopLossPercent / 100);
         
         if (trade.highestPrice <= trade.entryPrice * 1.05) {
             if (currentPrice <= stopLossThreshold) {
+                // FITUR SABAR: Jangan jual kalau baru beli kurang dari 60 detik (kecuali profit)
+                if (holdingTimeSeconds < 60) {
+                    return; 
+                }
+
                 this.logger.log(`[Slot ${trade.slotNumber}] Price hit Stop Loss threshold ($${currentPrice}). Checking Buy Pressure...`);
                 
                 // Smart Check: Kalau koin lagi rame yang beli (Buy Pressure), kita sabar dulu
