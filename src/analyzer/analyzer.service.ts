@@ -18,8 +18,13 @@ export interface Website {
 export interface DexScreenerPair {
     liquidity?: { usd?: number };
     fdv?: number;
-    volume?: { m5?: number };
-    txns?: { m5?: { buys?: number, sells?: number } };
+    pairCreatedAt?: number;
+    priceChange?: { h1?: number };
+    volume?: { m5?: number, h1?: number };
+    txns?: { 
+        m5?: { buys?: number, sells?: number },
+        h1?: { buys?: number, sells?: number }
+    };
     info?: {
         socials?: SocialLink[];
         websites?: Website[];
@@ -125,10 +130,11 @@ export class AnalyzerService {
     private async checkMarketTraction(tokenMint: string): Promise<{ passed: boolean; liquidity?: number; marketCap?: number; velocity?: number; socials?: TokenMetadata['socials'] }> {
         try {
             const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
-            const minVol = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '2000'));
-            const minBuys = Number.parseInt(this.configService.get<string>('MIN_BUY_COUNT', '15'));
-            const minVLR = Number.parseFloat(this.configService.get<string>('MIN_VL_RATIO', '2.0'));
-            const minVelocity = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_MCAP_RATIO', '0.1'));
+            const minVol = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '1000'));
+            const minBuys = Number.parseInt(this.configService.get<string>('MIN_BUY_COUNT', '20'));
+            const minVelocity = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_MCAP_RATIO', '0.05'));
+            const minMCap = Number.parseFloat(this.configService.get<string>('MIN_MCAP', '30000'));
+            const maxMCap = Number.parseFloat(this.configService.get<string>('MAX_MCAP', '150000'));
 
             this.logger.log(`[${tokenMint}] Checking market traction via DexScreener...`);
             const response = await axios.get<{ pairs: DexScreenerPair[] }>(
@@ -153,16 +159,44 @@ export class AnalyzerService {
                 return { passed: false };
             }
             
-            const vlRatio = volume5m / (liquidity || 1);
-            const velocity = volume5m / (marketCap || 1); // Volume 5m / Market Cap
-
-            if (liquidity < minLiq || volume5m < minVol || vlRatio < minVLR || buys5m < minBuys) {
+            const velocity = volume5m / (marketCap || 1);
+            
+            // 📊 TREND FOLLOWER LOGIC: MCap Sweet Spot
+            if (marketCap < minMCap || marketCap > maxMCap) {
+                this.logger.debug(`[${tokenMint}] Out of MCap range: $${marketCap.toFixed(0)}`);
                 return { passed: false };
             }
 
-            // Velocity Check: Cari koin yang volume-nya meledak dibanding Market Cap
+            // 🕒 AGE CHECK: Pastikan koin sudah berumur (minimal 12 jam, max 4 hari)
+            const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
+            if (ageHours < 12 || ageHours > 96) {
+                this.logger.debug(`[${tokenMint}] Age out of bounds: ${ageHours.toFixed(1)}h. We want 12h-96h.`);
+                return { passed: false };
+            }
+
+            // 🚀 VOLUME SURGE: Volume 5m > 20% dari Volume 1h (Tanda breakout)
+            const volumeH1 = pair.volume?.h1 || 0;
+            const volumeSurge = volume5m / (volumeH1 / 12 || 1); // Rata-rata 5m dalam 1 jam
+            if (volumeSurge < 2) { // Minimal 2x lipat dari rata-rata volume per 5 menit di 1 jam terakhir
+                this.logger.debug(`[${tokenMint}] No volume surge: ${volumeSurge.toFixed(2)}x. Skip.`);
+                return { passed: false };
+            }
+
+            // 🐋 SMART MONEY ACCUMULATION: Harga anteng tapi banyak yang nampung
+            const priceChange1h = Math.abs(pair.priceChange?.h1 || 0);
+            const buys1h = pair.txns?.h1?.buys || 0;
+            const sells1h = pair.txns?.h1?.sells || 0;
+            const isAccumulating = priceChange1h < 10 && buys1h > sells1h * 1.5;
+
+            if (liquidity < minLiq || volume5m < minVol || buys5m < minBuys) {
+                // Jika koin sedang akumulasi, kita kasih toleransi volume sedikit lebih rendah
+                if (!isAccumulating) return { passed: false };
+                this.logger.log(`[${tokenMint}] 🐋 Accumulation detected! Price flat (${priceChange1h.toFixed(1)}%), Buys > Sells. Proceeding...`);
+            }
+
+            // Velocity Check
             if (velocity < minVelocity) {
-                this.logger.warn(`[${tokenMint}] Low Velocity: ${velocity.toFixed(3)} (Min ${minVelocity}). Not hot enough.`);
+                this.logger.warn(`[${tokenMint}] Low Velocity: ${velocity.toFixed(3)} (Min ${minVelocity}).`);
                 return { passed: false };
             }
 
