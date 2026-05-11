@@ -160,13 +160,13 @@ export class ReportingService implements OnModuleInit {
         const displaySymbol = symbol || 'UNKNOWN';
         const message = `🚀 *BUY ALERT*\nToken: *${displaySymbol}*\nMint: \`${tokenMint}\`\nPrice: \`$${price.toFixed(8)}\`\nSlot Used: \`${slotUsed}\``;
         
-        const buttons = [];
+        const buttons: any[] = [];
         if (socials?.twitter) buttons.push({ text: '🐦 Twitter', url: socials.twitter });
         if (socials?.telegram) buttons.push({ text: '📱 Telegram', url: socials.telegram });
         if (socials?.website) buttons.push({ text: '🌐 Website', url: socials.website });
         buttons.push({ text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` });
 
-        const options = buttons.length > 0 ? {
+        const options: any = buttons.length > 0 ? {
             reply_markup: {
                 inline_keyboard: [buttons]
             }
