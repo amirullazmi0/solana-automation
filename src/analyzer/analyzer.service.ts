@@ -174,33 +174,6 @@ export class AnalyzerService {
         }
     }
 
-    private async checkRugCheckAPI(tokenMint: string): Promise<boolean> {
-        try {
-            // RugCheck API: Cek apakah koin ini scam atau aman
-            const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
-                timeout: 5000,
-                httpsAgent: this.getHttpsAgent()
-            });
-
-            if (!response.data) return false;
-
-            const score = response.data.score || 0;
-            // Score di bawah 1000 biasanya aman untuk micin (Good/Warning)
-            // Kalau "Danger" biasanya score-nya tinggi banget (>5000)
-            if (score > 3000) {
-                this.logger.warn(`[${tokenMint}] High Risk Score: ${score}. Skip.`);
-                return false;
-            }
-
-            return true;
-        } catch (error) {
-            this.logger.error(`RugCheck API Error: ${error.message}`);
-            // Jika RugCheck error, kita anggap aman saja (opsional) atau tetap block.
-            // Di sini saya pilih tetap block biar aman (Fail-Closed).
-            return false;
-        }
-    }
-
     private async resolveDns(hostname: string): Promise<string> {
         if (this.ipCache[hostname]) return this.ipCache[hostname];
         try {
@@ -241,23 +214,33 @@ export class AnalyzerService {
 
     private async checkRugCheckAPI(tokenMint: string): Promise<boolean> {
         try {
-            const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report/summary`, { 
-                timeout: 10000,
+            // RugCheck API: Cek skor risiko dan daftar bahaya (danger)
+            const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
+                timeout: 5000,
                 httpsAgent: this.getHttpsAgent()
             });
 
-            const risks = (response.data.risks as Array<{ level: string; name: string }>) || [];
-            const highRisks = risks.filter((risk) => risk.level === 'danger');
+            if (!response.data) return false;
 
-            if (highRisks.length > 0) {
-                this.logger.warn(`[${tokenMint}] RugCheck danger: ${highRisks.map((r) => r.name).join(', ')}`);
+            // 1. Cek Skor (Score > 3000 = Skip)
+            const score = response.data.score || 0;
+            if (score > 3000) {
+                this.logger.warn(`[${tokenMint}] High Risk Score: ${score}. Skip.`);
                 return false;
             }
+
+            // 2. Cek Risiko Spesifik (Danger = Skip)
+            const risks = (response.data.risks as Array<{ level: string; name: string }>) || [];
+            const highRisks = risks.filter((risk) => risk.level === 'danger');
+            if (highRisks.length > 0) {
+                this.logger.warn(`[${tokenMint}] RugCheck DANGER: ${highRisks.map((r) => r.name).join(', ')}`);
+                return false;
+            }
+
             return true;
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logger.error(`[${tokenMint}] RugCheck API unreachable: ${message}. Safety skip.`);
-            return false; // Fail-safe: Jangan beli kalau status koin tidak bisa diverifikasi
+            this.logger.error(`RugCheck API Error: ${error.message}`);
+            return false; // Fail-Closed
         }
     }
 }
