@@ -164,16 +164,18 @@ export class AnalyzerService {
             // 📊 TREND FOLLOWER LOGIC: MCap Sweet Spot
             if (marketCap < minMCap || marketCap > maxMCap) {
                 this.logger.debug(`[${tokenMint}] Out of MCap range: $${marketCap.toFixed(0)}`);
-                // PERMANENT: MCap kegedean nggak bakal turun, kekecilan nggak bakal naik drastis
-                return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: marketCap > maxMCap };
+                // PERMANENT: MCap kekecilan ATAU kegedean nggak berubah drastis dalam 10 menit
+                // Kalau nanti MCap mereka masuk range, Discovery Poller yang akan nangkap lagi
+                return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: true };
             }
 
             // 🕒 AGE CHECK: Pastikan koin sudah berumur (minimal 12 jam, max 4 hari)
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
             if (ageHours < 12 || ageHours > 96) {
                 this.logger.debug(`[${tokenMint}] Age out of bounds: ${ageHours.toFixed(1)}h. We want 12h-96h.`);
-                // PERMANENT: Koin terlalu tua nggak bakal muda lagi
-                return { passed: false, reason: ageHours > 96 ? 'too_old' : 'too_young', permanent: ageHours > 96 };
+                // PERMANENT: Koin terlalu tua tidak akan muda, koin < 10 jam tidak akan 12 jam dalam 10 menit
+                const isPermPermanent = ageHours > 96 || ageHours < 10;
+                return { passed: false, reason: ageHours > 96 ? 'too_old' : 'too_young', permanent: isPermPermanent };
             }
 
             // 🚀 VOLUME SURGE: Volume 5m > 20% dari Volume 1h (Tanda breakout)
