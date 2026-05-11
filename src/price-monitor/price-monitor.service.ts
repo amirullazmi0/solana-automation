@@ -182,8 +182,8 @@ export class PriceMonitorService {
             }
         }
 
-        // 2. Update Trailing Stop if price hits new highs (Profit >= 5%)
-        if (profitPercent >= 5) {
+        // 2. Update Trailing Stop if price hits new highs (Profit >= 3% - Micro Compound Mode)
+        if (profitPercent >= 3) {
             if (currentPrice > trade.highestPrice) {
                 const newTrailingStop = currentPrice - currentPrice * (this.trailingDistancePercent / 100);
                 await this.prismaService.trade.update({

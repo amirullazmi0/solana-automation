@@ -183,6 +183,7 @@ export class AnalyzerService {
             const minLiq = parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
             const minVol = parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '1000'));
             const minBuys = parseInt(this.configService.get<string>('MIN_BUY_COUNT', '10'));
+            const minVLR = parseFloat(this.configService.get<string>('MIN_VL_RATIO', '1.5'));
 
             this.logger.log(`[${tokenMint}] Checking market traction via DexScreener...`);
             const response = await axios.get(
@@ -202,6 +203,9 @@ export class AnalyzerService {
             const liquidity = pair.liquidity?.usd || 0;
             const volume5m = pair.volume?.m5 || 0;
             const buys5m = pair.txns?.m5?.buys || 0;
+            
+            // V/L Ratio Logic: Apakah Volume lebih gede dari Likuiditas?
+            const vlRatio = volume5m / (liquidity || 1);
 
             if (liquidity < minLiq) {
                 this.logger.warn(`[${tokenMint}] Liquidity too low: $${liquidity.toFixed(0)} (Min $${minLiq})`);
@@ -213,12 +217,17 @@ export class AnalyzerService {
                 return false;
             }
 
+            if (vlRatio < minVLR) {
+                this.logger.warn(`[${tokenMint}] V/L Ratio too low: ${vlRatio.toFixed(2)} (Min ${minVLR}). Token is too quiet.`);
+                return false;
+            }
+
             if (buys5m < minBuys) {
                 this.logger.warn(`[${tokenMint}] Buys (5m) too low: ${buys5m} txs (Min ${minBuys})`);
                 return false;
             }
 
-            this.logger.log(`[${tokenMint}] 🔥 TRENDING! Liq: $${liquidity.toFixed(0)} | Vol5m: $${volume5m.toFixed(0)} | Buys5m: ${buys5m}`);
+            this.logger.log(`[${tokenMint}] 🔥 HOT TOKEN! Liq: $${liquidity.toFixed(0)} | VLR: ${vlRatio.toFixed(2)} | Buys5m: ${buys5m}`);
             return true;
         } catch (error) {
             this.logger.error(`[${tokenMint}] Traction check failed: ${error.message}`);
