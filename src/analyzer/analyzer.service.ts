@@ -5,9 +5,30 @@ import { getMint } from '@solana/spl-token';
 import axios from 'axios';
 import * as https from 'https';
 
+export interface SocialLink {
+    type: string;
+    url: string;
+}
+
+export interface Website {
+    label?: string;
+    url: string;
+}
+
+export interface DexScreenerPair {
+    liquidity?: { usd?: number };
+    fdv?: number;
+    volume?: { m5?: number };
+    txns?: { m5?: { buys?: number } };
+    info?: {
+        socials?: SocialLink[];
+        websites?: Website[];
+    };
+}
+
 export interface TokenMetadata {
-    liquidity?: number;
-    marketCap?: number;
+    liquidity: number;
+    marketCap: number;
     socials?: {
         twitter?: string;
         telegram?: string;
@@ -78,18 +99,18 @@ export class AnalyzerService {
             return { 
                 safe: true, 
                 metadata: { 
-                    liquidity: (traction as any).liquidity || 0, 
-                    marketCap: (traction as any).marketCap || 0,
-                    socials: (traction as any).socials
+                    liquidity: traction.liquidity || 0, 
+                    marketCap: traction.marketCap || 0,
+                    socials: traction.socials
                 } 
-            } as any;
+            };
         } catch (error) {
             this.logger.error(`[${tokenMint}] Analysis failed: ${error.message}`);
             return { safe: false };
         }
     }
 
-    private async checkMarketTraction(tokenMint: string): Promise<{ passed: boolean; liquidity?: number; marketCap?: number; velocity?: number; socials?: any }> {
+    private async checkMarketTraction(tokenMint: string): Promise<{ passed: boolean; liquidity?: number; marketCap?: number; velocity?: number; socials?: TokenMetadata['socials'] }> {
         try {
             const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
             const minVol = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '2000'));
@@ -98,18 +119,18 @@ export class AnalyzerService {
             const minVelocity = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_MCAP_RATIO', '0.1'));
 
             this.logger.log(`[${tokenMint}] Checking market traction via DexScreener...`);
-            const response = await axios.get(
+            const response = await axios.get<{ pairs: DexScreenerPair[] }>(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
                 { timeout: 5000 },
             );
 
-            const pair = (response.data as any).pairs?.[0];
+            const pair = response.data.pairs?.[0];
             if (!pair) return { passed: false };
 
-            const liquidity = (pair.liquidity as any)?.usd || 0;
-            const volume5m = (pair.volume as any)?.m5 || 0;
-            const buys5m = (pair.txns as any)?.m5?.buys || 0;
-            const marketCap = (pair as any).fdv || 0;
+            const liquidity = pair.liquidity?.usd || 0;
+            const volume5m = pair.volume?.m5 || 0;
+            const buys5m = pair.txns?.m5?.buys || 0;
+            const marketCap = pair.fdv || 0;
             
             const vlRatio = volume5m / (liquidity || 1);
             const velocity = volume5m / (marketCap || 1); // Volume 5m / Market Cap
@@ -130,9 +151,9 @@ export class AnalyzerService {
                 marketCap,
                 velocity,
                 socials: {
-                    twitter: (pair.info as any)?.socials?.find((s: any) => s.type === 'twitter')?.url,
-                    telegram: (pair.info as any)?.socials?.find((s: any) => s.type === 'telegram')?.url,
-                    website: (pair.info as any)?.websites?.[0]?.url
+                    twitter: pair.info?.socials?.find((s) => s.type === 'twitter')?.url,
+                    telegram: pair.info?.socials?.find((s) => s.type === 'telegram')?.url,
+                    website: pair.info?.websites?.[0]?.url
                 }
             };
         } catch (error) {

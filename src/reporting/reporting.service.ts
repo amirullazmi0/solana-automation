@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { Connection, PublicKey, Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
 import axios from 'axios';
+import { TokenMetadata } from '../analyzer/analyzer.service';
 
 @Injectable()
 export class ReportingService implements OnModuleInit {
@@ -156,17 +157,23 @@ export class ReportingService implements OnModuleInit {
         }
     }
 
-    async sendBuyAlert(tokenMint: string, price: number, slotUsed: number, symbol?: string, socials?: { twitter?: string, telegram?: string, website?: string }) {
+    async sendBuyAlert(
+        tokenMint: string, 
+        price: number, 
+        slotUsed: number, 
+        symbol?: string, 
+        socials?: TokenMetadata['socials']
+    ) {
         const displaySymbol = symbol || 'UNKNOWN';
         const message = `🚀 *BUY ALERT*\nToken: *${displaySymbol}*\nMint: \`${tokenMint}\`\nPrice: \`$${price.toFixed(8)}\`\nSlot Used: \`${slotUsed}\``;
         
-        const buttons: any[] = [];
+        const buttons: TelegramBot.InlineKeyboardButton[] = [];
         if (socials?.twitter) buttons.push({ text: '🐦 Twitter', url: socials.twitter });
         if (socials?.telegram) buttons.push({ text: '📱 Telegram', url: socials.telegram });
         if (socials?.website) buttons.push({ text: '🌐 Website', url: socials.website });
         buttons.push({ text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` });
 
-        const options: any = buttons.length > 0 ? {
+        const options: TelegramBot.SendMessageOptions = buttons.length > 0 ? {
             reply_markup: {
                 inline_keyboard: [buttons]
             }
@@ -195,12 +202,12 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(message);
     }
 
-    private async sendMessage(message: string, options: any = {}) {
+    private async sendMessage(message: string, options: TelegramBot.SendMessageOptions = {}) {
         if (this.bot && this.chatId) {
             try {
                 await this.bot.sendMessage(this.chatId, message, { 
                     parse_mode: 'Markdown',
-                    ...(options as any)
+                    ...options
                 });
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
