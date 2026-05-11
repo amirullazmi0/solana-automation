@@ -143,10 +143,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     }
 
     private async processNewToken(tokenMint: string) {
-        this.logger.log(`[${tokenMint}] Starting monitoring for market traction (Max 3 minutes)...`);
+        this.logger.log(`[${tokenMint}] Starting monitoring for market traction (Max 10 minutes)...`);
 
         const startTime = Date.now();
-        const maxWaitTime = 3 * 60 * 1000; // 3 Menit
+        const maxWaitTime = 10 * 60 * 1000; // 10 Menit
 
         while (Date.now() - startTime < maxWaitTime) {
             try {
@@ -167,6 +167,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             }
         }
 
-        this.logger.log(`[${tokenMint}] 💤 Token remained quiet after 3 minutes. Giving up.`);
+        this.logger.log(`[${tokenMint}] 💤 Token remained quiet after 10 minutes. Giving up.`);
+        
+        // Hapus dari memory setelah 10 menit biar kalau nanti koin ini mendadak rame lagi, bot bisa nangkap lagi
+        setTimeout(() => this.seenTokens.delete(tokenMint), 10 * 60 * 1000);
     }
 }

@@ -135,8 +135,8 @@ export class AnalyzerService {
             const marketCap = pair.fdv || 0;
 
             // 🚫 HONEYPOT DETECTION
-            // Jika ada banyak pembeli tapi NOL penjual dalam 5 menit terakhir, itu jebakan.
-            if (buys5m >= 5 && sells5m === 0) {
+            // Jika ada banyak pembeli (min 10) tapi NOL penjual dalam 5 menit terakhir, itu jebakan.
+            if (buys5m >= 10 && sells5m === 0) {
                 this.logger.warn(`[${tokenMint}] 🍯 Honeypot Detected! Buys: ${buys5m}, Sells: ${sells5m}. Skip.`);
                 return { passed: false };
             }
