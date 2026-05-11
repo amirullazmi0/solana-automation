@@ -139,7 +139,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         } catch {
             // Polling fails silently or with log
         }
-        }, 20000);
+        }, 5000);
     }
 
     private async processNewToken(tokenMint: string) {
@@ -158,9 +158,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     return; // Selesai, sudah dibeli
                 }
 
-                // Tunggu 30 detik sebelum cek ulang
-                this.logger.log(`[${tokenMint}] Still quiet... waiting 30s to re-check.`);
-                await new Promise((res) => setTimeout(res, 30000));
+                // Tunggu 5 detik sebelum cek ulang
+                this.logger.log(`[${tokenMint}] Still quiet... waiting 5s to re-check.`);
+                await new Promise((res) => setTimeout(res, 5000));
             } catch (error) {
                 this.logger.error(`Error processing token ${tokenMint}: ${error.message}`);
                 break;

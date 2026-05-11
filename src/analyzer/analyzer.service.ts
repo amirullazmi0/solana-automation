@@ -78,7 +78,7 @@ export class AnalyzerService {
                     break;
                 } catch (e) {
                     const isRateLimit = e.message?.includes('429');
-                    const delay = isRateLimit ? 2000 * attempt : 500 * attempt;
+                    const delay = isRateLimit ? 1000 * attempt : 300 * attempt;
                     
                     if (isRateLimit) this.logger.warn(`[${tokenMint}] RPC Rate Limit! Waiting ${delay}ms...`);
                     if (attempt === 3) return { safe: false };
