@@ -12,8 +12,9 @@ import { lookup } from 'dns';
 @Injectable()
 export class PriceMonitorService {
     private readonly logger = new Logger(PriceMonitorService.name);
-    private readonly trailingDistancePercent: number;
-    private readonly jupiterApiKey: string;
+    private trailingDistancePercent: number;
+    private jupiterApiKey: string;
+    private stopLossPercent: number;
     private ipCache: Record<string, string> = {
         'api.jup.ag': '18.239.105.107',
     };
@@ -25,7 +26,10 @@ export class PriceMonitorService {
         private readonly reportingService: ReportingService,
     ) {
         this.trailingDistancePercent = parseFloat(
-            this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '0.5'),
+            this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '1.5'),
+        );
+        this.stopLossPercent = parseFloat(
+            this.configService.get<string>('STOP_LOSS_PERCENT', '20.0'),
         );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
@@ -151,12 +155,22 @@ export class PriceMonitorService {
     private async evaluateTrade(trade: Trade, currentPrice: number) {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
 
-        // 1. Check Stop Loss (10% drop from entry)
-        // Jika koin belum pernah naik signifikan (Trailing belum aktif)
-        const hardStopLossPrice = trade.entryPrice - trade.entryPrice * 0.1;
+        // 1. Smart Stop Loss Check (Hanya jalan jika profit belum pernah sentuh 5%)
+        const stopLossThreshold = trade.entryPrice - trade.entryPrice * (this.stopLossPercent / 100);
+        
         if (trade.highestPrice <= trade.entryPrice * 1.05) {
-            if (currentPrice <= hardStopLossPrice) {
-                this.logger.warn(`[Slot ${trade.slotNumber}] Hard Stop Loss Triggered at $${currentPrice} (-10%)`);
+            if (currentPrice <= stopLossThreshold) {
+                this.logger.log(`[Slot ${trade.slotNumber}] Price hit Stop Loss threshold ($${currentPrice}). Checking Buy Pressure...`);
+                
+                // Smart Check: Kalau koin lagi rame yang beli (Buy Pressure), kita sabar dulu
+                const isBuyPressureHigh = await this.checkBuyPressure(trade.tokenMint);
+                
+                if (isBuyPressureHigh) {
+                    this.logger.log(`[Slot ${trade.slotNumber}] High Buy Pressure detected! Holding for potential rebound... 💎🙌`);
+                    return; // Sabar dulu, jangan jual
+                }
+
+                this.logger.warn(`[Slot ${trade.slotNumber}] Hard Stop Loss Triggered at $${currentPrice} (-${this.stopLossPercent}%)`);
                 await this.tradeService.executeSell(trade.id, currentPrice, true);
                 return;
             }
@@ -176,11 +190,36 @@ export class PriceMonitorService {
             }
         }
 
-        // 3. Execute Sell if price drops to or below Trailing Stop
-        // PENTING: Hapus syarat profitPercent >= 5 supaya kalau harga terjun bebas tetap terjual!
-        if (currentPrice <= trade.trailingStopPrice) {
-            this.logger.log(`[Slot ${trade.slotNumber}] Trailing Stop Triggered at $${currentPrice}`);
+        // 3. Trailing Stop Loss Check
+        if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice) {
+            this.logger.warn(`[Slot ${trade.slotNumber}] Trailing Stop Triggered at $${currentPrice}`);
             await this.tradeService.executeSell(trade.id, currentPrice, false);
+        }
+    }
+
+    private async checkBuyPressure(tokenMint: string): Promise<boolean> {
+        try {
+            const url = `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`;
+            const response = await axios.get(url, {
+                httpsAgent: new https.Agent({ family: 4 }),
+                timeout: 5000,
+            });
+
+            const pair = response.data.pairs?.[0];
+            if (!pair || !pair.txns?.m5) return false;
+
+            const buys = pair.txns.m5.buys || 0;
+            const sells = pair.txns.m5.sells || 0;
+
+            // Jika pembeli > 2x penjual dalam 5 menit terakhir, berarti ada tekanan beli kuat
+            if (buys > sells * 2 && buys > 5) {
+                return true;
+            }
+
+            return false;
+        } catch (error) {
+            this.logger.error(`Failed to check buy pressure: ${error.message}`);
+            return false;
         }
     }
 }
