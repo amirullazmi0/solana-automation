@@ -139,7 +139,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         } catch {
             // Polling fails silently or with log
         }
-        }, 5000);
+        }, 30000);
     }
 
     private async processNewToken(tokenMint: string) {
