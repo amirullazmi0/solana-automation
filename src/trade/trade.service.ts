@@ -4,11 +4,12 @@ import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
+import { TokenMetadata } from '../analyzer/analyzer.service';
 import axios from 'axios';
 import * as https from 'https';
 import { lookup } from 'dns';
 
-const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
+export const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 @Injectable()
 export class TradeService implements OnModuleInit {
@@ -125,7 +126,7 @@ export class TradeService implements OnModuleInit {
         return null;
     }
 
-    async attemptBuy(tokenMint: string, metadata?: { liquidity: number, marketCap: number, socials?: any }): Promise<{ success: boolean; message: string }> {
+    async attemptBuy(tokenMint: string, metadata?: TokenMetadata): Promise<{ success: boolean; message: string }> {
         // 1. Cek apakah sudah punya koin ini (OPEN)
         const existing = await this.prismaService.trade.findFirst({
             where: { tokenMint, status: 'OPEN' }

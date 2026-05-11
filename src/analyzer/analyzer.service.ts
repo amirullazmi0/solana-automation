@@ -5,6 +5,16 @@ import { getMint } from '@solana/spl-token';
 import axios from 'axios';
 import * as https from 'https';
 
+export interface TokenMetadata {
+    liquidity: number;
+    marketCap: number;
+    socials?: {
+        twitter?: string;
+        telegram?: string;
+        website?: string;
+    };
+}
+
 @Injectable()
 export class AnalyzerService {
     private readonly logger = new Logger(AnalyzerService.name);
@@ -28,7 +38,7 @@ export class AnalyzerService {
     /**
      * Safety filter to check if token is safe and trending.
      */
-    async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: { liquidity: number; marketCap: number } }> {
+    async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: TokenMetadata }> {
         try {
             // 1. CEK TRACTION DULU (DexScreener - REST API)
             // Ini menghemat jatah RPC karena kita cuma lanjut kalau koinnya beneran rame.
@@ -79,7 +89,7 @@ export class AnalyzerService {
         }
     }
 
-    private async checkMarketTraction(tokenMint: string): Promise<{ passed: boolean; liquidity?: number; marketCap?: number; velocity?: number }> {
+    private async checkMarketTraction(tokenMint: string): Promise<{ passed: boolean; liquidity?: number; marketCap?: number; velocity?: number; socials?: any }> {
         try {
             const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
             const minVol = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '2000'));
@@ -120,8 +130,8 @@ export class AnalyzerService {
                 marketCap,
                 velocity,
                 socials: {
-                    twitter: pair.info?.socials?.find(s => s.type === 'twitter')?.url,
-                    telegram: pair.info?.socials?.find(s => s.type === 'telegram')?.url,
+                    twitter: pair.info?.socials?.find((s: any) => s.type === 'twitter')?.url,
+                    telegram: pair.info?.socials?.find((s: any) => s.type === 'telegram')?.url,
                     website: pair.info?.websites?.[0]?.url
                 }
             };
