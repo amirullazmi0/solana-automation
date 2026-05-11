@@ -93,7 +93,10 @@ export class AnalyzerService {
 
             // 3. RUGCHECK (REST API)
             const isRugCheckPassed = await this.checkRugCheckAPI(tokenMint);
-            if (!isRugCheckPassed) return { safe: false };
+            if (!isRugCheckPassed) {
+                this.logger.warn(`[${tokenMint}] 🛑 RugCheck FAILED or High Risk. Skip.`);
+                return { safe: false };
+            }
 
             this.logger.log(`[${tokenMint}] ✅ Passed all filters. Ready to buy!`);
             return { 
@@ -168,6 +171,33 @@ export class AnalyzerService {
         } catch (error) {
             this.logger.error(`[${tokenMint}] Traction check failed: ${error.message}`);
             return { passed: false };
+        }
+    }
+
+    private async checkRugCheckAPI(tokenMint: string): Promise<boolean> {
+        try {
+            // RugCheck API: Cek apakah koin ini scam atau aman
+            const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
+                timeout: 5000,
+                httpsAgent: this.getHttpsAgent()
+            });
+
+            if (!response.data) return false;
+
+            const score = response.data.score || 0;
+            // Score di bawah 1000 biasanya aman untuk micin (Good/Warning)
+            // Kalau "Danger" biasanya score-nya tinggi banget (>5000)
+            if (score > 3000) {
+                this.logger.warn(`[${tokenMint}] High Risk Score: ${score}. Skip.`);
+                return false;
+            }
+
+            return true;
+        } catch (error) {
+            this.logger.error(`RugCheck API Error: ${error.message}`);
+            // Jika RugCheck error, kita anggap aman saja (opsional) atau tetap block.
+            // Di sini saya pilih tetap block biar aman (Fail-Closed).
+            return false;
         }
     }
 
