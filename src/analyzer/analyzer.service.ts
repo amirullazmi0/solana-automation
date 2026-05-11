@@ -66,12 +66,12 @@ export class AnalyzerService {
     /**
      * Safety filter to check if token is safe and trending.
      */
-    async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: TokenMetadata; reason?: string }> {
+    async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: TokenMetadata; reason?: string; permanent?: boolean }> {
         try {
             // 1. CEK TRACTION DULU (DexScreener - REST API)
             // Ini menghemat jatah RPC karena kita cuma lanjut kalau koinnya beneran rame.
             const traction = await this.checkMarketTraction(tokenMint);
-            if (!traction.passed) return { safe: false, reason: 'low_traction' };
+            if (!traction.passed) return { safe: false, reason: traction.reason || 'low_traction', permanent: traction.permanent };
 
             this.logger.log(`[${tokenMint}] 🔥 Traction detected (Velocity: ${traction.velocity?.toFixed(2)}). Checking safety...`);
 
@@ -127,7 +127,7 @@ export class AnalyzerService {
         }
     }
 
-    private async checkMarketTraction(tokenMint: string): Promise<{ passed: boolean; liquidity?: number; marketCap?: number; velocity?: number; socials?: TokenMetadata['socials'] }> {
+    private async checkMarketTraction(tokenMint: string): Promise<{ passed: boolean; liquidity?: number; marketCap?: number; velocity?: number; socials?: TokenMetadata['socials']; reason?: string; permanent?: boolean }> {
         try {
             const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
             const minVol = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '1000'));
@@ -164,14 +164,16 @@ export class AnalyzerService {
             // 📊 TREND FOLLOWER LOGIC: MCap Sweet Spot
             if (marketCap < minMCap || marketCap > maxMCap) {
                 this.logger.debug(`[${tokenMint}] Out of MCap range: $${marketCap.toFixed(0)}`);
-                return { passed: false };
+                // PERMANENT: MCap kegedean nggak bakal turun, kekecilan nggak bakal naik drastis
+                return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: marketCap > maxMCap };
             }
 
             // 🕒 AGE CHECK: Pastikan koin sudah berumur (minimal 12 jam, max 4 hari)
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
             if (ageHours < 12 || ageHours > 96) {
                 this.logger.debug(`[${tokenMint}] Age out of bounds: ${ageHours.toFixed(1)}h. We want 12h-96h.`);
-                return { passed: false };
+                // PERMANENT: Koin terlalu tua nggak bakal muda lagi
+                return { passed: false, reason: ageHours > 96 ? 'too_old' : 'too_young', permanent: ageHours > 96 };
             }
 
             // 🚀 VOLUME SURGE: Volume 5m > 20% dari Volume 1h (Tanda breakout)

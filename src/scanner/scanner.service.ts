@@ -99,7 +99,14 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 if (result.safe) {
                     this.logger.log(`[${tokenMint}] 🚀 Traction detected! Attempting to buy...`);
                     await this.tradeService.attemptBuy(tokenMint, result.metadata);
-                    return; // Selesai, sudah dibeli
+                    return;
+                }
+
+                // PERMANENT FAILURE: Nggak ada gunanya nunggu 10 menit
+                // Contoh: MCap $2M nggak bakal turun ke $150k, umur 930 jam nggak bakal muda
+                if (result.permanent) {
+                    this.logger.debug(`[${tokenMint}] ⛔ Permanent filter fail (${result.reason}). Giving up immediately.`);
+                    return;
                 }
 
                 // Log alasan spesifik kalau traction sudah dideteksi tapi safety gagal
