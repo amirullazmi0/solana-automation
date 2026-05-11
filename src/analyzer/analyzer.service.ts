@@ -25,6 +25,9 @@ export class AnalyzerService {
     /**
      * Safety filter to check if token is safe to buy.
      */
+    /**
+     * Safety filter to check if token is safe and trending.
+     */
     async isTokenSafeToBuy(tokenMint: string): Promise<boolean> {
         this.logger.log(`Analyzing token ${tokenMint}...`);
 
@@ -77,13 +80,13 @@ export class AnalyzerService {
                 return false;
             }
 
-            // 4. Check if Liquidity > $500
-            const hasEnoughLiquidity = await this.checkLiquidity(tokenMint);
-            if (!hasEnoughLiquidity) {
+            // 4. Check if Token is TRENDING (Volume, Liquidity, Buys)
+            const isTrending = await this.checkMarketTraction(tokenMint);
+            if (!isTrending) {
                 return false;
             }
 
-            this.logger.log(`[${tokenMint}] ✅ Passed all safety filters.`);
+            this.logger.log(`[${tokenMint}] ✅ Passed all safety & trending filters.`);
             return true;
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error);
@@ -175,9 +178,13 @@ export class AnalyzerService {
         }
     }
 
-    private async checkLiquidity(tokenMint: string): Promise<boolean> {
+    private async checkMarketTraction(tokenMint: string): Promise<boolean> {
         try {
-            this.logger.log(`[${tokenMint}] Checking liquidity via DexScreener...`);
+            const minLiq = parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
+            const minVol = parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '1000'));
+            const minBuys = parseInt(this.configService.get<string>('MIN_BUY_COUNT', '10'));
+
+            this.logger.log(`[${tokenMint}] Checking market traction via DexScreener...`);
             const response = await axios.get(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
                 { 
@@ -186,26 +193,36 @@ export class AnalyzerService {
                 },
             );
 
-            const pairs = response.data.pairs;
-            if (!pairs || pairs.length === 0) {
-                this.logger.log(`[${tokenMint}] Token not yet on DexScreener, skipping liquidity check to allow sniping.`);
-                return true;
-            }
-
-            // Get liquidity in USD from the first pair
-            const liquidity = pairs[0].liquidity?.usd || 0;
-            if (liquidity < 500) {
-                this.logger.warn(`[${tokenMint}] Low liquidity: $${liquidity.toFixed(2)} USD (Min $500)`);
+            const pair = response.data.pairs?.[0];
+            if (!pair) {
+                this.logger.log(`[${tokenMint}] Token sepi / Belum terdaftar di DexScreener. Skipping.`);
                 return false;
             }
 
-            this.logger.log(`[${tokenMint}] Liquidity check passed: $${liquidity.toFixed(2)} USD`);
+            const liquidity = pair.liquidity?.usd || 0;
+            const volume5m = pair.volume?.m5 || 0;
+            const buys5m = pair.txns?.m5?.buys || 0;
+
+            if (liquidity < minLiq) {
+                this.logger.warn(`[${tokenMint}] Liquidity too low: $${liquidity.toFixed(0)} (Min $${minLiq})`);
+                return false;
+            }
+
+            if (volume5m < minVol) {
+                this.logger.warn(`[${tokenMint}] Volume (5m) too low: $${volume5m.toFixed(0)} (Min $${minVol})`);
+                return false;
+            }
+
+            if (buys5m < minBuys) {
+                this.logger.warn(`[${tokenMint}] Buys (5m) too low: ${buys5m} txs (Min ${minBuys})`);
+                return false;
+            }
+
+            this.logger.log(`[${tokenMint}] 🔥 TRENDING! Liq: $${liquidity.toFixed(0)} | Vol5m: $${volume5m.toFixed(0)} | Buys5m: ${buys5m}`);
             return true;
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.logger.error(`[${tokenMint}] Liquidity check failed: ${message}`);
-            // Fail open (return true) only if API is down, to avoid missing trades
-            return true;
+            this.logger.error(`[${tokenMint}] Traction check failed: ${error.message}`);
+            return false;
         }
     }
 }

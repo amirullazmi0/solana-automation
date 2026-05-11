@@ -143,19 +143,30 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     }
 
     private async processNewToken(tokenMint: string) {
-        // Tambah jitter jadi 1-5 detik untuk meratakan beban RPC
-        const jitter = Math.floor(Math.random() * 4000) + 1000;
-        await new Promise((res) => setTimeout(res, jitter));
+        this.logger.log(`[${tokenMint}] Starting monitoring for market traction (Max 3 minutes)...`);
 
-        try {
-            const isSafe = await this.analyzerService.isTokenSafeToBuy(tokenMint);
-            if (isSafe) {
-                await this.tradeService.attemptBuy(tokenMint);
-            } else {
-                this.logger.log(`[${tokenMint}] Skipped: Failed safety checks.`);
+        const startTime = Date.now();
+        const maxWaitTime = 3 * 60 * 1000; // 3 Menit
+
+        while (Date.now() - startTime < maxWaitTime) {
+            try {
+                const isSafeAndTrending = await this.analyzerService.isTokenSafeToBuy(tokenMint);
+                
+                if (isSafeAndTrending) {
+                    this.logger.log(`[${tokenMint}] 🚀 Traction detected! Attempting to buy...`);
+                    await this.tradeService.attemptBuy(tokenMint);
+                    return; // Selesai, sudah dibeli
+                }
+
+                // Tunggu 30 detik sebelum cek ulang
+                this.logger.log(`[${tokenMint}] Still quiet... waiting 30s to re-check.`);
+                await new Promise((res) => setTimeout(res, 30000));
+            } catch (error) {
+                this.logger.error(`Error processing token ${tokenMint}: ${error.message}`);
+                break;
             }
-        } catch (error) {
-            this.logger.error(`Error processing token ${tokenMint}: ${error.message}`);
         }
+
+        this.logger.log(`[${tokenMint}] 💤 Token remained quiet after 3 minutes. Giving up.`);
     }
 }
