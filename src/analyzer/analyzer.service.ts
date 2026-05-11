@@ -19,7 +19,7 @@ export interface DexScreenerPair {
     liquidity?: { usd?: number };
     fdv?: number;
     volume?: { m5?: number };
-    txns?: { m5?: { buys?: number } };
+    txns?: { m5?: { buys?: number, sells?: number } };
     info?: {
         socials?: SocialLink[];
         websites?: Website[];
@@ -129,8 +129,17 @@ export class AnalyzerService {
 
             const liquidity = pair.liquidity?.usd || 0;
             const volume5m = pair.volume?.m5 || 0;
-            const buys5m = pair.txns?.m5?.buys || 0;
+            const txns5m = pair.txns?.m5 || {};
+            const buys5m = txns5m.buys || 0;
+            const sells5m = txns5m.sells || 0;
             const marketCap = pair.fdv || 0;
+
+            // 🚫 HONEYPOT DETECTION
+            // Jika ada banyak pembeli tapi NOL penjual dalam 5 menit terakhir, itu jebakan.
+            if (buys5m >= 5 && sells5m === 0) {
+                this.logger.warn(`[${tokenMint}] 🍯 Honeypot Detected! Buys: ${buys5m}, Sells: ${sells5m}. Skip.`);
+                return { passed: false };
+            }
             
             const vlRatio = volume5m / (liquidity || 1);
             const velocity = volume5m / (marketCap || 1); // Volume 5m / Market Cap
