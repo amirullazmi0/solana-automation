@@ -158,8 +158,13 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     return; // Selesai, sudah dibeli
                 }
 
-                // Tunggu 30 detik sebelum cek ulang
-                this.logger.log(`[${tokenMint}] Still quiet... waiting 30s to re-check.`);
+                // Log alasan spesifik kalau traction sudah dideteksi tapi safety gagal
+                if (result.reason && result.reason !== 'low_traction') {
+                    this.logger.warn(`[${tokenMint}] ⚠️ Safety failed (${result.reason}). Waiting 30s to re-check...`);
+                } else {
+                    this.logger.log(`[${tokenMint}] Still quiet... waiting 30s to re-check.`);
+                }
+
                 await new Promise((res) => setTimeout(res, 30000));
             } catch (error) {
                 this.logger.error(`Error processing token ${tokenMint}: ${error.message}`);

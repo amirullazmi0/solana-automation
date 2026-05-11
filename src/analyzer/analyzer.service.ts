@@ -59,12 +59,12 @@ export class AnalyzerService {
     /**
      * Safety filter to check if token is safe and trending.
      */
-    async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: TokenMetadata }> {
+    async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: TokenMetadata; reason?: string }> {
         try {
             // 1. CEK TRACTION DULU (DexScreener - REST API)
             // Ini menghemat jatah RPC karena kita cuma lanjut kalau koinnya beneran rame.
             const traction = await this.checkMarketTraction(tokenMint);
-            if (!traction.passed) return { safe: false };
+            if (!traction.passed) return { safe: false, reason: 'low_traction' };
 
             this.logger.log(`[${tokenMint}] 🔥 Traction detected (Velocity: ${traction.velocity?.toFixed(2)}). Checking safety...`);
 
@@ -81,21 +81,26 @@ export class AnalyzerService {
                     const delay = isRateLimit ? 1000 * attempt : 300 * attempt;
                     
                     if (isRateLimit) this.logger.warn(`[${tokenMint}] RPC Rate Limit! Waiting ${delay}ms...`);
-                    if (attempt === 3) return { safe: false };
+                    if (attempt === 3) {
+                        this.logger.warn(`[${tokenMint}] ⚠️ RPC failed to fetch mint info after 3 attempts. Skip.`);
+                        return { safe: false, reason: 'rpc_failure' };
+                    }
                     await new Promise((resolve) => setTimeout(resolve, delay));
                 }
             }
 
+            if (!mintInfo) return { safe: false, reason: 'rpc_failure' };
+
             if (mintInfo.mintAuthority !== null || mintInfo.freezeAuthority !== null) {
-                this.logger.warn(`[${tokenMint}] Authority still enabled. Skip.`);
-                return { safe: false };
+                this.logger.warn(`[${tokenMint}] 🔒 Authority still enabled (Mint: ${mintInfo.mintAuthority}, Freeze: ${mintInfo.freezeAuthority}). Skip.`);
+                return { safe: false, reason: 'authority_enabled' };
             }
 
             // 3. RUGCHECK (REST API)
             const isRugCheckPassed = await this.checkRugCheckAPI(tokenMint);
             if (!isRugCheckPassed) {
                 this.logger.warn(`[${tokenMint}] 🛑 RugCheck FAILED or High Risk. Skip.`);
-                return { safe: false };
+                return { safe: false, reason: 'rugcheck_failed' };
             }
 
             this.logger.log(`[${tokenMint}] ✅ Passed all filters. Ready to buy!`);
@@ -109,7 +114,7 @@ export class AnalyzerService {
             };
         } catch (error) {
             this.logger.error(`[${tokenMint}] Analysis failed: ${error.message}`);
-            return { safe: false };
+            return { safe: false, reason: 'error' };
         }
     }
 
