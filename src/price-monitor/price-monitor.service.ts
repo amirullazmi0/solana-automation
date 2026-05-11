@@ -16,6 +16,8 @@ export class PriceMonitorService {
     private jupiterApiKey: string;
     private stopLossPercent: number;
     private takeProfitPercent: number;
+    // In-memory tracker untuk konfirmasi SL (trade ID -> jumlah konfirmasi)
+    private readonly slConfirmCount = new Map<number, number>();
     private ipCache: Record<string, string> = {
         'api.jup.ag': '18.239.105.107',
     };
@@ -155,29 +157,45 @@ export class PriceMonitorService {
             }
         }
 
-        // 1. Smart Stop Loss Check (Hanya jalan jika profit belum pernah sentuh 5%)
+        // 1. CONFIRMED STOP LOSS (Anti-Shakeout)
+        // Bot nggak langsung jual saat kena SL. Nunggu 3x konfirmasi dulu.
         const stopLossThreshold = trade.entryPrice - trade.entryPrice * (this.stopLossPercent / 100);
         
         if (trade.highestPrice <= trade.entryPrice * 1.05) {
             if (currentPrice <= stopLossThreshold) {
-                // FITUR SABAR: Jangan jual kalau baru beli kurang dari 60 detik (kecuali profit)
-                if (holdingTimeSeconds < 60) {
-                    return; 
+                // FITUR SABAR: Jangan jual kalau baru beli kurang dari 60 detik
+                if (holdingTimeSeconds < 60) return;
+
+                // Tambah counter konfirmasi
+                const confirms = (this.slConfirmCount.get(trade.id) || 0) + 1;
+                this.slConfirmCount.set(trade.id, confirms);
+
+                this.logger.log(`[Slot ${trade.slotNumber}] 📉 Below SL (${confirms}/3 confirms). Price: $${currentPrice.toFixed(8)} | SL: $${stopLossThreshold.toFixed(8)}`);
+
+                // Baru jual setelah 3x konfirmasi BERTURUT-TURUT
+                if (confirms >= 3) {
+                    // Smart Check: Kalau koin lagi rame yang beli, sabar dulu
+                    const isBuyPressureHigh = await this.checkBuyPressure(trade.tokenMint);
+                    if (isBuyPressureHigh) {
+                        this.logger.log(`[Slot ${trade.slotNumber}] 💎 High Buy Pressure! Resetting SL counter. Holding for rebound...`);
+                        this.slConfirmCount.set(trade.id, 0); // Reset counter
+                        return;
+                    }
+
+                    this.logger.warn(`[Slot ${trade.slotNumber}] ❌ Hard Stop Loss confirmed (3x). Selling at $${currentPrice}`);
+                    this.slConfirmCount.delete(trade.id);
+                    await this.tradeService.executeSell(trade.id, currentPrice, true);
+                    return;
                 }
 
-                this.logger.log(`[Slot ${trade.slotNumber}] Price hit Stop Loss threshold ($${currentPrice}). Checking Buy Pressure...`);
-                
-                // Smart Check: Kalau koin lagi rame yang beli (Buy Pressure), kita sabar dulu
-                const isBuyPressureHigh = await this.checkBuyPressure(trade.tokenMint);
-                
-                if (isBuyPressureHigh) {
-                    this.logger.log(`[Slot ${trade.slotNumber}] High Buy Pressure detected! Holding for potential rebound... 💎🙌`);
-                    return; // Sabar dulu, jangan jual
-                }
-
-                this.logger.warn(`[Slot ${trade.slotNumber}] Hard Stop Loss Triggered at $${currentPrice} (-${this.stopLossPercent}%)`);
-                await this.tradeService.executeSell(trade.id, currentPrice, true);
+                // Belum 3x konfirmasi, hold dulu
                 return;
+            } else {
+                // Harga naik lagi, reset counter
+                if (this.slConfirmCount.has(trade.id)) {
+                    this.logger.log(`[Slot ${trade.slotNumber}] 📈 Price recovered! Resetting SL counter.`);
+                    this.slConfirmCount.delete(trade.id);
+                }
             }
         }
 
