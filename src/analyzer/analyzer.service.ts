@@ -34,6 +34,8 @@ export interface TokenMetadata {
         telegram?: string;
         website?: string;
     };
+    creator?: string;
+    topHolder?: string;
 }
 
 @Injectable()
@@ -109,7 +111,9 @@ export class AnalyzerService {
                 metadata: { 
                     liquidity: traction.liquidity || 0, 
                     marketCap: traction.marketCap || 0,
-                    socials: traction.socials
+                    socials: traction.socials,
+                    creator: isRugCheckPassed.creator,
+                    topHolder: isRugCheckPassed.topHolder
                 } 
             };
         } catch (error) {
@@ -217,7 +221,7 @@ export class AnalyzerService {
         });
     }
 
-    private async checkRugCheckAPI(tokenMint: string): Promise<boolean> {
+    private async checkRugCheckAPI(tokenMint: string): Promise<{ passed: boolean; creator?: string; topHolder?: string }> {
         try {
             // RugCheck API: Cek skor risiko dan daftar bahaya (danger)
             const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
@@ -225,13 +229,13 @@ export class AnalyzerService {
                 httpsAgent: this.getHttpsAgent()
             });
 
-            if (!response.data) return false;
+            if (!response.data) return { passed: false };
 
             // 1. Cek Skor (Score > 3000 = Skip)
             const score = response.data.score || 0;
             if (score > 3000) {
                 this.logger.warn(`[${tokenMint}] High Risk Score: ${score}. Skip.`);
-                return false;
+                return { passed: false };
             }
 
             // 2. Cek Risiko Spesifik (Danger = Skip)
@@ -239,13 +243,21 @@ export class AnalyzerService {
             const highRisks = risks.filter((risk) => risk.level === 'danger');
             if (highRisks.length > 0) {
                 this.logger.warn(`[${tokenMint}] RugCheck DANGER: ${highRisks.map((r) => r.name).join(', ')}`);
-                return false;
+                return { passed: false };
             }
 
-            return true;
+            // 3. Ekstrak Alamat Dompet "Musuh"
+            const creator = response.data.creator;
+            const topHolder = response.data.topHolders?.[0]?.address;
+
+            return { 
+                passed: true, 
+                creator, 
+                topHolder 
+            };
         } catch (error) {
             this.logger.error(`RugCheck API Error: ${error.message}`);
-            return false; // Fail-Closed
+            return { passed: false };
         }
     }
 }

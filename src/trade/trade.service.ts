@@ -169,6 +169,17 @@ export class TradeService implements OnModuleInit {
 
         if (success && entryPrice > 0) {
             const symbol = await this.fetchTokenSymbol(tokenMint);
+            // Get initial balances for watch addresses
+            let initialCreatorBalance = 0;
+            let initialTopHolderBalance = 0;
+
+            if (metadata?.creator) {
+                initialCreatorBalance = await this.getTokenBalance(metadata.creator, tokenMint);
+            }
+            if (metadata?.topHolder) {
+                initialTopHolderBalance = await this.getTokenBalance(metadata.topHolder, tokenMint);
+            }
+
             await this.prismaService.trade.create({
                 data: {
                     tokenMint,
@@ -181,6 +192,10 @@ export class TradeService implements OnModuleInit {
                     amountInSol,
                     entryLiquidity: metadata?.liquidity || 0,
                     entryMarketCap: metadata?.marketCap || 0,
+                    creatorAddress: metadata?.creator,
+                    topHolderAddress: metadata?.topHolder,
+                    initialCreatorBalance,
+                    initialTopHolderBalance,
                 },
             });
             this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
@@ -339,6 +354,23 @@ export class TradeService implements OnModuleInit {
             return symbol ? `$${symbol}` : 'UNKNOWN';
         } catch {
             return 'UNKNOWN';
+        }
+    }
+
+    async getTokenBalance(walletAddress: string, tokenMint: string): Promise<number> {
+        try {
+            const accounts = await this.connection.getParsedTokenAccountsByOwner(
+                new (await import('@solana/web3.js')).PublicKey(walletAddress),
+                { mint: new (await import('@solana/web3.js')).PublicKey(tokenMint) }
+            );
+
+            if (accounts.value.length > 0) {
+                return accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount || 0;
+            }
+            return 0;
+        } catch (error) {
+            this.logger.error(`Failed to get token balance for ${walletAddress}: ${error.message}`);
+            return 0;
         }
     }
 }

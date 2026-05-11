@@ -26,6 +26,10 @@ model Trade {
   entryMarketCap    Float?
   status            TradeStatus @default(OPEN)
   amountInSol       Float
-  createdAt         DateTime    @default(now())
+  creatorAddress        String?
+  topHolderAddress      String?
+  initialCreatorBalance   Float?
+  initialTopHolderBalance Float?
+  createdAt             DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 }

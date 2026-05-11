@@ -15,6 +15,7 @@ export class PriceMonitorService {
     private trailingDistancePercent: number;
     private jupiterApiKey: string;
     private stopLossPercent: number;
+    private takeProfitPercent: number;
     private ipCache: Record<string, string> = {
         'api.jup.ag': '18.239.105.107',
     };
@@ -29,7 +30,10 @@ export class PriceMonitorService {
             this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '1.5'),
         );
         this.stopLossPercent = parseFloat(
-            this.configService.get<string>('STOP_LOSS_PERCENT', '20.0'),
+            this.configService.get<string>('STOP_LOSS_PERCENT', '40.0'),
+        );
+        this.takeProfitPercent = parseFloat(
+            this.configService.get<string>('TAKE_PROFIT_PERCENT', '20.0'),
         );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
@@ -131,6 +135,26 @@ export class PriceMonitorService {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
         const holdingTimeSeconds = (Date.now() - new Date(trade.createdAt).getTime()) / 1000;
 
+        // 0. PANIC SELL: DEV SELL WATCH
+        if (trade.creatorAddress || trade.topHolderAddress) {
+            if (trade.creatorAddress) {
+                const currentCreatorBalance = await this.tradeService.getTokenBalance(trade.creatorAddress, trade.tokenMint);
+                if (currentCreatorBalance < (trade.initialCreatorBalance || 0) * 0.99) { // 1% tolerance for fees/transfers
+                    this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 DEV IS SELLING! Creator dumped tokens. PANIC SELLING!`);
+                    await this.tradeService.executeSell(trade.id, currentPrice, true);
+                    return;
+                }
+            }
+            if (trade.topHolderAddress) {
+                const currentTopBalance = await this.tradeService.getTokenBalance(trade.topHolderAddress, trade.tokenMint);
+                if (currentTopBalance < (trade.initialTopHolderBalance || 0) * 0.99) {
+                    this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 TOP HOLDER IS SELLING! Top whale dumped. PANIC SELLING!`);
+                    await this.tradeService.executeSell(trade.id, currentPrice, true);
+                    return;
+                }
+            }
+        }
+
         // 1. Smart Stop Loss Check (Hanya jalan jika profit belum pernah sentuh 5%)
         const stopLossThreshold = trade.entryPrice - trade.entryPrice * (this.stopLossPercent / 100);
         
@@ -175,6 +199,14 @@ export class PriceMonitorService {
         if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice) {
             this.logger.warn(`[Slot ${trade.slotNumber}] Trailing Stop Triggered at $${currentPrice}`);
             await this.tradeService.executeSell(trade.id, currentPrice, false);
+            return;
+        }
+
+        // 4. Quick Take Profit Check
+        if (profitPercent >= this.takeProfitPercent) {
+            this.logger.log(`[Slot ${trade.slotNumber}] Quick Take Profit hit at $${currentPrice} (+${profitPercent.toFixed(2)}%)`);
+            await this.tradeService.executeSell(trade.id, currentPrice, false);
+            return;
         }
     }
 
