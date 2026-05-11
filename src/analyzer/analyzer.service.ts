@@ -28,101 +28,121 @@ export class AnalyzerService {
     /**
      * Safety filter to check if token is safe and trending.
      */
-    async isTokenSafeToBuy(tokenMint: string): Promise<boolean> {
+    async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: { liquidity: number; marketCap: number } }> {
         this.logger.log(`Analyzing token ${tokenMint}...`);
 
         try {
             const mintPublicKey = new PublicKey(tokenMint);
-
-            // Fetch Mint Info with simple retry (Solana propagation delay)
             let mintInfo;
-            let lastError;
+            
+            // Fetch Mint Info
             for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
                     mintInfo = await getMint(this.connection, mintPublicKey);
                     break;
                 } catch (e) {
-                    lastError = e;
-                    const isRateLimit = e.message?.includes('429') || e.toString().includes('429');
-                    const delay = isRateLimit ? 2000 * attempt : 500 * attempt;
-                    
-                    if (isRateLimit) {
-                        this.logger.warn(`[${tokenMint}] RPC Rate limit hit. Backing off for ${delay}ms...`);
-                    }
-
-                    if (attempt === 3) {
-                        this.logger.warn(`[${tokenMint}] Could not fetch mint info after 3 attempts: ${lastError.message}`);
-                        return false;
-                    }
+                    this.logger.error(`[${tokenMint}] Failed to fetch mint info: ${e.message}`);
+                    const delay = 500 * attempt;
+                    if (attempt === 3) return { safe: false };
                     await new Promise((resolve) => setTimeout(resolve, delay));
                 }
             }
 
-            // 1. Check if Mint Authority is disabled
-            if (mintInfo.mintAuthority !== null) {
-                this.logger.warn(
-                    `[${tokenMint}] Mint authority is still enabled (${mintInfo.mintAuthority.toBase58()}).`,
-                );
-                return false;
+            // 1. Check Authority
+            if (mintInfo.mintAuthority !== null || mintInfo.freezeAuthority !== null) {
+                this.logger.warn(`[${tokenMint}] Authority still enabled. Skip.`);
+                return { safe: false };
             }
 
-            // 2. Check if Freeze Authority is disabled
-            if (mintInfo.freezeAuthority !== null) {
-                this.logger.warn(
-                    `[${tokenMint}] Freeze authority is still enabled (${mintInfo.freezeAuthority.toBase58()}).`,
-                );
-                return false;
-            }
-
-            // 3. RugCheck API Integration
+            // 2. RugCheck API
             const isRugCheckPassed = await this.checkRugCheckAPI(tokenMint);
-            if (!isRugCheckPassed) {
-                return false;
-            }
+            if (!isRugCheckPassed) return { safe: false };
 
-            // 4. Check if Token is TRENDING (Volume, Liquidity, Buys)
-            const isTrending = await this.checkMarketTraction(tokenMint);
-            if (!isTrending) {
-                return false;
-            }
+            // 3. Market Traction & Velocity (Trending Check)
+            const traction = await this.checkMarketTraction(tokenMint);
+            if (!traction.passed) return { safe: false };
 
-            this.logger.log(`[${tokenMint}] ✅ Passed all safety & trending filters.`);
-            return true;
+            this.logger.log(`[${tokenMint}] ✅ Passed all safety & trending filters. Velocity: ${traction.velocity?.toFixed(2)}`);
+            return { 
+                safe: true, 
+                metadata: { 
+                    liquidity: traction.liquidity || 0, 
+                    marketCap: traction.marketCap || 0 
+                } 
+            };
         } catch (error) {
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            this.logger.error(`[${tokenMint}] Error analyzing token: ${errorMsg}`);
-            return false; // Fail safe
+            this.logger.error(`[${tokenMint}] Analysis failed: ${error.message}`);
+            return { safe: false };
+        }
+    }
+
+    private async checkMarketTraction(tokenMint: string): Promise<{ passed: boolean; liquidity?: number; marketCap?: number; velocity?: number }> {
+        try {
+            const minLiq = parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
+            const minVol = parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '2000'));
+            const minBuys = parseInt(this.configService.get<string>('MIN_BUY_COUNT', '15'));
+            const minVLR = parseFloat(this.configService.get<string>('MIN_VL_RATIO', '2.0'));
+            const minVelocity = parseFloat(this.configService.get<string>('MIN_VOLUME_MCAP_RATIO', '0.1'));
+
+            this.logger.log(`[${tokenMint}] Checking market traction via DexScreener...`);
+            const response = await axios.get(
+                `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
+                { timeout: 5000, httpsAgent: this.getHttpsAgent() },
+            );
+
+            const pair = response.data.pairs?.[0];
+            if (!pair) return { passed: false };
+
+            const liquidity = pair.liquidity?.usd || 0;
+            const volume5m = pair.volume?.m5 || 0;
+            const buys5m = pair.txns?.m5?.buys || 0;
+            const marketCap = pair.fdv || 0;
+            
+            const vlRatio = volume5m / (liquidity || 1);
+            const velocity = volume5m / (marketCap || 1); // Volume 5m / Market Cap
+
+            if (liquidity < minLiq || volume5m < minVol || vlRatio < minVLR || buys5m < minBuys) {
+                return { passed: false };
+            }
+
+            // Velocity Check: Cari koin yang volume-nya meledak dibanding Market Cap
+            if (velocity < minVelocity) {
+                this.logger.warn(`[${tokenMint}] Low Velocity: ${velocity.toFixed(3)} (Min ${minVelocity}). Not hot enough.`);
+                return { passed: false };
+            }
+
+            return { 
+                passed: true, 
+                liquidity, 
+                marketCap,
+                velocity 
+            };
+        } catch (error) {
+            this.logger.error(`[${tokenMint}] Traction check failed: ${error.message}`);
+            return { passed: false };
         }
     }
 
     private async resolveDns(hostname: string): Promise<string> {
         if (this.ipCache[hostname]) return this.ipCache[hostname];
         try {
-            // Try Cloudflare first
-            let response = await axios
-                .get(`https://1.1.1.1/dns-query?name=${hostname}&type=A`, {
-                    headers: { accept: 'application/dns-json' },
+            let response = await axios.get(`https://1.1.1.1/dns-query?name=${hostname}&type=A`, {
+                headers: { accept: 'application/dns-json' },
+                timeout: 5000,
+                httpsAgent: new https.Agent({ family: 4 }),
+            }).catch(() => null);
+
+            if (!response) {
+                response = await axios.get(`https://8.8.8.8/resolve?name=${hostname}&type=A`, {
                     timeout: 5000,
                     httpsAgent: new https.Agent({ family: 4 }),
-                })
-                .catch(() => null);
-
-            // If Cloudflare fails, try Google
-            if (!response) {
-                response = await axios
-                    .get(`https://8.8.8.8/resolve?name=${hostname}&type=A`, {
-                        timeout: 5000,
-                        httpsAgent: new https.Agent({ family: 4 }),
-                    })
-                    .catch(() => null);
+                }).catch(() => null);
             }
 
             const ip = response?.data?.Answer?.[0]?.data;
-            if (ip && /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) {
-                return ip;
-            }
-        } catch {
-            // Silence DNS errors
+            if (ip && /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) return ip;
+        } catch (error) {
+            this.logger.error(`[${hostname}] DNS resolution failed: ${error.message}`);
         }
         return hostname;
     }
@@ -143,95 +163,22 @@ export class AnalyzerService {
 
     private async checkRugCheckAPI(tokenMint: string): Promise<boolean> {
         try {
-            this.logger.log(`[${tokenMint}] Fetching RugCheck report via Axios...`);
-            const response = await axios.get(
-                `https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report/summary`,
-                { 
-                    timeout: 10000,
-                    httpsAgent: this.getHttpsAgent()
-                },
-            );
+            const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report/summary`, { 
+                timeout: 10000,
+                httpsAgent: this.getHttpsAgent()
+            });
 
-            const data = response.data;
-            const highRisks = (
-                (data.risks as Array<{ level: string; name: string }>) || []
-            ).filter((risk) => risk.level === 'danger');
+            const risks = (response.data.risks as Array<{ level: string; name: string }>) || [];
+            const highRisks = risks.filter((risk) => risk.level === 'danger');
 
             if (highRisks.length > 0) {
-                this.logger.warn(
-                    `[${tokenMint}] RugCheck identified danger risks: ${highRisks.map((r) => r.name).join(', ')}`,
-                );
+                this.logger.warn(`[${tokenMint}] RugCheck danger: ${highRisks.map((r) => r.name).join(', ')}`);
                 return false;
             }
-
             return true;
         } catch (error) {
-            const errorMsg = axios.isAxiosError(error)
-                ? error.response
-                    ? `Status ${error.response.status}`
-                    : error.message
-                : error instanceof Error
-                  ? error.message
-                  : String(error);
-            this.logger.error(`[${tokenMint}] Error calling RugCheck API: ${errorMsg}`);
-            return true;
-        }
-    }
-
-    private async checkMarketTraction(tokenMint: string): Promise<boolean> {
-        try {
-            const minLiq = parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
-            const minVol = parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '1000'));
-            const minBuys = parseInt(this.configService.get<string>('MIN_BUY_COUNT', '10'));
-            const minVLR = parseFloat(this.configService.get<string>('MIN_VL_RATIO', '1.5'));
-
-            this.logger.log(`[${tokenMint}] Checking market traction via DexScreener...`);
-            const response = await axios.get(
-                `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
-                { 
-                    timeout: 5000, 
-                    httpsAgent: this.getHttpsAgent()
-                },
-            );
-
-            const pair = response.data.pairs?.[0];
-            if (!pair) {
-                this.logger.log(`[${tokenMint}] Token sepi / Belum terdaftar di DexScreener. Skipping.`);
-                return false;
-            }
-
-            const liquidity = pair.liquidity?.usd || 0;
-            const volume5m = pair.volume?.m5 || 0;
-            const buys5m = pair.txns?.m5?.buys || 0;
-            
-            // V/L Ratio Logic: Apakah Volume lebih gede dari Likuiditas?
-            const vlRatio = volume5m / (liquidity || 1);
-
-            if (liquidity < minLiq) {
-                this.logger.warn(`[${tokenMint}] Liquidity too low: $${liquidity.toFixed(0)} (Min $${minLiq})`);
-                return false;
-            }
-
-            if (volume5m < minVol) {
-                this.logger.warn(`[${tokenMint}] Volume (5m) too low: $${volume5m.toFixed(0)} (Min $${minVol})`);
-                return false;
-            }
-
-            if (vlRatio < minVLR) {
-                this.logger.warn(`[${tokenMint}] V/L Ratio too low: ${vlRatio.toFixed(2)} (Min ${minVLR}). Token is too quiet.`);
-                return false;
-            }
-
-            if (buys5m < minBuys) {
-                this.logger.warn(`[${tokenMint}] Buys (5m) too low: ${buys5m} txs (Min ${minBuys})`);
-                return false;
-            }
-
-            this.logger.log(`[${tokenMint}] 🔥 HOT TOKEN! Liq: $${liquidity.toFixed(0)} | VLR: ${vlRatio.toFixed(2)} | Buys5m: ${buys5m}`);
-            return true;
-        } catch (error) {
-            this.logger.error(`[${tokenMint}] Traction check failed: ${error.message}`);
-            return false;
+            this.logger.error(`[${tokenMint}] RugCheck API error: ${error.message}`);
+            return true; // Fail open
         }
     }
 }

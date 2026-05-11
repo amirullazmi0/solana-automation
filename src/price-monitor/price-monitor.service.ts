@@ -34,7 +34,6 @@ export class PriceMonitorService {
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
 
-    // Ambil harga setiap 5 detik (dikurangi dari 2 detik biar nggak kena rate limit 429)
     @Interval(5000)
     async monitorPrices() {
         const openTrades = await this.prismaService.trade.findMany({
@@ -45,17 +44,52 @@ export class PriceMonitorService {
 
         for (const trade of openTrades) {
             try {
-                const currentPrice = await this.getCurrentPrice(trade.tokenMint);
+                const stats = await this.getCurrentStats(trade.tokenMint);
                 
-                // Jika harga gagal diambil (null/0), jangan evaluasi agar tidak panic sell
-                if (currentPrice && currentPrice > 0) {
-                    await this.evaluateTrade(trade, currentPrice);
+                if (stats && stats.price > 0) {
+                    // DETEKSI RUGPULL: Kalau likuiditas ditarik > 15%
+                    if (trade.entryLiquidity && trade.entryLiquidity > 0 && stats.liquidity > 0) {
+                        const liqDrop = ((trade.entryLiquidity - stats.liquidity) / trade.entryLiquidity) * 100;
+                        if (liqDrop > 15) {
+                            this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 RUGPULL DETECTED! Liquidity dropped ${liqDrop.toFixed(2)}%. PANIC SELLING!`);
+                            await this.tradeService.executeSell(trade.id, stats.price, true);
+                            continue;
+                        }
+                    }
+
+                    await this.evaluateTrade(trade, stats.price);
                 }
             } catch (error) {
-                this.logger.error(
-                    `Error monitoring price for ${trade.tokenMint}: ${error.message}`,
-                );
+                this.logger.error(`Error monitoring for ${trade.tokenMint}: ${error.message}`);
             }
+        }
+    }
+
+    private async getCurrentStats(tokenMint: string): Promise<{ price: number; liquidity: number } | null> {
+        // Fallback ke DexScreener (Dapetin Price + Liquidity)
+        try {
+            const hostname = 'api.dexscreener.com';
+            const response = await axios.get(`https://${hostname}/latest/dex/tokens/${tokenMint}`, {
+                timeout: 5000,
+                httpsAgent: new https.Agent({
+                    family: 4,
+                    lookup: async (h, o, cb) => {
+                        const ip = await this.resolveDns(h);
+                        if (ip) cb(null, ip, 4); else lookup(h, o, cb);
+                    }
+                })
+            });
+
+            const pair = response.data.pairs?.[0];
+            if (pair) {
+                return { 
+                    price: parseFloat(pair.priceUsd), 
+                    liquidity: pair.liquidity?.usd || 0 
+                };
+            }
+        } catch (error) {
+            this.logger.debug(`[PriceMonitor] DexScreener error for ${tokenMint}: ${error.message}`);
+            return null;
         }
     }
 
@@ -85,70 +119,6 @@ export class PriceMonitorService {
                 return ip;
             }
         } catch { /* Silence */ }
-        return null;
-    }
-
-    private async getCurrentPrice(tokenMint: string): Promise<number | null> {
-        // 1. Coba Jupiter Price API dulu (VIP/Paid)
-        try {
-            const hostname = 'api.jup.ag';
-            const response = await axios.get(`https://${hostname}/price/v2?ids=${tokenMint}`, {
-                timeout: 5000,
-                headers: { 'x-api-key': this.jupiterApiKey },
-                httpsAgent: new https.Agent({
-                    family: 4,
-                    lookup: async (h, o, cb) => {
-                        try {
-                            const ip = await this.resolveDns(h);
-                            if (ip) cb(null, ip, 4);
-                            else lookup(h, o, cb);
-                        } catch (e) { cb(e as Error, '', 4); }
-                    }
-                })
-            });
-
-            const data = response.data;
-            if (data.data && data.data[tokenMint] && data.data[tokenMint].price) {
-                return parseFloat(data.data[tokenMint].price);
-            }
-        } catch (error) {
-            // Jika 404, artinya koin terlalu baru bagi Jupiter, lanjut ke DexScreener
-            if (!axios.isAxiosError(error) || error.response?.status !== 404) {
-                this.logger.debug(`Jupiter Price API error for ${tokenMint}: ${error.message}`);
-            }
-        }
-
-        // 2. Fallback ke DexScreener (Sangat cepat buat koin baru)
-        try {
-            const hostname = 'api.dexscreener.com';
-            const response = await axios.get(`https://${hostname}/latest/dex/tokens/${tokenMint}`, {
-                timeout: 5000,
-                httpsAgent: new https.Agent({
-                    family: 4,
-                    lookup: async (h, o, cb) => {
-                        try {
-                            const ip = await this.resolveDns(h);
-                            if (ip) cb(null, ip, 4);
-                            else lookup(h, o, cb);
-                        } catch (e) { cb(e as Error, '', 4); }
-                    }
-                })
-            });
-
-            const pairs = response.data.pairs;
-            if (pairs && pairs.length > 0) {
-                // Ambil harga dari pair pertama (biasanya yang paling liquid)
-                const price = parseFloat(pairs[0].priceUsd);
-                if (price > 0) {
-                    this.logger.log(`[PriceMonitor] Used DexScreener fallback for ${tokenMint}: $${price}`);
-                    return price;
-                }
-            }
-        } catch (error) {
-            this.logger.debug(`[PriceMonitor] DexScreener error for ${tokenMint}: ${error.message}`);
-            this.logger.error(`[PriceMonitor] All price sources failed for ${tokenMint}`);
-        }
-
         return null;
     }
 

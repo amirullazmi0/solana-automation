@@ -150,11 +150,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
         while (Date.now() - startTime < maxWaitTime) {
             try {
-                const isSafeAndTrending = await this.analyzerService.isTokenSafeToBuy(tokenMint);
+                const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
                 
-                if (isSafeAndTrending) {
+                if (result.safe) {
                     this.logger.log(`[${tokenMint}] 🚀 Traction detected! Attempting to buy...`);
-                    await this.tradeService.attemptBuy(tokenMint);
+                    await this.tradeService.attemptBuy(tokenMint, result.metadata);
                     return; // Selesai, sudah dibeli
                 }
 

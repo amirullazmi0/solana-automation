@@ -22,6 +22,8 @@ model Trade {
   trailingStopPrice Float
   exitPrice         Float?
   profitUsd         Float?
+  entryLiquidity    Float?
+  entryMarketCap    Float?
   status            TradeStatus @default(OPEN)
   amountInSol       Float
   createdAt         DateTime    @default(now())
