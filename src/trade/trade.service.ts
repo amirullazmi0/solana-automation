@@ -207,11 +207,25 @@ export class TradeService implements OnModuleInit {
     }
 
     async executeSell(tradeId: number, currentPrice: number, isStopLoss: boolean) {
+        // 1. ATOMIC CHECK & UPDATE: Langsung kunci di DB biar gak di-pick monitor lain
         const trade = await this.prismaService.trade.findUnique({ where: { id: tradeId } });
-        if (!trade || trade.status !== 'OPEN') return;
+        if (!trade || trade.status !== 'OPEN') {
+            this.logger.debug(`[Trade ${tradeId}] Already closed or not found. Skipping sell.`);
+            return;
+        }
 
-        const tokenAmountToSell = Math.floor((this.positionSizeUSD / trade.entryPrice) * 1_000_000);
-        const { success } = await this.executeJupiterSwap(
+        // Lock trade status immediately
+        await this.prismaService.trade.update({
+            where: { id: tradeId },
+            data: { status: 'CLOSED' } // Kita anggap CLOSED dulu biar gak di-spam alert
+        });
+
+        const decimals = await this.getTokenDecimals(trade.tokenMint);
+        const tokenAmountToSell = Math.floor((this.positionSizeUSD / trade.entryPrice) * Math.pow(10, decimals));
+        
+        this.logger.log(`[Slot ${trade.slotNumber}] 💸 Executing SELL for ${trade.symbol} (${trade.tokenMint})...`);
+        
+        const { success, error } = await this.executeJupiterSwap(
             trade.tokenMint,
             WRAPPED_SOL_MINT,
             tokenAmountToSell,
@@ -220,13 +234,11 @@ export class TradeService implements OnModuleInit {
 
         if (success) {
             const profit = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
-            // Estimasi profit dalam USD: (Sisa Token * (Harga Jual - Harga Beli))
             const estimatedProfitUsd = (this.positionSizeUSD / trade.entryPrice) * (currentPrice - trade.entryPrice);
 
             await this.prismaService.trade.update({
                 where: { id: tradeId },
                 data: { 
-                    status: 'CLOSED',
                     exitPrice: currentPrice,
                     profitUsd: estimatedProfitUsd
                 },
@@ -239,7 +251,14 @@ export class TradeService implements OnModuleInit {
                 isStopLoss,
                 trade.symbol || undefined,
             );
-            this.logger.log(`[Slot ${trade.slotNumber}] Position CLOSED. Profit: ${profit.toFixed(2)}% ($${estimatedProfitUsd.toFixed(2)})`);
+            this.logger.log(`[Slot ${trade.slotNumber}] ✅ Position CLOSED. Profit: ${profit.toFixed(2)}% ($${estimatedProfitUsd.toFixed(2)})`);
+        } else {
+            this.logger.error(`[Slot ${trade.slotNumber}] ❌ SELL FAILED: ${error}. Rolling back status to OPEN.`);
+            // Rollback status if swap fails so we can try again
+            await this.prismaService.trade.update({
+                where: { id: tradeId },
+                data: { status: 'OPEN' }
+            });
         }
     }
 
@@ -290,7 +309,8 @@ export class TradeService implements OnModuleInit {
 
             let entryPrice = 0;
             if (side === 'BUY') {
-                entryPrice = this.positionSizeUSD / (quoteData.outAmount / 1_000_000);
+                const decimals = await this.getTokenDecimals(outputMint);
+                entryPrice = this.positionSizeUSD / (quoteData.outAmount / Math.pow(10, decimals));
             }
 
             const swapResponse = await axios.post(
@@ -354,6 +374,17 @@ export class TradeService implements OnModuleInit {
             return symbol ? `$${symbol}` : 'UNKNOWN';
         } catch {
             return 'UNKNOWN';
+        }
+    }
+
+    async getTokenDecimals(tokenMint: string): Promise<number> {
+        try {
+            const mintPublicKey = new (await import('@solana/web3.js')).PublicKey(tokenMint);
+            const mintInfo = await (await import('@solana/spl-token')).getMint(this.connection, mintPublicKey);
+            return mintInfo.decimals;
+        } catch (error) {
+            this.logger.error(`Failed to fetch decimals for ${tokenMint}: ${error.message}. Defaulting to 9.`);
+            return 9; // Fallback ke 9 desimal (standar SPL)
         }
     }
 

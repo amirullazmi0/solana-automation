@@ -1,10 +1,11 @@
 import { Module } from '@nestjs/common';
 import { ScannerService } from './scanner.service';
 import { TradeModule } from '../trade/trade.module';
-import { AnalyzerModule } from '../analyzer/analyzer.module';
+import { ReportingModule } from '../reporting/reporting.module';
+import { AnalyzerModule } from 'src/analyzer/analyzer.module';
 
 @Module({
-    imports: [TradeModule, AnalyzerModule],
+    imports: [TradeModule, AnalyzerModule, ReportingModule],
     providers: [ScannerService],
 })
 export class ScannerModule {}

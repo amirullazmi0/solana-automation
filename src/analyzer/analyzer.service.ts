@@ -29,11 +29,15 @@ export interface DexScreenerPair {
         socials?: SocialLink[];
         websites?: Website[];
     };
+    baseToken?: { symbol?: string };
 }
 
 export interface TokenMetadata {
     liquidity: number;
     marketCap: number;
+    mcap?: number;
+    pairCreatedAt?: number;
+    symbol?: string;
     socials?: {
         twitter?: string;
         telegram?: string;
@@ -48,7 +52,7 @@ export class AnalyzerService {
     private readonly logger = new Logger(AnalyzerService.name);
     private readonly connection: Connection;
     private readonly jupiterApiKey: string;
-    private ipCache: Record<string, string> = {
+    private readonly ipCache: Record<string, string> = {
         'api.jup.ag': '18.239.105.107',
         'api.rugcheck.xyz': '104.26.0.126',
         'api.dexscreener.com': '104.26.8.188',
@@ -61,62 +65,51 @@ export class AnalyzerService {
     }
 
     /**
-     * Safety filter to check if token is safe to buy.
-     */
-    /**
      * Safety filter to check if token is safe and trending.
      */
     async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: TokenMetadata; reason?: string; permanent?: boolean }> {
         try {
-            // 1. CEK TRACTION DULU (DexScreener - REST API)
-            // Ini menghemat jatah RPC karena kita cuma lanjut kalau koinnya beneran rame.
+            // 1. DEXSCREENER (Market Traction)
             const traction = await this.checkMarketTraction(tokenMint);
-            if (!traction.passed) return { safe: false, reason: traction.reason || 'low_traction', permanent: traction.permanent };
-
-            this.logger.log(`[${tokenMint}] 🔥 Traction detected (Velocity: ${traction.velocity?.toFixed(2)}). Checking safety...`);
-
-            // 2. CEK AUTHORITY (Solana RPC)
-            const mintPublicKey = new PublicKey(tokenMint);
-            let mintInfo;
             
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                try {
-                    mintInfo = await getMint(this.connection, mintPublicKey);
-                    break;
-                } catch (e) {
-                    const isRateLimit = e.message?.includes('429');
-                    const delay = isRateLimit ? 1000 * attempt : 300 * attempt;
-                    
-                    if (isRateLimit) this.logger.warn(`[${tokenMint}] RPC Rate Limit! Waiting ${delay}ms...`);
-                    if (attempt === 3) {
-                        this.logger.warn(`[${tokenMint}] ⚠️ RPC failed to fetch mint info after 3 attempts. Skip.`);
-                        return { safe: false, reason: 'rpc_failure' };
-                    }
-                    await new Promise((resolve) => setTimeout(resolve, delay));
-                }
+            // Siapkan metadata dasar biarpun belum safe
+            const baseMetadata: TokenMetadata = {
+                liquidity: traction.liquidity || 0,
+                marketCap: traction.marketCap || 0,
+                mcap: traction.marketCap,
+                pairCreatedAt: traction.pairCreatedAt,
+                symbol: traction.symbol,
+                socials: traction.socials
+            };
+
+            if (!traction.passed) {
+                return { 
+                    safe: false, 
+                    reason: traction.reason || 'low_traction', 
+                    permanent: traction.permanent,
+                    metadata: baseMetadata 
+                };
             }
 
-            if (!mintInfo) return { safe: false, reason: 'rpc_failure' };
-
-            if (mintInfo.mintAuthority !== null || mintInfo.freezeAuthority !== null) {
-                this.logger.warn(`[${tokenMint}] 🔒 Authority still enabled (Mint: ${mintInfo.mintAuthority}, Freeze: ${mintInfo.freezeAuthority}). Skip.`);
-                return { safe: false, reason: 'authority_enabled' };
+            // 2. RPC CHECK (Security)
+            const isSafetyPassed = await this.checkTokenSecurityRPC(tokenMint);
+            if (!isSafetyPassed) {
+                this.logger.warn(`[${tokenMint}] 🛑 Safety RPC check FAILED (Freeze/Mint authority). Skip.`);
+                return { safe: false, reason: 'safety_rpc_failed', permanent: true, metadata: baseMetadata };
             }
 
             // 3. RUGCHECK (REST API)
             const isRugCheckPassed = await this.checkRugCheckAPI(tokenMint);
             if (!isRugCheckPassed) {
                 this.logger.warn(`[${tokenMint}] 🛑 RugCheck FAILED or High Risk. Skip.`);
-                return { safe: false, reason: 'rugcheck_failed' };
+                return { safe: false, reason: 'rugcheck_failed', metadata: baseMetadata };
             }
 
             this.logger.log(`[${tokenMint}] ✅ Passed all filters. Ready to buy!`);
             return { 
                 safe: true, 
                 metadata: { 
-                    liquidity: traction.liquidity || 0, 
-                    marketCap: traction.marketCap || 0,
-                    socials: traction.socials,
+                    ...baseMetadata,
                     creator: isRugCheckPassed.creator,
                     topHolder: isRugCheckPassed.topHolder
                 } 
@@ -127,7 +120,30 @@ export class AnalyzerService {
         }
     }
 
-    private async checkMarketTraction(tokenMint: string): Promise<{ passed: boolean; liquidity?: number; marketCap?: number; velocity?: number; socials?: TokenMetadata['socials']; reason?: string; permanent?: boolean }> {
+    private async checkTokenSecurityRPC(tokenMint: string): Promise<boolean> {
+        const mintPublicKey = new PublicKey(tokenMint);
+        try {
+            const mintInfo = await getMint(this.connection, mintPublicKey);
+            return mintInfo.mintAuthority === null && mintInfo.freezeAuthority === null;
+        } catch (e) {
+            if (e instanceof Error) {
+                this.logger.error(`[${tokenMint}] Mint authority check failed: ${e.message}`);
+            }
+            return false;
+        }
+    }
+
+    private async checkMarketTraction(tokenMint: string): Promise<{ 
+        passed: boolean; 
+        liquidity?: number; 
+        marketCap?: number; 
+        velocity?: number; 
+        socials?: TokenMetadata['socials']; 
+        reason?: string; 
+        permanent?: boolean;
+        symbol?: string;
+        pairCreatedAt?: number;
+    }> {
         try {
             const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
             const minVol = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '1000'));
@@ -151,43 +167,49 @@ export class AnalyzerService {
             const buys5m = txns5m.buys || 0;
             const sells5m = txns5m.sells || 0;
             const marketCap = pair.fdv || 0;
+            const symbol = pair.baseToken?.symbol;
+            const pairCreatedAt = pair.pairCreatedAt || 0;
+            const socials = {
+                twitter: pair.info?.socials?.find((s) => s.type === 'twitter')?.url,
+                telegram: pair.info?.socials?.find((s) => s.type === 'telegram')?.url,
+                website: pair.info?.websites?.[0]?.url
+            };
 
             // 🚫 HONEYPOT DETECTION
-            // Jika ada banyak pembeli (min 10) tapi NOL penjual dalam 5 menit terakhir, itu jebakan.
             if (buys5m >= 10 && sells5m === 0) {
-                this.logger.warn(`[${tokenMint}] 🍯 Honeypot Detected! Buys: ${buys5m}, Sells: ${sells5m}. Skip.`);
-                return { passed: false };
+                return { passed: false, reason: 'honeypot', liquidity, marketCap, symbol, pairCreatedAt, socials };
             }
             
             const velocity = volume5m / (marketCap || 1);
             
             // 📊 TREND FOLLOWER LOGIC: MCap Sweet Spot
             if (marketCap < minMCap || marketCap > maxMCap) {
-                this.logger.debug(`[${tokenMint}] Out of MCap range: $${marketCap.toFixed(0)}`);
-                // PERMANENT: MCap kekecilan ATAU kegedean nggak berubah drastis dalam 10 menit
-                // Kalau nanti MCap mereka masuk range, Discovery Poller yang akan nangkap lagi
-                return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: true };
+                return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: true, marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
-            // 🕒 AGE CHECK: Pastikan koin sudah berumur (minimal 2 jam, max 4 hari)
-            // 2 jam sudah cukup aman: sniper bot biasanya udah pergi setelah 1-2 jam
+            // 🕒 AGE CHECK
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
             if (ageHours < 2 || ageHours > 96) {
-                this.logger.debug(`[${tokenMint}] Age out of bounds: ${ageHours.toFixed(1)}h. We want 2h-96h.`);
-                // PERMANENT: Koin terlalu tua tidak akan muda, koin < 1 jam tidak akan 2 jam dalam 10 menit
                 const isPermPermanent = ageHours > 96 || ageHours < 1;
-                return { passed: false, reason: ageHours > 96 ? 'too_old' : 'too_young', permanent: isPermPermanent };
+                return { passed: false, reason: ageHours > 96 ? 'too_old' : 'too_young', permanent: isPermPermanent, marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
-            // 🚀 VOLUME SURGE: Volume 5m > 20% dari Volume 1h (Tanda breakout)
+            // 🚀 VOLUME SURGE
             const volumeH1 = pair.volume?.h1 || 0;
-            const volumeSurge = volume5m / (volumeH1 / 12 || 1); // Rata-rata 5m dalam 1 jam
-            if (volumeSurge < 2) { // Minimal 2x lipat dari rata-rata volume per 5 menit di 1 jam terakhir
-                this.logger.debug(`[${tokenMint}] No volume surge: ${volumeSurge.toFixed(2)}x. Skip.`);
-                return { passed: false };
+            const volumeSurge = volume5m / (volumeH1 / 12 || 1);
+            if (volumeSurge < 1.5) {
+                return { 
+                    passed: true, 
+                    liquidity, 
+                    marketCap, 
+                    velocity, 
+                    socials,
+                    symbol,
+                    pairCreatedAt
+                };
             }
 
-            // 🐋 SMART MONEY ACCUMULATION: Harga anteng tapi banyak yang nampung
+            // 🐋 SMART MONEY ACCUMULATION
             const priceChange1h = Math.abs(pair.priceChange?.h1 || 0);
             const buys1h = pair.txns?.h1?.buys || 0;
             const sells1h = pair.txns?.h1?.sells || 0;

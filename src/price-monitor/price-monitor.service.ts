@@ -40,6 +40,8 @@ export class PriceMonitorService {
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
 
+    private readonly processingTrades = new Set<number>();
+
     @Interval(5000)
     async monitorPrices() {
         const openTrades = await this.prismaService.trade.findMany({
@@ -49,6 +51,10 @@ export class PriceMonitorService {
         if (openTrades.length === 0) return;
 
         for (const trade of openTrades) {
+            // Skip if this trade is already being processed (sold or evaluated)
+            if (this.processingTrades.has(trade.id)) continue;
+
+            this.processingTrades.add(trade.id);
             try {
                 const stats = await this.getCurrentStats(trade.tokenMint);
                 
@@ -67,6 +73,8 @@ export class PriceMonitorService {
                 }
             } catch (error) {
                 this.logger.error(`Error monitoring for ${trade.tokenMint}: ${error.message}`);
+            } finally {
+                this.processingTrades.delete(trade.id);
             }
         }
     }

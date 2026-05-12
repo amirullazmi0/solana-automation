@@ -5,6 +5,7 @@ import axios from 'axios';
 import * as WebSocket from 'ws';
 import { AnalyzerService } from '../analyzer/analyzer.service';
 import { TradeService } from '../trade/trade.service';
+import { ReportingService } from '../reporting/reporting.service';
 
 // const RAYDIUM_PROGRAM_ID = new PublicKey('675kRwJGm1MqJCYR6ba8Lde6ygvwtq22U6cC1Fi991S8');
 
@@ -24,6 +25,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         private readonly configService: ConfigService,
         private readonly tradeService: TradeService,
         private readonly analyzerService: AnalyzerService,
+        private readonly reportingService: ReportingService,
     ) {}
 
     onModuleInit() {
@@ -126,10 +128,27 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         const startTime = Date.now();
         const maxWaitTime = 10 * 60 * 1000; // 10 Menit
 
+        let notified = false;
+
         try {
             while (Date.now() - startTime < maxWaitTime) {
                 try {
                     const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
+
+                    // Kirim notifikasi watchlist SEKALI saja pas data tersedia
+                    if (!notified && result.metadata) {
+                        const mcap = result.metadata.mcap || 0;
+                        const pairCreatedAt = result.metadata.pairCreatedAt || 0;
+                        const ageHours = (Date.now() - pairCreatedAt) / (1000 * 60 * 60);
+                        
+                        await this.reportingService.sendWatchlistNotification(
+                            tokenMint, 
+                            mcap, 
+                            ageHours, 
+                            result.metadata.symbol
+                        );
+                        notified = true;
+                    }
 
                     if (result.safe) {
                         this.logger.log(`[${tokenMint}] 🚀 Traction detected! Attempting to buy...`);
