@@ -14,7 +14,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private connection: Connection;
     private subscriptionId: number;
     private pumpFunWs: WebSocket;
-    private readonly seenTokens = new Set<string>();
+    // Map<tokenMint, expiredAt> — koin dihapus otomatis setelah TTL biar bisa di-re-check nanti
+    private readonly seenTokens = new Map<string, number>();
+    // Batasi max token yang dipantau bersamaan biar nggak kelebihan memory
+    private activeMonitoring = 0;
+    private readonly MAX_CONCURRENT = 10;
 
     constructor(
         private readonly configService: ConfigService,
@@ -52,80 +56,114 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
     private startDiscoveryPolling() {
         this.logger.log('Starting Trend Discovery Polling (Boosted & Trending)...');
-        
-        // Poll every 30 seconds to find new trending candidates
+
+        // Bersihkan seenTokens yang sudah expired setiap 10 menit
+        setInterval(() => {
+            const now = Date.now();
+            for (const [mint, expiredAt] of this.seenTokens.entries()) {
+                if (now > expiredAt) this.seenTokens.delete(mint);
+            }
+        }, 10 * 60 * 1000);
+
+        // Poll setiap 30 detik ke 2 sumber berbeda
         setInterval(async () => {
             try {
-                // Gunakan Token Boosts API sebagai sumber koin yang 'niat' jualan (punya marketing budget)
-                const response = await axios.get(
+                // Sumber 1: Token Boosts (koin dengan marketing budget)
+                const boostRes = await axios.get(
                     'https://api.dexscreener.com/token-boosts/latest/v1',
                     { timeout: 10000 },
                 );
+                const boostTokens = (boostRes.data as Array<{ chainId: string; tokenAddress: string }>)
+                    .filter((t) => t.chainId === 'solana')
+                    .map((t) => t.tokenAddress);
 
-                const solTokens = (response.data as Array<{ chainId: string; tokenAddress: string }>)
-                    .filter((t) => t.chainId === 'solana');
+                // Sumber 2: Trending Pairs (koin yang sedang ramai organik)
+                let trendingTokens: string[] = [];
+                try {
+                    const trendRes = await axios.get(
+                        'https://api.dexscreener.com/token-profiles/latest/v1',
+                        { timeout: 10000 },
+                    );
+                    trendingTokens = (trendRes.data as Array<{ chainId: string; tokenAddress: string }>)
+                        .filter((t) => t.chainId === 'solana')
+                        .map((t) => t.tokenAddress);
+                } catch {
+                    // Sumber kedua opsional, gagal tidak masalah
+                }
 
-                for (const token of solTokens) {
-                    const mint = token.tokenAddress;
-                    
-                    // Kita cek koin yang belum pernah kita beli/pantau baru-baru ini
-                    if (!this.seenTokens.has(mint)) {
-                        this.seenTokens.add(mint);
-                        this.logger.log(`🔍 [Discovery] Potential Second-Wave Candidate: ${mint}`);
-                        
-                        // Jalankan analisa mendalam
-                        this.processNewToken(mint);
-                        
-                        // Jeda agar tidak kena rate limit
-                        await new Promise((res) => setTimeout(res, 2000));
+                // Gabungkan & deduplicate
+                const allCandidates = [...new Set([...boostTokens, ...trendingTokens])];
+                const now = Date.now();
+
+                for (const mint of allCandidates) {
+                    const expiredAt = this.seenTokens.get(mint);
+                    if (expiredAt && now < expiredAt) continue; // Masih dalam cooldown
+
+                    if (this.activeMonitoring >= this.MAX_CONCURRENT) {
+                        this.logger.debug(`[Discovery] Max concurrent (${this.MAX_CONCURRENT}) reached. Skipping ${mint}.`);
+                        continue;
                     }
+
+                    // TTL 20 menit untuk koin yang baru masuk
+                    this.seenTokens.set(mint, now + 20 * 60 * 1000);
+                    this.logger.log(`🔍 [Discovery] Potential Second-Wave Candidate: ${mint}`);
+
+                    this.processNewToken(mint);
+                    await new Promise((res) => setTimeout(res, 2000));
                 }
             } catch (error) {
-                this.logger.debug(`Discovery Polling error: ${error.message}`);
+                if (error instanceof Error) {
+                    this.logger.debug(`Discovery Polling error: ${error.message}`);
+                }
             }
         }, 30000);
     }
 
     private async processNewToken(tokenMint: string) {
-        this.logger.log(`[${tokenMint}] Starting monitoring for market traction (Max 10 minutes)...`);
+        this.activeMonitoring++;
+        this.logger.log(`[${tokenMint}] Starting monitoring for market traction (Max 10 minutes)... [Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT}]`);
 
         const startTime = Date.now();
         const maxWaitTime = 10 * 60 * 1000; // 10 Menit
 
-        while (Date.now() - startTime < maxWaitTime) {
-            try {
-                const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
-                
-                if (result.safe) {
-                    this.logger.log(`[${tokenMint}] 🚀 Traction detected! Attempting to buy...`);
-                    await this.tradeService.attemptBuy(tokenMint, result.metadata);
-                    return;
-                }
+        try {
+            while (Date.now() - startTime < maxWaitTime) {
+                try {
+                    const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
 
-                // PERMANENT FAILURE: Nggak ada gunanya nunggu 10 menit
-                // Contoh: MCap $2M nggak bakal turun ke $150k, umur 930 jam nggak bakal muda
-                if (result.permanent) {
-                    this.logger.debug(`[${tokenMint}] ⛔ Permanent filter fail (${result.reason}). Giving up immediately.`);
-                    return;
-                }
+                    if (result.safe) {
+                        this.logger.log(`[${tokenMint}] 🚀 Traction detected! Attempting to buy...`);
+                        await this.tradeService.attemptBuy(tokenMint, result.metadata);
+                        return;
+                    }
 
-                // Log alasan spesifik kalau traction sudah dideteksi tapi safety gagal
-                if (result.reason && result.reason !== 'low_traction') {
-                    this.logger.warn(`[${tokenMint}] ⚠️ Safety failed (${result.reason}). Waiting 30s to re-check...`);
-                } else {
-                    this.logger.log(`[${tokenMint}] Still quiet... waiting 30s to re-check.`);
-                }
+                    if (result.permanent) {
+                        this.logger.debug(`[${tokenMint}] ⛔ Permanent filter fail (${result.reason}). Giving up immediately.`);
+                        // Hapus dari seenTokens supaya bisa di-re-evaluate kalau nanti kondisinya berubah
+                        this.seenTokens.delete(tokenMint);
+                        return;
+                    }
 
-                await new Promise((res) => setTimeout(res, 30000));
-            } catch (error) {
-                this.logger.error(`Error processing token ${tokenMint}: ${error.message}`);
-                break;
+                    if (result.reason && result.reason !== 'low_traction') {
+                        this.logger.warn(`[${tokenMint}] ⚠️ Safety failed (${result.reason}). Waiting 30s to re-check...`);
+                    } else {
+                        this.logger.log(`[${tokenMint}] Still quiet... waiting 30s to re-check.`);
+                    }
+
+                    await new Promise((res) => setTimeout(res, 30000));
+                } catch (error) {
+                    if (error instanceof Error) {
+                        this.logger.error(`Error processing token ${tokenMint}: ${error.message}`);
+                    }
+                    break;
+                }
             }
-        }
 
-        this.logger.log(`[${tokenMint}] 💤 Token remained quiet after 10 minutes. Giving up.`);
-        
-        // Hapus dari memory setelah 10 menit biar kalau nanti koin ini mendadak rame lagi, bot bisa nangkap lagi
-        setTimeout(() => this.seenTokens.delete(tokenMint), 10 * 60 * 1000);
+            this.logger.log(`[${tokenMint}] 💤 Token remained quiet after 10 minutes. Giving up.`);
+            // Setelah 10 menit, hapus dari seenTokens supaya kalau koin ini trending lagi bisa ditangkap
+            this.seenTokens.delete(tokenMint);
+        } finally {
+            this.activeMonitoring--;
+        }
     }
 }
