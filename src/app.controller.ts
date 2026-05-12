@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Res, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Param, Query, Res, HttpStatus, Logger } from '@nestjs/common';
 import { AppService } from './app.service';
 import { TradeService } from './trade/trade.service';
 import { AnalyzerService } from './analyzer/analyzer.service';
@@ -6,35 +6,47 @@ import { Response } from 'express';
 
 @Controller()
 export class AppController {
-  constructor(
-    private readonly appService: AppService,
-    private readonly tradeService: TradeService,
-    private readonly analyzerService: AnalyzerService,
-  ) {}
+    private readonly logger = new Logger(AppController.name);
 
-  @Get()
-  getHello(): string {
-    return this.appService.getHello();
-  }
+    constructor(
+        private readonly appService: AppService,
+        private readonly tradeService: TradeService,
+        private readonly analyzerService: AnalyzerService,
+    ) {}
 
-  @Get('buy/:mint')
-  async manualBuy(@Param('mint') tokenMint: string, @Res() res: Response) {
-    try {
-      const isSafe = await this.analyzerService.isTokenSafeToBuy(tokenMint);
-      if (!isSafe) {
-        return res.status(HttpStatus.BAD_REQUEST).json({
-          message: `Token ${tokenMint} failed safety checks (RugCheck or Authority checks). Buy aborted.`
-        });
-      }
-
-      // Trigger buy asynchronously so we don't block the HTTP response too long
-      await this.tradeService.attemptBuy(tokenMint);
-      
-      return res.status(HttpStatus.OK).json({
-        message: `Token ${tokenMint} passed safety checks! Buy order dispatched to Jupiter. Check your Telegram/Console for results.`
-      });
-    } catch (error) {
-      return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+    @Get()
+    getHello(): string {
+        return this.appService.getHello();
     }
-  }
+
+    @Get('buy/:mint')
+    async manualBuy(
+        @Param('mint') tokenMint: string,
+        @Query('force') force: string,
+        @Res() res: Response,
+    ) {
+        try {
+            const isForced = force === 'true';
+
+            if (!isForced) {
+                const isSafe = await this.analyzerService.isTokenSafeToBuy(tokenMint);
+                if (!isSafe) {
+                    return res.status(HttpStatus.BAD_REQUEST).json({
+                        message: `Token ${tokenMint} failed safety checks (RugCheck or Authority checks). Buy aborted. Use ?force=true to bypass.`,
+                    });
+                }
+            } else {
+                this.logger.warn(`[FORCE BUY] Bypassing safety checks for ${tokenMint}`);
+            }
+
+            const result = await this.tradeService.attemptBuy(tokenMint);
+
+            return res.status(HttpStatus.OK).json({
+                message: `Token ${tokenMint} processed!`,
+                result,
+            });
+        } catch (error) {
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: error.message });
+        }
+    }
 }

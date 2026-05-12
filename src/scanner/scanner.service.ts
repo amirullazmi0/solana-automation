@@ -1,146 +1,131 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Connection, PublicKey } from '@solana/web3.js';
-import { TradeService } from '../trade/trade.service';
-import { AnalyzerService } from '../analyzer/analyzer.service';
-import * as WebSocket from 'ws';
+import { Connection } from '@solana/web3.js';
 import axios from 'axios';
+import * as WebSocket from 'ws';
+import { AnalyzerService } from '../analyzer/analyzer.service';
+import { TradeService } from '../trade/trade.service';
 
-const RAYDIUM_PROGRAM_ID = new PublicKey('675kRwJGm1MqJCYR6ba8Lde6ygvwtq22U6cC1Fi991S8');
+// const RAYDIUM_PROGRAM_ID = new PublicKey('675kRwJGm1MqJCYR6ba8Lde6ygvwtq22U6cC1Fi991S8');
 
 @Injectable()
 export class ScannerService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(ScannerService.name);
-  private connection: Connection;
-  private subscriptionId: number;
-  private pumpFunWs: WebSocket;
-  private seenTokens = new Set<string>();
+    private readonly logger = new Logger(ScannerService.name);
+    private connection: Connection;
+    private subscriptionId: number;
+    private pumpFunWs: WebSocket;
+    private readonly seenTokens = new Set<string>();
 
-  constructor(
-    private configService: ConfigService,
-    private tradeService: TradeService,
-    private analyzerService: AnalyzerService,
-  ) {}
+    constructor(
+        private readonly configService: ConfigService,
+        private readonly tradeService: TradeService,
+        private readonly analyzerService: AnalyzerService,
+    ) {}
 
-  onModuleInit() {
-    const wssEndpoint = this.configService.get<string>('WSS_ENDPOINT');
-    const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
-    
-    if (!wssEndpoint || !rpcEndpoint) {
-      this.logger.error('RPC or WSS endpoints not configured. Scanner will not start.');
-      return;
+    onModuleInit() {
+        const wssEndpoint = this.configService.get<string>('WSS_ENDPOINT');
+        const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
+
+        if (!wssEndpoint || !rpcEndpoint) {
+            this.logger.error('RPC or WSS endpoints not configured. Scanner will not start.');
+            return;
+        }
+
+        this.connection = new Connection(rpcEndpoint, {
+            wsEndpoint: wssEndpoint,
+            commitment: 'confirmed',
+        });
+
+        this.startDiscoveryPolling();
     }
 
-    this.connection = new Connection(rpcEndpoint, {
-      wsEndpoint: wssEndpoint,
-      commitment: 'confirmed',
-    });
-
-    this.startScanner();
-    this.startPumpFunScanner();
-    this.startPollingDexScreener();
-  }
-
-  onModuleDestroy() {
-    if (this.subscriptionId && this.connection) {
-      this.connection.removeProgramAccountChangeListener(this.subscriptionId);
+    onModuleDestroy() {
+        if (this.subscriptionId && this.connection) {
+            this.connection.removeProgramAccountChangeListener(this.subscriptionId);
+        }
+        if (this.pumpFunWs) {
+            this.pumpFunWs.close();
+        }
+        this.logger.log('Scanner stopped');
     }
-    if (this.pumpFunWs) {
-      this.pumpFunWs.close();
-    }
-    this.logger.log('Scanner stopped');
-  }
 
-  private startScanner() {
-    this.logger.log(`Starting Raydium WSS scanner...`);
-    try {
-      this.subscriptionId = this.connection.onProgramAccountChange(
-        RAYDIUM_PROGRAM_ID,
-        (updatedAccountInfo) => {
-          const data = updatedAccountInfo.accountInfo.data;
-          if (data.length === 752) {
-            const baseMint = new PublicKey(data.slice(400, 432)).toBase58();
-            const quoteMint = new PublicKey(data.slice(432, 464)).toBase58();
-            const WRAPPED_SOL = 'So11111111111111111111111111111111111111112';
-            const tokenMint = baseMint === WRAPPED_SOL ? quoteMint : baseMint;
-            
-            if (!this.seenTokens.has(tokenMint)) {
-              this.seenTokens.add(tokenMint);
-              this.logger.log(`⚡ [Raydium] New Pool Detected: ${tokenMint}`);
-              this.processNewToken(tokenMint); 
+
+    private startDiscoveryPolling() {
+        this.logger.log('Starting Trend Discovery Polling (Boosted & Trending)...');
+        
+        // Poll every 30 seconds to find new trending candidates
+        setInterval(async () => {
+            try {
+                // Gunakan Token Boosts API sebagai sumber koin yang 'niat' jualan (punya marketing budget)
+                const response = await axios.get(
+                    'https://api.dexscreener.com/token-boosts/latest/v1',
+                    { timeout: 10000 },
+                );
+
+                const solTokens = (response.data as Array<{ chainId: string; tokenAddress: string }>)
+                    .filter((t) => t.chainId === 'solana');
+
+                for (const token of solTokens) {
+                    const mint = token.tokenAddress;
+                    
+                    // Kita cek koin yang belum pernah kita beli/pantau baru-baru ini
+                    if (!this.seenTokens.has(mint)) {
+                        this.seenTokens.add(mint);
+                        this.logger.log(`🔍 [Discovery] Potential Second-Wave Candidate: ${mint}`);
+                        
+                        // Jalankan analisa mendalam
+                        this.processNewToken(mint);
+                        
+                        // Jeda agar tidak kena rate limit
+                        await new Promise((res) => setTimeout(res, 2000));
+                    }
+                }
+            } catch (error) {
+                this.logger.debug(`Discovery Polling error: ${error.message}`);
             }
-          }
-        },
-        'confirmed',
-        [{ dataSize: 752 }]
-      );
-    } catch (error) {
-      this.logger.error(`Failed to start Raydium scanner: ${error.message}`);
+        }, 30000);
     }
-  }
 
-  private startPumpFunScanner() {
-    this.logger.log('Starting Pump.fun Sniper (via PumpPortal)...');
-    try {
-      this.pumpFunWs = new WebSocket('wss://pumpportal.fun/api/data');
+    private async processNewToken(tokenMint: string) {
+        this.logger.log(`[${tokenMint}] Starting monitoring for market traction (Max 10 minutes)...`);
 
-      this.pumpFunWs.on('open', () => {
-        this.pumpFunWs.send(JSON.stringify({ method: "subscribeNewToken" }));
-        this.logger.log('Connected to Pump.fun WebSocket');
-      });
+        const startTime = Date.now();
+        const maxWaitTime = 10 * 60 * 1000; // 10 Menit
 
-      this.pumpFunWs.on('message', (data) => {
-        const message = JSON.parse(data.toString());
-        if (message.mint) {
-          const tokenMint = message.mint;
-          if (!this.seenTokens.has(tokenMint)) {
-            this.seenTokens.add(tokenMint);
-            this.logger.log(`🔥 [Pump.fun] New Token Born: ${tokenMint}`);
-            this.processNewToken(tokenMint); 
-          }
+        while (Date.now() - startTime < maxWaitTime) {
+            try {
+                const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
+                
+                if (result.safe) {
+                    this.logger.log(`[${tokenMint}] 🚀 Traction detected! Attempting to buy...`);
+                    await this.tradeService.attemptBuy(tokenMint, result.metadata);
+                    return;
+                }
+
+                // PERMANENT FAILURE: Nggak ada gunanya nunggu 10 menit
+                // Contoh: MCap $2M nggak bakal turun ke $150k, umur 930 jam nggak bakal muda
+                if (result.permanent) {
+                    this.logger.debug(`[${tokenMint}] ⛔ Permanent filter fail (${result.reason}). Giving up immediately.`);
+                    return;
+                }
+
+                // Log alasan spesifik kalau traction sudah dideteksi tapi safety gagal
+                if (result.reason && result.reason !== 'low_traction') {
+                    this.logger.warn(`[${tokenMint}] ⚠️ Safety failed (${result.reason}). Waiting 30s to re-check...`);
+                } else {
+                    this.logger.log(`[${tokenMint}] Still quiet... waiting 30s to re-check.`);
+                }
+
+                await new Promise((res) => setTimeout(res, 30000));
+            } catch (error) {
+                this.logger.error(`Error processing token ${tokenMint}: ${error.message}`);
+                break;
+            }
         }
-      });
 
-      this.pumpFunWs.on('error', (err) => this.logger.error(`Pump.fun WS Error: ${err.message}`));
-      this.pumpFunWs.on('close', () => {
-        this.logger.warn('Pump.fun WS closed. Reconnecting in 5s...');
-        setTimeout(() => this.startPumpFunScanner(), 5000);
-      });
-    } catch (error) {
-      this.logger.error(`Failed to start Pump.fun scanner: ${error.message}`);
+        this.logger.log(`[${tokenMint}] 💤 Token remained quiet after 10 minutes. Giving up.`);
+        
+        // Hapus dari memory setelah 10 menit biar kalau nanti koin ini mendadak rame lagi, bot bisa nangkap lagi
+        setTimeout(() => this.seenTokens.delete(tokenMint), 10 * 60 * 1000);
     }
-  }
-
-  private startPollingDexScreener() {
-    this.logger.log('Starting DexScreener API fallback polling...');
-    setInterval(async () => {
-      try {
-        const response = await axios.get('https://api.dexscreener.com/token-profiles/latest/v1', { timeout: 10000 });
-        const solTokens = response.data.filter((t: any) => t.chainId === 'solana');
-        for (const token of solTokens) {
-          const mint = token.tokenAddress;
-          if (!this.seenTokens.has(mint)) {
-            this.seenTokens.add(mint);
-            this.logger.log(`🔍 [DexScreener] New Token Profile: ${mint}`);
-            this.processNewToken(mint); 
-          }
-        }
-      } catch (error) {}
-    }, 20000); 
-  }
-
-  private async processNewToken(tokenMint: string) {
-    await new Promise(res => setTimeout(res, Math.random() * 2000));
-
-    try {
-      const isSafe = await this.analyzerService.isTokenSafeToBuy(tokenMint);
-      if (isSafe) {
-        await this.tradeService.attemptBuy(tokenMint);
-      } else {
-        this.logger.log(`[${tokenMint}] Skipped: Failed safety checks.`);
-      }
-    } catch (error) {
-      this.logger.error(`Error processing token ${tokenMint}: ${error.message}`);
-    }
-  }
 }
