@@ -1,85 +1,206 @@
-# 🤖 Solana Sniper & Trend Hunter Bot (Predator Edition)
+# 🤖 Solana Trend Follower Bot
 
-Bot trading Solana otomatis yang didesain untuk kecepatan tinggi, keamanan maksimal, dan strategi trading yang cerdas. Tidak hanya sekadar "nyerok" koin baru, bot ini mencari koin yang beneran rame (**Trending**).
-
----
-
-## 🚀 Fitur Utama (Current Capabilities)
-
-### 1. 🔍 Multi-Platform Real-time Scanner
-- **Pump.fun Sniper**: Mendeteksi koin baru lahir via PumpPortal WebSocket.
-- **Raydium WSS Scanner**: Mendeteksi pool baru di Raydium secara instan.
-- **DexScreener Fallback**: Polling otomatis untuk menangkap token profil terbaru.
-
-### 2. 💎 Smart Diamond Hands (Intelligent Exit)
-- **Smart Stop Loss**: Tidak akan panik jual jika koin sedang minus tapi **Buy Pressure** masih tinggi (Hold for Rebound).
-- **Dynamic Trailing Stop**: Mengunci profit secara otomatis saat harga naik, memberikan ruang koin untuk terus terbang.
-- **Configurable Risk**: Batas rugi (Stop Loss) bisa diatur fleksibel lewat `.env`.
-
-### 3. 🔥 Trend Hunter Logic
-- **Market Traction Check**: Hanya membeli koin yang memiliki **Volume, Likuiditas, dan Transaksi** yang valid dalam 5 menit terakhir.
-- **Anti-Sepi Retry**: Memantau koin baru selama 3 menit pertama; jika meledak, bot langsung masuk. Jika sepi, bot akan mengabaikannya.
-
-### 4. 🛡️ Infrastructure Hardening
-- **Helius Private RPC**: Koneksi stabil dan cepat menggunakan Private RPC & WSS.
-- **DNS Hardening**: Menggunakan fallback DoH (Cloudflare/Google) untuk menghindari blokir ISP pada API Jupiter/RugCheck.
-- **IPv4 Force**: Dioptimalkan untuk kestabilan koneksi di VPS.
-
-### 5. 📊 Real-time Reporting & Analytics
-- **Telegram Alerts**: Laporan instan via Telegram lengkap dengan simbol token, harga entry, harga exit, dan persentase profit/loss (PnL).
-- **Trade History**: Menyimpan data perdagangan lengkap (termasuk simbol dan exit price) ke database PostgreSQL.
+Bot trading otomatis berbasis **NestJS** untuk Solana — menggunakan strategi **Trend Follower (Second Wave)** yang menargetkan koin micro-cap potensial dari DexScreener.
 
 ---
 
-## 🛠️ Tech Stack
-- **Framework**: NestJS (Node.js)
-- **Database**: Prisma ORM with PostgreSQL
-- **Blockchain**: Solana Web3.js (@solana/web3.js)
-- **DEX Integration**: Jupiter V6 API, PumpPortal, DexScreener, RugCheck.
-- **Deployment**: CapRover / Docker
+## 🎯 Strategi: Second Wave Trend Follower
+
+Bot **TIDAK** lagi sniper koin baru (0 menit). Strategi ini menargetkan koin yang:
+- Sudah berumur **2-96 jam** (sniper bot sudah pergi)
+- Market Cap **$10k - $300k** (sweet spot sebelum pump besar)
+- Sedang ada **volume surge** (2x dari rata-rata) → tanda breakout
+- Ada indikasi **smart money accumulation** (lebih banyak buy tx dari sell)
+
+### 🧠 Kenapa Second Wave lebih menguntungkan?
+
+| | Sniper (0 menit) | Trend Follower (2-96 jam) |
+|---|---|---|
+| Saingan | Bot monster dengan server dekat validator | Volume asli + komunitas |
+| Risiko Rug | Sangat tinggi | Lebih rendah (sudah survive) |
+| Slippage | Tinggi (30%+) | Rendah (3%) |
+| Modal | Butuh modal besar | Cocok modal kecil |
 
 ---
 
-## 🏗️ Project Structure (The Architecture)
+## 🔍 Discovery Engine
 
-Bot ini menggunakan arsitektur modular NestJS yang dipisahkan berdasarkan fungsinya:
+Bot melakukan **polling setiap 30 detik** ke DexScreener Boosted Tokens API:
+```
+GET https://api.dexscreener.com/token-boosts/latest/v1
+```
 
-### 1. 🔍 **The Hunter** (`src/scanner/`)
-- **File**: `scanner.service.ts`
-- **Tugas**: Memantau Pump.fun & Raydium secara real-time via WebSocket. Jika ada koin baru, bot akan memantau progresnya selama 3 menit sebelum memutuskan beli.
-
-### 2. 🧠 **The Brain** (`src/analyzer/`)
-- **File**: `analyzer.service.ts`
-- **Tugas**: Filter "God Mode". Melakukan pengecekan berjenjang:
-    1. **DexScreener**: Cek Volume, Buys, dan Velocity.
-    2. **Solana RPC**: Cek Authority (Mint/Freeze).
-    3. **RugCheck**: Verifikasi akhir keamanan token.
-
-### 3. ⚔️ **The Executioner** (`src/trade/`)
-- **File**: `trade.service.ts`
-- **Tugas**: Melakukan transaksi (Buy/Sell) menggunakan **Jupiter V6 API** dengan optimasi **Priority Fee** untuk kecepatan maksimal.
-
-### 4. 🛡️ **The Guardian** (`src/price-monitor/`)
-- **File**: `price-monitor.service.ts`
-- **Tugas**: Monitoring real-time setiap 5 detik untuk koin yang sedang dipegang:
-    - **Anti-Slow Rug**: Panic sell jika likuiditas ditarik > 15%.
-    - **Trailing Stop**: Mengunci profit secara dinamis.
-    - **Patience Logic**: Mencegah panic sell dalam 60 detik pertama.
-
-### 📱 **The Messenger** (`src/reporting/`)
-- **File**: `reporting.service.ts`
-- **Tugas**: Mengirim laporan lengkap ke Telegram (Buy, Sell, Trailing Update, PnL).
+Koin yang masuk boosted list = ada anggaran marketing = ada harapan pump.
 
 ---
 
-## ⚙️ Cara Pakai & Konfigurasi
-1. Konfigurasi `.env` (RPC, Wallet, Strategy).
-2. `yarn build` & `npx prisma db push`.
-3. `yarn start:dev` atau `yarn deploy:vps`.
+## 🛡️ Filter Berlapis (Gate System)
+
+### Gate 1: MCap Range (Permanent)
+```
+MIN_MCAP = $10,000
+MAX_MCAP = $300,000
+```
+Gagal → langsung give up, tidak di-retry.
+
+### Gate 2: Age Check (Semi-Permanent)
+```
+MIN_AGE = 2 jam   (sniper bot sudah pergi)
+MAX_AGE = 96 jam  (koin tidak terlalu tua)
+```
+- Koin < 1 jam → permanent fail
+- Koin 1-2 jam → re-check setiap 30 detik (mungkin segera masuk window)
+- Koin > 96 jam → permanent fail
+
+### Gate 3: Volume Surge
+```
+Volume 5 menit terakhir > 2x rata-rata volume per 5 menit dalam 1 jam
+```
+Tanda breakout nyata, bukan sepi.
+
+### Gate 4: Smart Money Accumulation
+```
+Buy Count > Sell Count (lebih banyak yang beli dari jual)
+AND Harga bergerak < 5% (akumulasi diam-diam)
+```
+
+### Gate 5: Safety Check (via RPC)
+- ✅ Mint Authority Disabled
+- ✅ Freeze Authority Disabled  
+- ✅ Liquidity Locked
+- ✅ Min Liquidity: $5,000
+- ✅ Min Volume: $1,000
+- ✅ Min Buy Count: 20
 
 ---
 
-## ⚠️ Disclaimer
-Trading koin meme memiliki risiko sangat tinggi. Bot ini hanyalah alat bantu. Selalu gunakan **"Uang Dingin"** dan lakukan riset mandiri sebelum trading.
+## 💰 Trade Management
 
-**Developed with ❤️ by Antigravity for Amirull** 🦾🚀
+### Entry
+- Position Size: **$7 per slot**
+- Max Slots: **3 posisi bersamaan**
+- Slippage: **3% (300 BPS)**
+- Eksekusi via **Jupiter Aggregator**
+
+### Exit
+| Kondisi | Aksi |
+|---|---|
+| Profit +30% | Take Profit |
+| Loss -25% (trailing) | Stop Loss |
+| 3x konfirmasi di bawah SL | Confirmed Stop Loss (Anti-Shakeout) |
+| Buy Pressure tinggi saat SL | Hold, reset SL counter |
+| Dev jual > 50% | Panic Sell (PriceMonitor) |
+
+### 🛡️ Anti-Shakeout (Confirmed Stop Loss)
+Bot **TIDAK** langsung jual saat harga turun ke SL threshold. Harus 3x konfirmasi berturut-turut (interval harga monitor), KECUALI jika buy pressure masih tinggi → bot hold dan reset counter.
+
+---
+
+## ⚙️ Konfigurasi (.env)
+
+```env
+# Budget
+TOTAL_CAPITAL=26
+RESERVE_AMOUNT=5
+TOTAL_SLOTS=3
+POSITION_SIZE_USD=7
+
+# Exit Strategy
+TAKE_PROFIT_PERCENT=30.0
+STOP_LOSS_PERCENT=25.0
+TRAILING_DISTANCE_PERCENT=5.0
+SLIPPAGE_BPS=300
+
+# Filter
+MIN_LIQUIDITY_USD=5000
+MIN_VOLUME_USD=1000
+MIN_BUY_COUNT=20
+MIN_VL_RATIO=0.1
+MIN_VOLUME_MCAP_RATIO=0.05
+
+# MCap Range (Trend Follower Sweet Spot)
+MIN_MCAP=10000
+MAX_MCAP=300000
+```
+
+---
+
+## 🏗️ Arsitektur
+
+```
+┌─────────────────────────────────────────┐
+│             ScannerService              │
+│   Polling DexScreener Boosts (30s)      │
+│   → Deteksi kandidat Second Wave        │
+└────────────────┬────────────────────────┘
+                 │ tokenMint
+                 ▼
+┌─────────────────────────────────────────┐
+│            AnalyzerService              │
+│  Gate 1: MCap Filter ($10k-$300k)      │
+│  Gate 2: Age Filter (2h-96h)           │
+│  Gate 3: Volume Surge (2x)             │
+│  Gate 4: Smart Money Accumulation      │
+│  Gate 5: Safety (RPC Check)            │
+└────────────────┬────────────────────────┘
+                 │ passed ✅
+                 ▼
+┌─────────────────────────────────────────┐
+│              TradeService               │
+│   Jupiter Swap → Buy Token              │
+│   Simpan ke DB (PostgreSQL + Prisma)    │
+└────────────────┬────────────────────────┘
+                 │ tradeId
+                 ▼
+┌─────────────────────────────────────────┐
+│          PriceMonitorService            │
+│   Monitor harga via Jupiter Price API   │
+│   Confirmed SL (3x anti-shakeout)       │
+│   Trailing Take Profit +30%             │
+│   Panic Sell (Dev jual deteksi)         │
+└─────────────────────────────────────────┘
+```
+
+---
+
+## 🚀 Deployment
+
+```bash
+# Install dependencies
+yarn install
+
+# Generate Prisma Client + migrate
+yarn prisma migrate deploy
+
+# Build
+yarn build
+
+# Run production
+yarn start:prod
+
+# Deploy ke VPS
+yarn deploy:vps
+```
+
+---
+
+## 📊 Monitoring
+
+Bot mengirim notifikasi ke **Telegram** untuk:
+- 🟢 Buy berhasil
+- 🔴 Sell (TP/SL/Panic)
+- ⚠️ Error kritis
+- 💰 Balance update
+
+---
+
+## 🔐 Keamanan
+
+- Private key hanya di `.env` (JANGAN commit)
+- DNS hardening dengan hardcoded IP untuk Jupiter API
+- Force IPv4 untuk stabilitas koneksi VPS
+- Semua API call menggunakan `https.Agent({ family: 4 })`
+
+---
+
+*Last updated: Mei 2026 — Strategi: Trend Follower (Second Wave Micro-Cap)*

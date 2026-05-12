@@ -169,12 +169,13 @@ export class AnalyzerService {
                 return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: true };
             }
 
-            // 🕒 AGE CHECK: Pastikan koin sudah berumur (minimal 12 jam, max 4 hari)
+            // 🕒 AGE CHECK: Pastikan koin sudah berumur (minimal 2 jam, max 4 hari)
+            // 2 jam sudah cukup aman: sniper bot biasanya udah pergi setelah 1-2 jam
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
-            if (ageHours < 12 || ageHours > 96) {
-                this.logger.debug(`[${tokenMint}] Age out of bounds: ${ageHours.toFixed(1)}h. We want 12h-96h.`);
-                // PERMANENT: Koin terlalu tua tidak akan muda, koin < 10 jam tidak akan 12 jam dalam 10 menit
-                const isPermPermanent = ageHours > 96 || ageHours < 10;
+            if (ageHours < 2 || ageHours > 96) {
+                this.logger.debug(`[${tokenMint}] Age out of bounds: ${ageHours.toFixed(1)}h. We want 2h-96h.`);
+                // PERMANENT: Koin terlalu tua tidak akan muda, koin < 1 jam tidak akan 2 jam dalam 10 menit
+                const isPermPermanent = ageHours > 96 || ageHours < 1;
                 return { passed: false, reason: ageHours > 96 ? 'too_old' : 'too_young', permanent: isPermPermanent };
             }
 
