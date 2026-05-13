@@ -246,7 +246,10 @@ export class TradeService implements OnModuleInit {
 
             if (success) {
                 const profit = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
-                const estimatedProfitUsd = actualBalance * currentPrice - (trade.amountInSol * 150); // Estimated USD profit
+                
+                // Ambil harga SOL terbaru untuk konversi modal ke USD yang akurat
+                const solPrice = await this.getSolPrice();
+                const estimatedProfitUsd = (actualBalance * currentPrice) - (trade.amountInSol * solPrice);
 
                 await this.prismaService.trade.update({
                     where: { id: tradeId },
@@ -419,6 +422,18 @@ export class TradeService implements OnModuleInit {
         } catch (error) {
             this.logger.error(`Failed to get token balance for ${walletAddress}: ${error.message}`);
             return 0;
+        }
+    }
+
+    async getSolPrice(): Promise<number> {
+        try {
+            const response = await axios.get(`https://api.jup.ag/price/v2?ids=${WRAPPED_SOL_MINT}`, {
+                timeout: 3000,
+                headers: { 'x-api-key': this.jupiterApiKey }
+            });
+            return parseFloat(response.data?.data?.[WRAPPED_SOL_MINT]?.price) || 150;
+        } catch {
+            return 150; // Fallback jika API Jupiter down
         }
     }
 }

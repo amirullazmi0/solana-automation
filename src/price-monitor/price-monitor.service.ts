@@ -81,11 +81,12 @@ export class PriceMonitorService {
     }
 
     private async getCurrentStats(tokenMint: string): Promise<{ price: number; liquidity: number } | null> {
-        // Fallback ke DexScreener (Dapetin Price + Liquidity)
+        // 1. Ambil Harga dari JUPITER (Prioritas #1 - Super Fast)
         try {
-            const hostname = 'api.dexscreener.com';
-            const response = await axios.get(`https://${hostname}/latest/dex/tokens/${tokenMint}`, {
+            const hostname = 'api.jup.ag';
+            const response = await axios.get(`https://${hostname}/price/v2?ids=${tokenMint}`, {
                 timeout: 5000,
+                headers: { 'x-api-key': this.jupiterApiKey },
                 httpsAgent: new https.Agent({
                     family: 4,
                     lookup: async (h, o, cb) => {
@@ -95,6 +96,36 @@ export class PriceMonitorService {
                 })
             });
 
+            const jupPrice = response.data?.data?.[tokenMint]?.price;
+            if (jupPrice) {
+                // Harga dapet! Sekarang kita butuh likuiditas (Fallback ke DexScreener atau hitung manual)
+                // Sementara likuiditas tetap ambil dari DexScreener karena Jup gak sedia data likuiditas USD
+                const dexStats = await this.getLiquidityOnly(tokenMint);
+                return { 
+                    price: parseFloat(jupPrice), 
+                    liquidity: dexStats || 0 
+                };
+            }
+        } catch (error) {
+            this.logger.debug(`[PriceMonitor] Jupiter Price API error for ${tokenMint}: ${error.message}`);
+        }
+
+        // 2. Fallback total ke DexScreener jika Jupiter bermasalah
+        return this.getDexScreenerStats(tokenMint);
+    }
+
+    private async getLiquidityOnly(tokenMint: string): Promise<number | null> {
+        try {
+            const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, { timeout: 3000 });
+            return response.data.pairs?.[0]?.liquidity?.usd || 0;
+        } catch {
+            return null;
+        }
+    }
+
+    private async getDexScreenerStats(tokenMint: string): Promise<{ price: number; liquidity: number } | null> {
+        try {
+            const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, { timeout: 5000 });
             const pair = response.data.pairs?.[0];
             if (pair) {
                 return { 
@@ -103,8 +134,8 @@ export class PriceMonitorService {
                 };
             }
             return null;
-        } catch (error) {
-            this.logger.debug(`[PriceMonitor] DexScreener error for ${tokenMint}: ${error.message}`);
+        } catch {
+
             return null;
         }
     }

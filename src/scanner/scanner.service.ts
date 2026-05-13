@@ -14,7 +14,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private readonly logger = new Logger(ScannerService.name);
     private connection: Connection;
     private subscriptionId: number;
-    private pumpFunWs: WebSocket;
+    private pumpPortalWs: WebSocket | null = null;
+    private readonly PUMP_PORTAL_URL = 'wss://pumpportal.fun/api/data';
     // Map<tokenMint, expiredAt> — koin dihapus otomatis setelah TTL biar bisa di-re-check nanti
     private readonly seenTokens = new Map<string, number>();
     // Batasi max token yang dipantau bersamaan biar nggak kelebihan memory
@@ -42,15 +43,66 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             commitment: 'confirmed',
         });
 
+        // 1. Start WebSocket Discovery (Pump.fun Migrations)
+        this.initPumpPortalWS();
+
+        // 2. Start Polling Discovery (DexScreener Fallback)
         this.startDiscoveryPolling();
+    }
+
+    private initPumpPortalWS() {
+        try {
+            this.pumpPortalWs = new WebSocket(this.PUMP_PORTAL_URL);
+
+            this.pumpPortalWs.on('open', () => {
+                this.logger.log('🔌 Connected to PumpPortal WebSocket');
+                // Subscribe to migrations to Raydium
+                this.pumpPortalWs?.send(JSON.stringify({ method: "subscribeRaydiumLiquidity" }));
+            });
+
+            this.pumpPortalWs.on('message', (data) => {
+                try {
+                    const message = JSON.parse(data.toString());
+                    if (message.mint) {
+                        this.logger.log(`[PumpPortal] 💎 New Migration: ${message.mint}`);
+                        this.handleWsDiscovery(message.mint);
+                    }
+                } catch (e) {
+                    this.logger.error(`Error parsing PumpPortal message: ${e.message}`);
+                }
+            });
+
+            this.pumpPortalWs.on('close', () => {
+                this.logger.warn('🔌 PumpPortal WS closed. Reconnecting in 5s...');
+                setTimeout(() => this.initPumpPortalWS(), 5000);
+            });
+
+            this.pumpPortalWs.on('error', (err) => {
+                this.logger.error(`🔌 PumpPortal WS Error: ${err.message}`);
+            });
+        } catch (error) {
+            this.logger.error(`Failed to init PumpPortal WS: ${error.message}`);
+        }
+    }
+
+    private handleWsDiscovery(mint: string) {
+        const now = Date.now();
+        const expiredAt = this.seenTokens.get(mint);
+        if (expiredAt && now < expiredAt) return;
+
+        if (this.activeMonitoring >= this.MAX_CONCURRENT) return;
+
+        // TTL 30 menit untuk koin dari WS (Lebih agresif dibanding polling)
+        this.seenTokens.set(mint, now + 30 * 60 * 1000);
+        this.processNewToken(mint);
     }
 
     onModuleDestroy() {
         if (this.subscriptionId && this.connection) {
             this.connection.removeProgramAccountChangeListener(this.subscriptionId);
         }
-        if (this.pumpFunWs) {
-            this.pumpFunWs.close();
+        if (this.pumpPortalWs) {
+            this.pumpPortalWs.close();
         }
         this.logger.log('Scanner stopped');
     }

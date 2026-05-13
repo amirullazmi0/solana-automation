@@ -70,37 +70,43 @@ export class AnalyzerService {
      */
     async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: TokenMetadata; reason?: string; permanent?: boolean }> {
         try {
-            // 1. DEXSCREENER (Market Traction)
+            // 1. JUPITER PRICE & RPC MCAP (Priority - Accurate)
+            const price = await this.getJupiterPrice(tokenMint);
+            if (!price) {
+                return { safe: false, reason: 'no_jupiter_price' };
+            }
+
+            const supply = await this.connection.getTokenSupply(new PublicKey(tokenMint));
+            const marketCap = price * (supply.value.uiAmount || 0);
+
+            const minMCap = Number.parseFloat(this.configService.get<string>('MIN_MCAP', '30000'));
+            const maxMCap = Number.parseFloat(this.configService.get<string>('MAX_MCAP', '150000'));
+
+            if (marketCap < minMCap || marketCap > maxMCap) {
+                return { safe: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: true };
+            }
+
+            // 2. DEXSCREENER (For Metadata & Traction)
             const traction = await this.checkMarketTraction(tokenMint);
             
-            // Siapkan metadata dasar biarpun belum safe
             const baseMetadata: TokenMetadata = {
                 liquidity: traction.liquidity || 0,
-                marketCap: traction.marketCap || 0,
-                mcap: traction.marketCap,
+                marketCap: marketCap, // Use more accurate RPC/Jup MCAP
+                mcap: marketCap,
                 pairCreatedAt: traction.pairCreatedAt,
                 symbol: traction.symbol,
                 socials: traction.socials,
                 volumeSurge: traction.volumeSurge
             };
 
-            if (!traction.passed) {
-                return { 
-                    safe: false, 
-                    reason: traction.reason || 'low_traction', 
-                    permanent: traction.permanent,
-                    metadata: baseMetadata 
-                };
-            }
-
-            // 2. RPC CHECK (Security)
+            // 3. RPC CHECK (Security)
             const isSafetyPassed = await this.checkTokenSecurityRPC(tokenMint);
             if (!isSafetyPassed) {
                 this.logger.warn(`[${tokenMint}] 🛑 Safety RPC check FAILED (Freeze/Mint authority). Skip.`);
                 return { safe: false, reason: 'safety_rpc_failed', permanent: true, metadata: baseMetadata };
             }
 
-            // 3. RUGCHECK (REST API)
+            // 4. RUGCHECK (REST API)
             const isRugCheckPassed = await this.checkRugCheckAPI(tokenMint);
             if (!isRugCheckPassed) {
                 this.logger.warn(`[${tokenMint}] 🛑 RugCheck FAILED or High Risk. Skip.`);
@@ -119,6 +125,18 @@ export class AnalyzerService {
         } catch (error) {
             this.logger.error(`[${tokenMint}] Analysis failed: ${error.message}`);
             return { safe: false, reason: 'error' };
+        }
+    }
+
+    private async getJupiterPrice(tokenMint: string): Promise<number | null> {
+        try {
+            const response = await axios.get(`https://api.jup.ag/price/v2?ids=${tokenMint}`, {
+                timeout: 3000,
+                headers: { 'x-api-key': this.jupiterApiKey }
+            });
+            return parseFloat(response.data?.data?.[tokenMint]?.price) || null;
+        } catch {
+            return null;
         }
     }
 
