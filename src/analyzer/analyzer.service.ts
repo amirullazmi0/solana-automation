@@ -104,13 +104,15 @@ export class AnalyzerService {
 
             // 🛡️ ADVANCED METRICS CHECK
             // 1. VoL Check (Min 0.05 untuk koin breakout)
-            if (traction.volScore && traction.volScore < 0.05) {
+            const minVolScore = Number.parseFloat(this.configService.get<string>('ANALYZER_MIN_VOL_SCORE', '0.05'));
+            if (traction.volScore && traction.volScore < minVolScore) {
                 this.logger.debug(`[${tokenMint}] Low VoL Score: ${traction.volScore.toFixed(4)}. Supply not shocked enough.`);
                 return { safe: false, reason: 'low_vol_score', metadata: baseMetadata };
             }
 
             // 2. Z-Score Anomaly Check (Z > 2.5 is anomaly)
-            if (traction.zScore && traction.zScore < 2.5) {
+            const minZScore = Number.parseFloat(this.configService.get<string>('ANALYZER_MIN_Z_SCORE', '2.5'));
+            if (traction.zScore && traction.zScore < minZScore) {
                 this.logger.debug(`[${tokenMint}] Normal Volume (Z-Score: ${traction.zScore.toFixed(2)}). Waiting for anomaly...`);
                 return { safe: false, reason: 'no_volume_anomaly', metadata: baseMetadata };
             }
@@ -188,8 +190,10 @@ export class AnalyzerService {
             const minVol = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '1000'));
             const minBuys = Number.parseInt(this.configService.get<string>('MIN_BUY_COUNT', '20'));
             const minVelocity = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_MCAP_RATIO', '0.05'));
-            const minMCap = Number.parseFloat(this.configService.get<string>('MIN_MCAP', '30000'));
-            const maxMCap = Number.parseFloat(this.configService.get<string>('MAX_MCAP', '150000'));
+            const minMCap = Number.parseFloat(this.configService.get<string>('MIN_MCAP', '20000'));
+            const maxMCap = Number.parseFloat(this.configService.get<string>('MAX_MCAP', '300000'));
+            const minAge = Number.parseFloat(this.configService.get<string>('MIN_AGE_HOURS', '1'));
+            const minConfidence = Number.parseFloat(this.configService.get<string>('MIN_BUY_CONFIDENCE', '0.7'));
 
             const response = await axios.get<{ pairs: DexScreenerPair[] }>(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
@@ -236,19 +240,25 @@ export class AnalyzerService {
             }
 
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
-            if (ageHours < 2 || ageHours > 96) {
-                const isPerm = ageHours > 96 || ageHours < 1;
+            if (ageHours < minAge || ageHours > 96) {
+                const isPerm = ageHours > 96 || ageHours < (minAge / 2);
                 return { passed: false, reason: ageHours > 96 ? 'too_old' : 'too_young', permanent: isPerm, marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
             const volumeSurge = volume5m / (avgVol5m || 1);
-            if (volumeSurge < 1.5) {
+            const minSurge = Number.parseFloat(this.configService.get<string>('ANALYZER_MIN_VOLUME_SURGE', '1.5'));
+            if (volumeSurge < minSurge) {
                 return { passed: false, reason: 'low_surge', volumeSurge, marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
             const priceChange1h = pair.priceChange?.h1 || 0;
             if (priceChange1h <= 0) {
                 return { passed: false, reason: 'bearish_trend', marketCap, symbol, pairCreatedAt, socials, liquidity };
+            }
+
+            // 📊 BUY VS SELL RATIO (Confidence Score)
+            if (confidenceScore < minConfidence) {
+                return { passed: false, reason: 'low_buy_confidence', marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
             if (liquidity < minLiq || volume5m < minVol || buys5m < minBuys) {

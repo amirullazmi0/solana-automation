@@ -330,8 +330,9 @@ export class TradeService implements OnModuleInit {
 
             this.logger.log(`[Jupiter] Fetching quote for ${side} (Attempt ${retryCount + 1})...`);
 
+            const timeout = Number.parseInt(this.configService.get<string>('TRADE_TIMEOUT_MS', '20000'), 10);
             const config = {
-                timeout: 20000,
+                timeout,
                 headers: { 
                     'Accept-Encoding': 'gzip, deflate, br',
                     'x-api-key': this.jupiterApiKey
@@ -373,9 +374,9 @@ export class TradeService implements OnModuleInit {
                     userPublicKey: this.wallet.publicKey.toString(),
                     wrapAndUnwrapSol: true,
                     dynamicComputeUnitLimit: true,
-                    // "Pecah Telur" Mode: Bayar 2x lebih mahal biar nyalip antrean
+                    // "Pecah Telur" Mode: Bayar lebih mahal biar nyalip antrean
                     prioritizationFeeLamports: {
-                        autoMultiplier: 2
+                        autoMultiplier: Number.parseInt(this.configService.get<string>('TRADE_PRIORITY_MULTIPLIER', '2'), 10)
                     },
                 },
                 config,
@@ -388,7 +389,7 @@ export class TradeService implements OnModuleInit {
 
             const txid = await this.connection.sendRawTransaction(transaction.serialize(), {
                 skipPreflight: true,
-                maxRetries: 5, // Tambah retry kirim
+                maxRetries: Number.parseInt(this.configService.get<string>('TRADE_MAX_RETRIES', '5'), 10), 
             });
             
             this.logger.log(`[Jupiter] Transaction sent: ${txid}. Waiting for confirmation...`);
@@ -536,7 +537,8 @@ export class TradeService implements OnModuleInit {
                     const symbol = trade?.symbol || await this.fetchTokenSymbol(mint);
                     
                     // Filter out dust (very small values)
-                    if (balance > 0.000001) {
+                    const dustThreshold = Number.parseFloat(this.configService.get<string>('TRADE_DUST_THRESHOLD', '0.000001'));
+                    if (balance > dustThreshold) {
                         holdings.push({ mint, symbol, balance });
                     }
                 }

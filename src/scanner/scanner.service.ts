@@ -19,7 +19,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private readonly seenTokens = new Map<string, number>();
     // Batasi max token yang dipantau bersamaan biar nggak kelebihan memory
     private activeMonitoring = 0;
-    private readonly MAX_CONCURRENT = 100;
+    private readonly MAX_CONCURRENT: number;
 
     constructor(
         private readonly configService: ConfigService,
@@ -27,7 +27,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         private readonly analyzerService: AnalyzerService,
         private readonly reportingService: ReportingService,
         private readonly prismaService: PrismaService,
-    ) {}
+    ) {
+        this.MAX_CONCURRENT = Number.parseInt(this.configService.get<string>('SCANNER_MAX_CONCURRENT', '100'), 10);
+    }
 
     onModuleInit() {
         const wssEndpoint = this.configService.get<string>('WSS_ENDPOINT');
@@ -122,7 +124,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             }
         }, 10 * 60 * 1000);
 
-        // Poll setiap 30 detik ke 2 sumber berbeda
+        // Poll setiap 15 detik ke 2 sumber berbeda
         setInterval(async () => {
             try {
                 // Sumber 1: Token Boosts (koin dengan marketing budget)
@@ -173,7 +175,12 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     this.logger.debug(`Discovery Polling error: ${error.message}`);
                 }
             }
-        }, 30000);
+        }, Number.parseInt(this.configService.get<string>('SCANNER_POLLING_INTERVAL', '15000'), 10));
+
+        // Heartbeat Log: Biar Amirull tahu bot masih hidup & nyari koin
+        setInterval(() => {
+            this.logger.debug(`💓 [Heartbeat] Scanner Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT} | Seen: ${this.seenTokens.size} tokens`);
+        }, Number.parseInt(this.configService.get<string>('SCANNER_HEARTBEAT_INTERVAL', '30000'), 10));
     }
 
     private startWatchlistMonitoring() {
@@ -208,7 +215,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             } catch (error) {
                 this.logger.error(`Watchlist Monitoring error: ${error.message}`);
             }
-        }, 60000);
+        }, Number.parseInt(this.configService.get<string>('SCANNER_RADAR_INTERVAL', '20000'), 10));
     }
 
     // Map<tokenMint, notifiedAt> — koin nggak bakal di-notif lagi selama 6 jam biarpun masuk monitor lagi
@@ -243,7 +250,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             this.logger.log(`[${tokenMint}] Monitoring for traction... [Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT}]`);
 
             const startTime = Date.now();
-            const maxWaitTime = 10 * 60 * 1000;
+            const maxWaitMin = Number.parseInt(this.configService.get<string>('ANALYZER_MAX_SCAN_DURATION_MIN', '10'), 10);
+            const maxWaitTime = maxWaitMin * 60 * 1000;
             let localNotified = false;
 
             // Bersihkan notifiedTokens yang sudah > 6 jam
@@ -331,7 +339,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         result.reason === 'mcap_too_low' || 
                         result.reason === 'low_surge' || 
                         result.reason === 'safety_rpc_failed' ||
-                        result.reason === 'bearish_trend'
+                        result.reason === 'bearish_trend' ||
+                        result.reason === 'low_buy_confidence'
                     ) {
                         this.logger.debug(`[${tokenMint}] ⏳ Temporary fail (${result.reason}). Keeping in Watchlist for re-check.`);
                         
@@ -353,7 +362,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         });
                     }
 
-                    await new Promise((res) => setTimeout(res, 30000));
+                    await new Promise((res) => setTimeout(res, Number.parseInt(this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'), 10)));
                 } catch (error) {
                     if (error instanceof Error) {
                         this.logger.error(`Error processing token ${tokenMint}: ${error.message}`);
