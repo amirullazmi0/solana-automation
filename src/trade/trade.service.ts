@@ -420,11 +420,14 @@ export class TradeService implements OnModuleInit {
     }
     private async fetchTokenSymbol(tokenMint: string): Promise<string> {
         try {
+            // Try DexScreener first
             const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
-                timeout: 5000,
+                timeout: 3000,
             });
-            const symbol = response.data?.pairs?.[0]?.baseToken?.symbol;
-            return symbol ? `$${symbol}` : 'UNKNOWN';
+            const dexSymbol = response.data?.pairs?.[0]?.baseToken?.symbol;
+            if (dexSymbol) return `$${dexSymbol}`;
+
+            return 'UNKNOWN';
         } catch {
             return 'UNKNOWN';
         }
@@ -483,16 +486,66 @@ export class TradeService implements OnModuleInit {
             where: { tokenMint, status: 'OPEN' }
         });
 
-        if (!trade) {
-            return { success: false, message: 'No open trade found for this token.' };
-        }
-
         const currentPrice = await this.reportingService.fetchCurrentPrice(tokenMint);
         if (!currentPrice) {
             return { success: false, message: 'Failed to fetch current price.' };
         }
 
-        await this.executeSell(trade.id, currentPrice, false, percentage);
-        return { success: true, message: `Sell order for ${(percentage * 100).toFixed(0)}% executed.` };
+        if (trade) {
+            await this.executeSell(trade.id, currentPrice, false, percentage);
+            return { success: true, message: `Sell order for ${(percentage * 100).toFixed(0)}% executed.` };
+        } else {
+            // Manual sell for token not in DB
+            const actualBalance = await this.getTokenBalance(this.wallet.publicKey.toBase58(), tokenMint);
+            if (actualBalance <= 0) return { success: false, message: 'Zero balance in wallet.' };
+
+            const decimals = await this.getTokenDecimals(tokenMint);
+            const amountInLamports = Math.floor(actualBalance * percentage * Math.pow(10, decimals));
+
+            const { success, error } = await this.executeJupiterSwap(
+                tokenMint,
+                WRAPPED_SOL_MINT,
+                amountInLamports,
+                'SELL',
+            );
+
+            if (success) {
+                return { success: true, message: `Manual sell for ${(percentage * 100).toFixed(0)}% (${tokenMint}) executed.` };
+            }
+            return { success: false, message: error || 'Swap failed' };
+        }
+    }
+
+    async getWalletHoldings(): Promise<Array<{ mint: string; symbol: string; balance: number }>> {
+        try {
+            const { PublicKey } = await import('@solana/web3.js');
+            const accounts = await this.connection.getParsedTokenAccountsByOwner(
+                this.wallet.publicKey,
+                { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
+            );
+
+            const holdings: Array<{ mint: string; symbol: string; balance: number }> = [];
+
+            for (const account of accounts.value) {
+                const mint = account.account.data.parsed.info.mint;
+                const balance = account.account.data.parsed.info.tokenAmount.uiAmount;
+
+                if (balance > 0) {
+                    // Try to find symbol from DB first
+                    const trade = await this.prismaService.trade.findFirst({ where: { tokenMint: mint } });
+                    const symbol = trade?.symbol || await this.fetchTokenSymbol(mint);
+                    
+                    // Filter out dust (very small values)
+                    if (balance > 0.000001) {
+                        holdings.push({ mint, symbol, balance });
+                    }
+                }
+            }
+
+            return holdings;
+        } catch (error) {
+            this.logger.error(`Failed to fetch wallet holdings: ${error.message}`);
+            return [];
+        }
     }
 }

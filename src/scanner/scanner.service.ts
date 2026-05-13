@@ -19,7 +19,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private readonly seenTokens = new Map<string, number>();
     // Batasi max token yang dipantau bersamaan biar nggak kelebihan memory
     private activeMonitoring = 0;
-    private readonly MAX_CONCURRENT = 50;
+    private readonly MAX_CONCURRENT = 100;
 
     constructor(
         private readonly configService: ConfigService,
@@ -165,8 +165,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     this.seenTokens.set(mint, now + 60 * 60 * 1000);
                     this.logger.log(`🔍 [Discovery] Potential Second-Wave Candidate: ${mint}`);
 
+                    this.activeMonitoring++;
                     this.processNewToken(mint);
-                    await new Promise((res) => setTimeout(res, 2000));
                 }
             } catch (error) {
                 if (error instanceof Error) {
@@ -192,8 +192,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     // Jika koin sudah di-scan secara live, skip biar nggak double
                     if (this.activeMonitoring >= this.MAX_CONCURRENT) continue;
                     
+                    this.activeMonitoring++;
                     this.processNewToken(item.tokenMint);
-                    await new Promise(res => setTimeout(res, 1000));
+                    await new Promise(res => setTimeout(res, 500)); // Lebih cepat re-check-nya
                 }
                 
                 // Cleanup Watchlist: Hapus koin yang sudah > 24 jam dan gagal/pending
@@ -213,32 +214,44 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     // Map<tokenMint, notifiedAt> — koin nggak bakal di-notif lagi selama 6 jam biarpun masuk monitor lagi
     private readonly notifiedTokens = new Map<string, number>();
 
+    public getScannerStatus() {
+        return {
+            active: this.activeMonitoring,
+            max: this.MAX_CONCURRENT,
+            seen: this.seenTokens.size,
+            notified: this.notifiedTokens.size
+        };
+    }
+
     private async processNewToken(tokenMint: string) {
-        // 🛡️ Tembok Pelindung: Cek dulu status di DB. Kalau sudah FAILED/TRADED, jangan diproses lagi.
-        const existing = await this.prismaService.watchlist.findUnique({
-            where: { tokenMint }
-        });
-
-        if (existing && (existing.status === 'FAILED' || existing.status === 'TRADED')) {
-            // Khusus FAILED, kita hapus dari seenTokens biar nggak kena log debug terus-menerus
-            this.seenTokens.set(tokenMint, Date.now() + 2 * 60 * 60 * 1000); // Cooldown 2 jam biar nggak masuk discovery lagi
-            return;
-        }
-
-        this.activeMonitoring++;
-        this.logger.log(`[${tokenMint}] Monitoring for traction... [Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT}]`);
-
-        const startTime = Date.now();
-        const maxWaitTime = 10 * 60 * 1000;
-        let localNotified = false;
-
-        // Bersihkan notifiedTokens yang sudah > 6 jam
-        const now = Date.now();
-        for (const [mint, time] of this.notifiedTokens.entries()) {
-            if (now - time > 6 * 60 * 60 * 1000) this.notifiedTokens.delete(mint);
-        }
-
+        // Jika dipanggil dari radar/poll yang sudah increment, jangan double increment
+        // Tapi kita handle increment di pemanggil biar race-condition free.
+        // Di sini kita pastikan decrement tetap jalan di finally.
+        
         try {
+            // 🛡️ Tembok Pelindung: Cek dulu status di DB. Kalau sudah FAILED/TRADED, jangan diproses lagi.
+            const existing = await this.prismaService.watchlist.findUnique({
+                where: { tokenMint }
+            });
+
+            if (existing && (existing.status === 'FAILED' || existing.status === 'TRADED')) {
+                // Khusus FAILED, kita hapus dari seenTokens biar nggak kena log debug terus-menerus
+                this.seenTokens.set(tokenMint, Date.now() + 2 * 60 * 60 * 1000); // Cooldown 2 jam biar nggak masuk discovery lagi
+                return;
+            }
+
+            this.logger.log(`[${tokenMint}] Monitoring for traction... [Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT}]`);
+
+            const startTime = Date.now();
+            const maxWaitTime = 10 * 60 * 1000;
+            let localNotified = false;
+
+            // Bersihkan notifiedTokens yang sudah > 6 jam
+            const now = Date.now();
+            for (const [mint, time] of this.notifiedTokens.entries()) {
+                if (now - time > 6 * 60 * 60 * 1000) this.notifiedTokens.delete(mint);
+            }
+
             // Upsert ke Watchlist sebagai PENDING di awal & increment checkCount
             await this.prismaService.watchlist.upsert({
                 where: { tokenMint },

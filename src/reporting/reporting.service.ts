@@ -8,6 +8,7 @@ import axios from 'axios';
 import { TokenMetadata } from '../analyzer/analyzer.service';
 import { ModuleRef } from '@nestjs/core';
 import { TradeService } from '../trade/trade.service';
+import { ScannerService } from '../scanner/scanner.service';
 
 @Injectable()
 export class ReportingService implements OnModuleInit {
@@ -135,42 +136,52 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(msg);
     }
 
-    private async handlePortfolioRequest() {
-        const openTrades = await this.prismaService.trade.findMany({
-            where: { status: 'OPEN' },
-        });
+    async handlePortfolioRequest() {
+        const tradeService = this.moduleRef.get(TradeService, { strict: false });
+        const holdings = await tradeService.getWalletHoldings();
 
-        if (openTrades.length === 0) {
-            await this.sendMessage('💼 *Portfolio Kosong.* Belum ada posisi terbuka.');
+        if (holdings.length === 0) {
+            await this.sendMessage('💼 *Portfolio Kosong.* Tidak ada token ditemukan di wallet kamu.');
             return;
         }
 
-        await this.sendMessage('💼 *Mengambil data portfolio...*');
+        await this.sendMessage(`💼 *Menampilkan ${holdings.length} holdings dari wallet kamu...*`);
 
-        for (const trade of openTrades) {
-            const currentPrice = await this.fetchCurrentPrice(trade.tokenMint);
-            const profit = currentPrice 
-                ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100 
-                : 0;
+        for (const holding of holdings) {
+            const currentPrice = await this.fetchCurrentPrice(holding.mint);
             
-            const priceDisplay = currentPrice ? `$${currentPrice.toFixed(8)}` : '(N/A)';
-            const profitDisplay = currentPrice ? `${profit >= 0 ? '+' : ''}${profit.toFixed(2)}%` : '(N/A)';
-            const emoji = profit >= 0 ? '📈' : '📉';
-            const displaySymbol = trade.symbol && trade.symbol !== 'UNKNOWN' ? trade.symbol : 'UNKNOWN';
+            // Cari data trade di DB untuk hitung profit
+            const trade = await this.prismaService.trade.findFirst({
+                where: { tokenMint: holding.mint, status: 'OPEN' },
+                orderBy: { createdAt: 'desc' }
+            });
 
-            let msg = `💎 *${displaySymbol}* (Slot #${trade.slotNumber})\n`;
-            msg += `🆔 \`${trade.tokenMint}\`\n`;
-            msg += `💰 Entry: \`$${trade.entryPrice.toFixed(8)}\` | Current: \`${priceDisplay}\` ${emoji}\n`;
-            msg += `📊 Profit: *${profitDisplay}*\n`;
-            msg += `🛑 Stop: \`$${trade.trailingStopPrice.toFixed(8)}\``;
+            let profitDisplay = 'N/A';
+            let emoji = '⚪';
+            let entryInfo = '';
+
+            if (trade && currentPrice) {
+                const profit = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
+                profitDisplay = `${profit >= 0 ? '+' : ''}${profit.toFixed(2)}%`;
+                emoji = profit >= 0 ? '📈' : '📉';
+                entryInfo = `💰 Entry: \`$${trade.entryPrice.toFixed(8)}\` | `;
+            }
+
+            const priceDisplay = currentPrice ? `$${currentPrice.toFixed(8)}` : '(N/A)';
+
+            let msg = `💎 *${holding.symbol}*\n`;
+            msg += `🆔 \`${holding.mint}\`\n`;
+            msg += `📦 Balance: \`${holding.balance.toLocaleString()}\`\n`;
+            msg += `${entryInfo}Price: \`${priceDisplay}\` ${emoji}\n`;
+            msg += `📊 Profit: *${profitDisplay}*`;
 
             const buttons: TelegramBot.InlineKeyboardButton[][] = [
                 [
-                    { text: '💵 Buy More', callback_data: `buy_menu:${trade.tokenMint}` },
-                    { text: '💸 Sell', callback_data: `sell_menu:${trade.tokenMint}` }
+                    { text: '💵 Buy', callback_data: `buy_menu:${holding.mint}` },
+                    { text: '💸 Sell', callback_data: `sell_menu:${holding.mint}` }
                 ],
                 [
-                    { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${trade.tokenMint}` }
+                    { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${holding.mint}` }
                 ]
             ];
 
@@ -207,7 +218,7 @@ export class ReportingService implements OnModuleInit {
         if (!data) return;
 
         const [action, payload] = data.split(':');
-        const chatId = query.message?.chat.id.toString();
+        // const chatId = query.message?.chat.id.toString();
 
         if (action === 'buy_menu') {
             await this.sendBuyMenu(payload);
@@ -312,9 +323,14 @@ export class ReportingService implements OnModuleInit {
             return;
         }
 
-        await this.sendMessage('🔍 *Fetching real-time prices, please wait...*');
+        const scannerService = this.moduleRef.get(ScannerService, { strict: false });
+        const stats = scannerService.getScannerStatus();
 
-        let statusMsg = '📊 *Current Portfolio:*\n\n';
+        let statusMsg = `🤖 *BOT SYSTEM STATUS*\n`;
+        statusMsg += `📡 *Scanner:* \`${stats.active}/${stats.max}\` monitor | \`${stats.seen}\` seen\n`;
+        statusMsg += `━━━━━━━━━━━━━━━━━━\n\n`;
+        
+        statusMsg += '📊 *Active Portfolio:*\n\n';
         
         for (const trade of openTrades) {
             const currentPrice = await this.fetchCurrentPrice(trade.tokenMint);
@@ -339,7 +355,6 @@ export class ReportingService implements OnModuleInit {
 
     async fetchCurrentPrice(tokenMint: string): Promise<number | null> {
         try {
-            // Coba Jupiter dulu (Metis/Paid)
             const apiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
             const response = await axios.get(`https://api.jup.ag/price/v2?ids=${tokenMint}`, {
                 timeout: 5000,
@@ -350,7 +365,6 @@ export class ReportingService implements OnModuleInit {
                 return parseFloat(response.data.data[tokenMint].price);
             }
 
-            // Fallback ke DexScreener
             const dexResponse = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
                 timeout: 5000
             }).catch(() => null);
