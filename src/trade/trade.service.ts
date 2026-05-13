@@ -124,12 +124,18 @@ export class TradeService implements OnModuleInit {
     }
 
     async attemptBuy(tokenMint: string, metadata?: TokenMetadata): Promise<{ success: boolean; message: string }> {
-        // 1. Cek apakah sudah punya koin ini (OPEN)
+        // 1. Cek apakah sudah punya koin ini (OPEN) atau sudah pernah trading dalam 24 jam terakhir (Cooldown)
+        const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
         const existing = await this.prismaService.trade.findFirst({
-            where: { tokenMint, status: 'OPEN' }
+            where: { 
+                tokenMint, 
+                createdAt: { gte: dayAgo }
+            }
         });
+
         if (existing) {
-            return { success: false, message: `Already holding ${tokenMint}` };
+            const msg = existing.status === 'OPEN' ? `Already holding ${tokenMint}` : `Token ${tokenMint} is in 24h cooldown. Skip.`;
+            return { success: false, message: msg };
         }
 
         const openTradesCount = await this.prismaService.trade.count({ where: { status: 'OPEN' } });

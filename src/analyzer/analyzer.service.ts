@@ -159,7 +159,7 @@ export class AnalyzerService {
         volumeSurge?: number;
     }> {
         try {
-            const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
+            const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '30000'));
             const minVol = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '1000'));
             const minBuys = Number.parseInt(this.configService.get<string>('MIN_BUY_COUNT', '20'));
             const minVelocity = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_MCAP_RATIO', '0.05'));
@@ -218,10 +218,17 @@ export class AnalyzerService {
             }
 
             // 🐋 SMART MONEY ACCUMULATION
-            const priceChange1h = Math.abs(pair.priceChange?.h1 || 0);
+            const priceChange1h = pair.priceChange?.h1 || 0;
             const buys1h = pair.txns?.h1?.buys || 0;
             const sells1h = pair.txns?.h1?.sells || 0;
-            const isAccumulating = priceChange1h < 10 && buys1h > sells1h * 1.5;
+
+            // 📈 BULLISH TREND CHECK: Jangan beli koin yang harganya lagi terjun bebas
+            if (priceChange1h <= 0) {
+                this.logger.warn(`[${tokenMint}] 📉 Price trend is bearish (${priceChange1h.toFixed(2)}%). Skip.`);
+                return { passed: false, reason: 'bearish_trend', marketCap, symbol, pairCreatedAt, socials, liquidity };
+            }
+
+            const isAccumulating = Math.abs(priceChange1h) < 10 && buys1h > sells1h * 1.5;
 
             if (liquidity < minLiq || volume5m < minVol || buys5m < minBuys) {
                 // Jika koin sedang akumulasi, kita kasih toleransi volume sedikit lebih rendah
