@@ -48,6 +48,16 @@ export interface TokenMetadata {
     topHolder?: string;
 }
 
+interface RugCheckHolder {
+    address: string;
+    amount: number;
+}
+
+interface RugCheckMarket {
+    lpType: string;
+    lpStatus: string;
+}
+
 @Injectable()
 export class AnalyzerService {
     private readonly logger = new Logger(AnalyzerService.name);
@@ -322,9 +332,9 @@ export class AnalyzerService {
 
             // 🛡️ SAFETY & HOLDER INDEX (Anti-Rug)
             // Rumus: Safety Index = 1 - (Total Supply Top 10 / Total Supply)
-            const topHolders = response.data.topHolders || [];
+            const topHolders = (response.data.topHolders as RugCheckHolder[]) || [];
             const totalSupply = response.data.totalSupply || 1;
-            const top10Sum = topHolders.slice(0, 10).reduce((sum: number, h: any) => sum + (h.amount || 0), 0);
+            const top10Sum = topHolders.slice(0, 10).reduce((sum: number, h: RugCheckHolder) => sum + (h.amount || 0), 0);
             const safetyIndex = 1 - (top10Sum / totalSupply);
 
             if (safetyIndex < 0.7) { // Berarti Top 10 pegang > 30%
@@ -333,8 +343,8 @@ export class AnalyzerService {
             }
 
             // 🔥 MANDATORY: Liquidity Burned Check
-            const markets = response.data.markets || [];
-            const lpBurned = markets.some((m: any) => m.lpType === 'burned' || m.lpStatus === 'burned');
+            const markets = (response.data.markets as RugCheckMarket[]) || [];
+            const lpBurned = markets.some((m: RugCheckMarket) => m.lpType === 'burned' || m.lpStatus === 'burned');
             if (!lpBurned) {
                 this.logger.warn(`[${tokenMint}] 🛑 LP NOT BURNED. Skip.`);
                 return { passed: false, reason: 'lp_not_burned', safetyIndex };
