@@ -292,7 +292,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     }
 
                     if (result.permanent) {
-                        this.logger.debug(`[${tokenMint}] ⛔ Permanent filter fail (${result.reason}). Giving up immediately.`);
+                        this.logger.debug(`[${tokenMint}] ⛔ Permanent filter fail (${result.reason}). Giving up.`);
                         await this.prismaService.watchlist.update({
                             where: { tokenMint },
                             data: { status: 'FAILED', reason: result.reason }
@@ -301,9 +301,27 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         return;
                     }
 
-                    if (result.reason === 'too_young') {
-                        this.logger.debug(`[${tokenMint}] ⏳ Token is still too young. Releasing slot.`);
+                    // 🧠 SMART RETRY: Kalau cuma "muda" atau "MCap kecil", jangan jadikan FAILED.
+                    // Biarkan tetap PENDING supaya di-recheck sama background radar nanti.
+                    if (result.reason === 'too_young' || result.reason === 'mcap_too_low' || result.reason === 'low_surge') {
+                        this.logger.debug(`[${tokenMint}] ⏳ Temporary fail (${result.reason}). Keeping in Watchlist for re-check.`);
+                        
+                        // Tapi kalau sudah dicek > 100 kali dan masih PENDING, kita FAILED-kan saja biar gak beban DB
+                        const currentWatchlist = await this.prismaService.watchlist.findUnique({ where: { tokenMint } });
+                        if (currentWatchlist && currentWatchlist.checkCount > 100) {
+                            await this.prismaService.watchlist.update({
+                                where: { tokenMint },
+                                data: { status: 'FAILED', reason: 'stagnant_timeout' }
+                            });
+                        }
                         return; 
+                    }
+
+                    if (result.reason) {
+                        await this.prismaService.watchlist.update({
+                            where: { tokenMint },
+                            data: { reason: result.reason }
+                        });
                     }
 
                     await new Promise((res) => setTimeout(res, 30000));

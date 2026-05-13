@@ -175,8 +175,7 @@ export class PriceMonitorService {
 
     private async evaluateTrade(trade: Trade, currentPrice: number) {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
-        const holdingTimeSeconds = (Date.now() - new Date(trade.createdAt).getTime()) / 1000;
-
+        // const holdingTimeSeconds = (Date.now() - new Date(trade.createdAt).getTime()) / 1000;
         // 0. PANIC SELL: DEV SELL WATCH
         if (trade.creatorAddress || trade.topHolderAddress) {
             if (trade.creatorAddress) {
