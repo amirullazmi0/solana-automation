@@ -70,43 +70,36 @@ export class AnalyzerService {
      */
     async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: TokenMetadata; reason?: string; permanent?: boolean }> {
         try {
-            // 1. JUPITER PRICE & RPC MCAP (Priority - Accurate)
-            const price = await this.getJupiterPrice(tokenMint);
-            if (!price) {
-                return { safe: false, reason: 'no_jupiter_price' };
-            }
-
-            const supply = await this.connection.getTokenSupply(new PublicKey(tokenMint));
-            const marketCap = price * (supply.value.uiAmount || 0);
-
-            const minMCap = Number.parseFloat(this.configService.get<string>('MIN_MCAP', '30000'));
-            const maxMCap = Number.parseFloat(this.configService.get<string>('MAX_MCAP', '150000'));
-
-            if (marketCap < minMCap || marketCap > maxMCap) {
-                return { safe: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: true };
-            }
-
-            // 2. DEXSCREENER (For Metadata & Traction)
+            // 1. DEXSCREENER (Traction & Metadata - Faster for new tokens)
             const traction = await this.checkMarketTraction(tokenMint);
             
             const baseMetadata: TokenMetadata = {
                 liquidity: traction.liquidity || 0,
-                marketCap: marketCap, // Use more accurate RPC/Jup MCAP
-                mcap: marketCap,
+                marketCap: traction.marketCap || 0,
+                mcap: traction.marketCap,
                 pairCreatedAt: traction.pairCreatedAt,
                 symbol: traction.symbol,
                 socials: traction.socials,
                 volumeSurge: traction.volumeSurge
             };
 
-            // 3. RPC CHECK (Security)
+            if (!traction.passed) {
+                return { 
+                    safe: false, 
+                    reason: traction.reason || 'low_traction', 
+                    permanent: traction.permanent,
+                    metadata: baseMetadata 
+                };
+            }
+
+            // 2. RPC CHECK (Security)
             const isSafetyPassed = await this.checkTokenSecurityRPC(tokenMint);
             if (!isSafetyPassed) {
                 this.logger.warn(`[${tokenMint}] 🛑 Safety RPC check FAILED (Freeze/Mint authority). Skip.`);
                 return { safe: false, reason: 'safety_rpc_failed', permanent: true, metadata: baseMetadata };
             }
 
-            // 4. RUGCHECK (REST API)
+            // 3. RUGCHECK (REST API)
             const isRugCheckPassed = await this.checkRugCheckAPI(tokenMint);
             if (!isRugCheckPassed) {
                 this.logger.warn(`[${tokenMint}] 🛑 RugCheck FAILED or High Risk. Skip.`);
@@ -203,16 +196,16 @@ export class AnalyzerService {
             
             const velocity = volume5m / (marketCap || 1);
             
-            // 📊 TREND FOLLOWER LOGIC: MCap Sweet Spot
+            // 📊 TREND FOLLOWER LOGIC: MCap Sweet Spot (Respect .env)
             if (marketCap < minMCap || marketCap > maxMCap) {
                 return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: true, marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
-            // 🕒 AGE CHECK
+            // 🕒 AGE CHECK (Second Wave: 2-96 Hours)
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
             if (ageHours < 2 || ageHours > 96) {
-                const isPermPermanent = ageHours > 96 || ageHours < 1;
-                return { passed: false, reason: ageHours > 96 ? 'too_old' : 'too_young', permanent: isPermPermanent, marketCap, symbol, pairCreatedAt, socials, liquidity };
+                const isPerm = ageHours > 96 || ageHours < 1;
+                return { passed: false, reason: ageHours > 96 ? 'too_old' : 'too_young', permanent: isPerm, marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
             // 🚀 VOLUME SURGE
@@ -220,16 +213,8 @@ export class AnalyzerService {
             const volumeSurge = volume5m / (volumeH1 / 12 || 1);
             
             if (volumeSurge < 1.5) {
-                return { 
-                    passed: true, 
-                    liquidity, 
-                    marketCap, 
-                    velocity, 
-                    socials,
-                    symbol,
-                    pairCreatedAt,
-                    volumeSurge
-                };
+                this.logger.debug(`[${tokenMint}] Surge low: ${volumeSurge.toFixed(2)}x. Waiting for breakout...`);
+                return { passed: false, reason: 'low_surge', volumeSurge, marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
             // 🐋 SMART MONEY ACCUMULATION

@@ -38,21 +38,18 @@ export class TradeService implements OnModuleInit {
         private readonly prismaService: PrismaService,
         private readonly reportingService: ReportingService,
     ) {
+        const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
+        this.connection = new Connection(rpcEndpoint, 'confirmed');
+        this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
+        this.wallet = Keypair.fromSecretKey(bs58.decode(this.configService.get<string>('PRIVATE_KEY') || ''));
+
+        // CONFIG BUDGET (Updated by Amirull)
         this.totalCapital = Number.parseFloat(this.configService.get<string>('TOTAL_CAPITAL', '20'));
-        this.reserveAmount = Number.parseFloat(this.configService.get<string>('RESERVE_AMOUNT', '5'));
+        this.reserveAmount = Number.parseFloat(this.configService.get<string>('RESERVE_AMOUNT', '8')); // $20 - (4 slots * $3) = $8 reserve
         this.totalSlots = Number.parseInt(this.configService.get<string>('TOTAL_SLOTS', '4'), 10);
-        
-        const directSize = this.configService.get<string>('POSITION_SIZE_USD');
-        if (directSize) {
-            this.positionSizeUSD = Number.parseFloat(directSize);
-        } else {
-            this.positionSizeUSD = (this.totalCapital - this.reserveAmount) / this.totalSlots;
-        }
+        this.positionSizeUSD = Number.parseFloat(this.configService.get<string>('POSITION_SIZE_USD', '3'));
 
         this.slippageBps = Number.parseInt(this.configService.get<string>('SLIPPAGE_BPS', '100'), 10);
-        this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
-
-        this.setupWalletAndConnection();
     }
 
     async onModuleInit() {
