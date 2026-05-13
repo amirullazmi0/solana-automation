@@ -43,7 +43,7 @@ export class PriceMonitorService {
 
     private readonly processingTrades = new Set<number>();
 
-    @Interval(5000)
+    @Interval(2000)
     async monitorPrices() {
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN' },
@@ -60,10 +60,10 @@ export class PriceMonitorService {
                 const stats = await this.getCurrentStats(trade.tokenMint);
                 
                 if (stats && stats.price > 0) {
-                    // DETEKSI RUGPULL: Kalau likuiditas ditarik > 35% (naik dari 15%)
+                    // DETEKSI RUGPULL: Kalau likuiditas ditarik > 25% (lebih sensitif)
                     if (trade.entryLiquidity && trade.entryLiquidity > 0 && stats.liquidity > 0) {
                         const liqDrop = ((trade.entryLiquidity - stats.liquidity) / trade.entryLiquidity) * 100;
-                        if (liqDrop > 35) {
+                        if (liqDrop > 25) {
                             this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 RUGPULL DETECTED! Liquidity dropped ${liqDrop.toFixed(2)}%. PANIC SELLING!`);
                             await this.tradeService.executeSell(trade.id, stats.price, true);
                             continue;
@@ -198,45 +198,14 @@ export class PriceMonitorService {
             }
         }
 
-        // 1. CONFIRMED STOP LOSS (Anti-Shakeout)
-        // Bot nggak langsung jual saat kena SL. Nunggu 3x konfirmasi dulu.
+        // 1. HARD STOP LOSS (Immediate Exit)
         const stopLossThreshold = trade.entryPrice - trade.entryPrice * (this.stopLossPercent / 100);
         
         if (trade.highestPrice <= trade.entryPrice * 1.05) {
             if (currentPrice <= stopLossThreshold) {
-                // FITUR SABAR: Jangan jual kalau baru beli kurang dari 60 detik
-                if (holdingTimeSeconds < 60) return;
-
-                // Tambah counter konfirmasi
-                const confirms = (this.slConfirmCount.get(trade.id) || 0) + 1;
-                this.slConfirmCount.set(trade.id, confirms);
-
-                this.logger.log(`[Slot ${trade.slotNumber}] 📉 Below SL (${confirms}/3 confirms). Price: $${currentPrice.toFixed(8)} | SL: $${stopLossThreshold.toFixed(8)}`);
-
-                // Baru jual setelah 3x konfirmasi BERTURUT-TURUT
-                if (confirms >= 3) {
-                    // Smart Check: Kalau koin lagi rame yang beli, sabar dulu
-                    const isBuyPressureHigh = await this.checkBuyPressure(trade.tokenMint);
-                    if (isBuyPressureHigh) {
-                        this.logger.log(`[Slot ${trade.slotNumber}] 💎 High Buy Pressure! Resetting SL counter. Holding for rebound...`);
-                        this.slConfirmCount.set(trade.id, 0); // Reset counter
-                        return;
-                    }
-
-                    this.logger.warn(`[Slot ${trade.slotNumber}] ❌ Hard Stop Loss confirmed (3x). Selling at $${currentPrice}`);
-                    this.slConfirmCount.delete(trade.id);
-                    await this.tradeService.executeSell(trade.id, currentPrice, true);
-                    return;
-                }
-
-                // Belum 3x konfirmasi, hold dulu
+                this.logger.warn(`[Slot ${trade.slotNumber}] ❌ Stop Loss hit. Selling immediately at $${currentPrice}`);
+                await this.tradeService.executeSell(trade.id, currentPrice, true);
                 return;
-            } else {
-                // Harga naik lagi, reset counter
-                if (this.slConfirmCount.has(trade.id)) {
-                    this.logger.log(`[Slot ${trade.slotNumber}] 📈 Price recovered! Resetting SL counter.`);
-                    this.slConfirmCount.delete(trade.id);
-                }
             }
         }
 
