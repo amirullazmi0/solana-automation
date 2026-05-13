@@ -47,6 +47,7 @@ model Watchlist {
   mcap          Float?
   liquidity     Float?
   volumeSurge   Float?
+  checkCount    Int             @default(0)
   lastCheckedAt DateTime        @default(now())
   createdAt     DateTime        @default(now())
   status        WatchlistStatus @default(PENDING)

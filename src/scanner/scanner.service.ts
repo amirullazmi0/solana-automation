@@ -228,11 +228,18 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         }
 
         try {
-            // Upsert ke Watchlist sebagai PENDING di awal
+            // Upsert ke Watchlist sebagai PENDING di awal & increment checkCount
             await this.prismaService.watchlist.upsert({
                 where: { tokenMint },
-                update: { lastCheckedAt: new Date() },
-                create: { tokenMint, status: 'PENDING' }
+                update: { 
+                    lastCheckedAt: new Date(),
+                    checkCount: { increment: 1 } 
+                },
+                create: { 
+                    tokenMint, 
+                    status: 'PENDING',
+                    checkCount: 1
+                }
             });
 
             while (Date.now() - startTime < maxWaitTime) {
