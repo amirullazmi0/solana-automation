@@ -165,26 +165,44 @@ export class ReportingService implements OnModuleInit {
         socials?: TokenMetadata['socials']
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
-        const message = `🚀 *BUY ALERT*\nToken: *${displaySymbol}*\nMint: \`${tokenMint}\`\nPrice: \`$${price.toFixed(8)}\`\nSlot Used: \`${slotUsed}\``;
+        const message = `🚀 *SOLANA BUY ALERT* 🚀\n` +
+                        `━━━━━━━━━━━━━━━━━━\n` +
+                        `💎 *Token:* ${displaySymbol}\n` +
+                        `🆔 *Mint:* \`${tokenMint}\`\n` +
+                        `💰 *Price:* \`$${price.toFixed(8)}\`\n` +
+                        `🧱 *Slot:* #${slotUsed}\n` +
+                        `━━━━━━━ 📊 ━━━━━━━\n` +
+                        `📈 *Action:* BUY EXECUTION`;
         
-        const buttons: TelegramBot.InlineKeyboardButton[] = [];
-        if (socials?.twitter) buttons.push({ text: '🐦 Twitter', url: socials.twitter });
-        if (socials?.telegram) buttons.push({ text: '📱 Telegram', url: socials.telegram });
-        if (socials?.website) buttons.push({ text: '🌐 Website', url: socials.website });
-        buttons.push({ text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` });
+        const row1: TelegramBot.InlineKeyboardButton[] = [];
+        if (socials?.twitter) row1.push({ text: '🐦 Twitter', url: socials.twitter });
+        if (socials?.telegram) row1.push({ text: '📱 Telegram', url: socials.telegram });
+        
+        const row2: TelegramBot.InlineKeyboardButton[] = [
+            { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` },
+            { text: '🛡️ RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` }
+        ];
 
-        const options: TelegramBot.SendMessageOptions = buttons.length > 0 ? {
+        const row3: TelegramBot.InlineKeyboardButton[] = [
+            { text: '🔍 Solscan', url: `https://solscan.io/token/${tokenMint}` }
+        ];
+
+        const options: TelegramBot.SendMessageOptions = {
             reply_markup: {
-                inline_keyboard: [buttons]
+                inline_keyboard: [row1, row2, row3].filter(r => r.length > 0)
             }
-        } : {};
+        };
 
         await this.sendMessage(message, options);
     }
 
     async sendTrailingAlert(tokenMint: string, newStopPrice: number, currentPrice: number, symbol?: string) {
         const displaySymbol = symbol || 'UNKNOWN';
-        const message = `📈 *TRAILING STOP UPDATED*\nToken: *${displaySymbol}*\nNew Stop: \`$${newStopPrice.toFixed(8)}\`\nCurrent Price: \`$${currentPrice.toFixed(8)}\``;
+        const message = `📈 *TRAILING STOP UPDATED*\n` +
+                        `━━━━━━━━━━━━━━━━━━\n` +
+                        `💎 *Token:* ${displaySymbol}\n` +
+                        `🛑 *New Stop:* \`$${newStopPrice.toFixed(8)}\`\n` +
+                        `💹 *Price:* \`$${currentPrice.toFixed(8)}\``;
         await this.sendMessage(message);
     }
 
@@ -197,18 +215,46 @@ export class ReportingService implements OnModuleInit {
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
         const emoji = netProfitPercent >= 0 ? '💰' : '🛑';
-        const reason = isStopLoss ? 'Stop Loss Triggered' : 'Take Profit Triggered';
-        const message = `${emoji} *SELL ALERT* (${reason})\nToken: *${displaySymbol}*\nSell Price: \`$${sellPrice.toFixed(8)}\`\nNet Profit: \`${netProfitPercent.toFixed(2)}%\``;
-        await this.sendMessage(message);
+        const action = netProfitPercent >= 0 ? 'TAKE PROFIT' : 'STOP LOSS';
+        const profitEmoji = netProfitPercent >= 0 ? '🟢' : '🔴';
+        
+        const message = `${emoji} *SOLANA SELL ALERT* ${emoji}\n` +
+                        `━━━━━━━━━━━━━━━━━━\n` +
+                        `💎 *Token:* ${displaySymbol}\n` +
+                        `🆔 *Mint:* \`${tokenMint}\`\n` +
+                        `💰 *Sell Price:* \`$${sellPrice.toFixed(8)}\`\n` +
+                        `📊 *Result:* ${profitEmoji} *${netProfitPercent.toFixed(2)}%*\n` +
+                        `━━━━━━━━━━━━━━━━━━\n` +
+                        `⚡ *Action:* ${action} TRIGGERED`;
+
+        const buttons: TelegramBot.InlineKeyboardButton[] = [
+            { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` },
+            { text: '🔍 Solscan', url: `https://solscan.io/token/${tokenMint}` }
+        ];
+
+        await this.sendMessage(message, {
+            reply_markup: { inline_keyboard: [buttons] }
+        });
     }
 
     async sendWatchlistNotification(tokenMint: string, mcap: number, ageHours: number, symbol?: string, surge?: number) {
         const displaySymbol = symbol || 'UNKNOWN';
-        const surgeDisplay = surge ? `\nSurge: \`${surge.toFixed(2)}x\`` : '';
-        const message = `🔍 *WATCHLIST ADDED*${surgeDisplay}\nToken: *${displaySymbol}*\nMint: \`${tokenMint}\`\nMCap: \`$${mcap.toLocaleString()}\`\nAge: \`${ageHours.toFixed(1)}h\``;
+        const surgeDisplay = surge ? `🌊 *Surge:* \`${surge.toFixed(2)}x\`` : '🌊 *Surge:* `N/A`';
+        
+        const message = `🔍 *SECOND-WAVE RADAR* 🔍\n` +
+                        `━━━━━━━━━━━━━━━━━━\n` +
+                        `💎 *Token:* ${displaySymbol}\n` +
+                        `🆔 *Mint:* \`${tokenMint}\`\n` +
+                        `━━━━━━━ 📈 ━━━━━━━\n` +
+                        `💹 *MCap:* \`$${mcap.toLocaleString()}\`\n` +
+                        `${surgeDisplay}\n` +
+                        `⏳ *Age:* \`${ageHours.toFixed(1)}h\`\n` +
+                        `━━━━━━━ 🛡️ ━━━━━━━\n` +
+                        `✅ *Status:* MONITORING...`;
         
         const buttons: TelegramBot.InlineKeyboardButton[] = [
-            { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` }
+            { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` },
+            { text: '🛡️ RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` }
         ];
 
         await this.sendMessage(message, {
