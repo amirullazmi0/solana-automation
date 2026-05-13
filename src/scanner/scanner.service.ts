@@ -107,6 +107,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
         // TTL 30 menit untuk koin dari WS (Lebih agresif dibanding polling)
         this.seenTokens.set(mint, now + 30 * 60 * 1000);
+        this.activeMonitoring++;
         this.processNewToken(mint);
     }
 
@@ -337,7 +338,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             where: { tokenMint },
                             data: { status: 'FAILED', reason: result.reason }
                         });
-                        this.seenTokens.delete(tokenMint);
+                        // Cooldown 2 jam biar nggak masuk discovery lagi
+                        this.seenTokens.set(tokenMint, Date.now() + 2 * 60 * 60 * 1000); 
                         return;
                     }
 

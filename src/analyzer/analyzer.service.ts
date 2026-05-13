@@ -236,7 +236,8 @@ export class AnalyzerService {
             const velocity = volume5m / (marketCap || 1);
             
             if (marketCap < minMCap || marketCap > maxMCap) {
-                return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: true, marketCap, symbol, pairCreatedAt, socials, liquidity };
+                const isPerm = marketCap > maxMCap; // MCap kegedean baru permanent
+                return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: isPerm, marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);

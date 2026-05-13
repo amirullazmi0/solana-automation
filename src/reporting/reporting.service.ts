@@ -79,8 +79,6 @@ export class ReportingService implements OnModuleInit {
                 await this.handleBalanceRequest();
             } else if (text === '🔍 Watchlist') {
                 await this.handleWatchlistRequest();
-            } else if (text === '💼 Portfolio') {
-                await this.handlePortfolioRequest();
             } else if (this.isSolanaAddress(text)) {
                 await this.handleTokenInput(text);
             }
@@ -103,7 +101,7 @@ export class ReportingService implements OnModuleInit {
             reply_markup: {
                 keyboard: [
                     [{ text: '📊 Status' }, { text: '💰 Balance' }],
-                    [{ text: '🔍 Watchlist' }, { text: '💼 Portfolio' }]
+                    [{ text: '🔍 Watchlist' }]
                 ],
                 resize_keyboard: true
             }
@@ -134,61 +132,6 @@ export class ReportingService implements OnModuleInit {
         }
 
         await this.sendMessage(msg);
-    }
-
-    async handlePortfolioRequest() {
-        const tradeService = this.moduleRef.get(TradeService, { strict: false });
-        const holdings = await tradeService.getWalletHoldings();
-
-        if (holdings.length === 0) {
-            await this.sendMessage('💼 *Portfolio Kosong.* Tidak ada token ditemukan di wallet kamu.');
-            return;
-        }
-
-        await this.sendMessage(`💼 *Menampilkan ${holdings.length} holdings dari wallet kamu...*`);
-
-        for (const holding of holdings) {
-            const currentPrice = await this.fetchCurrentPrice(holding.mint);
-            
-            // Cari data trade di DB untuk hitung profit
-            const trade = await this.prismaService.trade.findFirst({
-                where: { tokenMint: holding.mint, status: 'OPEN' },
-                orderBy: { createdAt: 'desc' }
-            });
-
-            let profitDisplay = 'N/A';
-            let emoji = '⚪';
-            let entryInfo = '';
-
-            if (trade && currentPrice) {
-                const profit = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
-                profitDisplay = `${profit >= 0 ? '+' : ''}${profit.toFixed(2)}%`;
-                emoji = profit >= 0 ? '📈' : '📉';
-                entryInfo = `💰 Entry: \`$${trade.entryPrice.toFixed(8)}\` | `;
-            }
-
-            const priceDisplay = currentPrice ? `$${currentPrice.toFixed(8)}` : '(N/A)';
-
-            let msg = `💎 *${holding.symbol}*\n`;
-            msg += `🆔 \`${holding.mint}\`\n`;
-            msg += `📦 Balance: \`${holding.balance.toLocaleString()}\`\n`;
-            msg += `${entryInfo}Price: \`${priceDisplay}\` ${emoji}\n`;
-            msg += `📊 Profit: *${profitDisplay}*`;
-
-            const buttons: TelegramBot.InlineKeyboardButton[][] = [
-                [
-                    { text: '💵 Buy', callback_data: `buy_menu:${holding.mint}` },
-                    { text: '💸 Sell', callback_data: `sell_menu:${holding.mint}` }
-                ],
-                [
-                    { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${holding.mint}` }
-                ]
-            ];
-
-            await this.sendMessage(msg, {
-                reply_markup: { inline_keyboard: buttons }
-            });
-        }
     }
 
     private async handleTokenInput(mint: string) {
