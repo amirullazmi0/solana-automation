@@ -253,7 +253,7 @@ export class PriceMonitorService {
             });
 
             const pair = response.data.pairs?.[0];
-            if (!pair || !pair.txns?.m5) return false;
+            if (!pair?.txns?.m5) return false;
 
             const buys = pair.txns.m5.buys || 0;
             const sells = pair.txns.m5.sells || 0;

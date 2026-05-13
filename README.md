@@ -1,115 +1,68 @@
-# 🤖 Solana Trend Follower Bot
+# 🚀 Solana Trend Follower Bot (Advanced Predator)
 
-Bot trading otomatis berbasis **NestJS** untuk Solana — menggunakan strategi **Trend Follower (Second Wave)** yang menargetkan koin micro-cap potensial dari DexScreener.
+Bot otomatis untuk jaringan Solana yang fokus pada strategi **"Second Wave"** dan **Smart Momentum**. Didesain untuk mengejar koin yang sudah melewati fase konsolidasi dan siap untuk ledakan harga kedua.
 
----
+## 🛡️ Core Features (Smart & Secure)
 
-## 🎯 Strategi: Second Wave Trend Follower
+### 1. 🧠 Smart Retry Watchlist (Database-Backed)
+Bot tidak akan melupakan koin potensial. Koin yang gagal filter sementara (terlalu muda, MCap kecil, atau tren bearish) akan disimpan di database **Watchlist** dan dipantau terus-menerus oleh background radar. Begitu kondisinya matang, bot langsung sikat!
 
-Bot **TIDAK** lagi sniper koin baru (0 menit). Strategi ini menargetkan koin yang:
-- Sudah berumur **2-96 jam** (sniper bot sudah pergi)
-- Market Cap **$30k - $150k** (sweet spot untuk koin yang sudah "establish")
-- Sedang ada **volume surge** (1.5x dari rata-rata) → tanda breakout
-- Ada indikasi **smart money accumulation** (lebih banyak buy tx dari sell)
+### 2. 🪓 Advanced Trading Metrics
+Menggunakan rumus matematis untuk membedakan koin "micin" biasa dengan koin yang punya potensi ledakan nyata:
+*   **VoL (Velocity of Liquidity)**: Mengukur kecepatan aliran uang dibanding ketersediaan liquidity di pool.
+*   **Volume Z-Score**: Deteksi anomali volume untuk menemukan jejak akumulasi "Whale" atau insider.
+*   **Safety Index**: Analisa konsentrasi Top 10 Holders. Bot akan menolak koin jika Top 10 pegang > 30% supply.
 
-### 🧠 Kenapa Second Wave lebih menguntungkan?
+### 3. 💎 Premium Telegram Alerts
+Notifikasi real-time yang informatif dan premium:
+*   Layout rapi dengan garis pemisah dan emoji.
+*   Tombol akses cepat ke **DexScreener**, **RugCheck**, dan **Solscan**.
+*   Indikator profit visual (🟢/🔴).
 
-| Fitur | Sniper (0 menit) | Trend Follower (2-96 jam) |
-|---|---|---|
-| Saingan | Bot monster & MEV | Volume asli + komunitas |
-| Risiko Rug | Sangat tinggi (99%) | Lebih rendah (sudah survive) |
-| Slippage | Tinggi (30%+) | Menengah (3-5%) |
-| Modal | High Risk | Optimized Risk |
+### 4. 🔒 Hardened Security
+*   **DNS Hardening**: Fallback DoH (DNS over HTTPS) untuk menghindari manipulasi RPC.
+*   **LP Burn Enforcement**: Wajib 100% Liquidity Burned.
+*   **Mint Authority Check**: Wajib Mint Authority Disabled.
+*   **Freeze Authority Check**: Wajib Freeze Authority Disabled.
 
----
+## ⚙️ Configuration (.env)
+Sesuaikan parameter trading kamu di file `.env`:
+*   `MIN_LIQUIDITY_USD`: Minimal likuiditas di pool.
+*   `MIN_MCAP` & `MAX_MCAP`: Range Market Cap target (Sweet Spot Second Wave).
+*   `TRAILING_DISTANCE_PERCENT`: Jarak trailing stop untuk mengunci profit.
+*   `STOP_LOSS_PERCENT`: Batas toleransi kerugian.
 
-## 🔍 Discovery Engine
+## 🛠 Tech Stack
+*   **Runtime**: Node.js with NestJS (TypeScript)
+*   **Database**: PostgreSQL with Prisma ORM
+*   **Blockchain**: Solana Web3.js
+*   **APIs**: Jupiter (Paid/Metis), DexScreener, RugCheck.
 
-Bot melakukan **polling setiap 30 detik** ke DexScreener API untuk memantau:
-1. **Boosted Tokens**: Koin yang sedang dipromosikan (marketing budget aktif).
-2. **Trending Profiles**: Koin yang sedang ramai dibicarakan secara organik.
-
----
-
-## 🛡️ Filter Berlapis (Gate System)
-
-### Gate 1: MCap Range (Permanent)
-```
-MIN_MCAP = $30,000
-MAX_MCAP = $150,000
-```
-Gagal → langsung abaikan, tidak di-retry.
-
-### Gate 2: Age Check (Semi-Permanent)
-```
-MIN_AGE = 2 jam   (anti-sniper)
-MAX_AGE = 96 jam  (koin belum 'mati')
-```
-
-### Gate 3: Volume Surge
-```
-Volume 5 menit terakhir > 1.5x rata-rata volume per 5 menit dalam 1 jam
-```
-
-### Gate 4: Security Check (Hardened)
-- ✅ **Mint Authority**: Disabled (No more printing tokens)
-- ✅ **Freeze Authority**: Disabled (No more honeypots)
-- ✅ **RugCheck API**: Score < 3000 & No "Danger" level risks.
-- ✅ **Min Liquidity**: $5,000
-- ✅ **Min Volume**: $1,000
+## 🚀 Quick Start
+1.  `npm install`
+2.  `npx prisma db push`
+3.  `npm run dev`
 
 ---
-
-## 💰 Trade Management
-
-### Entry
-- **Max Slots**: 4 posisi bersamaan.
-- **Position Size**: Diambil dari `(Total Capital - Reserve) / Slots`.
-- **Slippage**: **100 BPS (1%)** default (bisa disesuaikan).
-- **Priority Fee**: 2x auto-multiplier (biar transaksi cepat masuk).
-
-### Exit
-| Kondisi | Aksi |
-|---|---|
-| Profit +20% | Quick Take Profit |
-| Trailing Stop | Terpaku pada harga tertinggi saat profit > 3% |
-| Loss -40% | Stop Loss (dengan 3x konfirmasi) |
-| Dev Jual > 15% | **Panic Sell** (Deteksi Dump Creator) |
-| Likuiditas Turun > 35% | **Rugpull Protection** (Panic Sell) |
-
-### 🛡️ Anti-Shakeout (Confirmed Stop Loss)
-Bot **TIDAK** langsung jual saat harga menyentuh SL. Bot menunggu 3x konfirmasi harga di bawah threshold, KECUALI jika **Buy Pressure** terdeteksi masih tinggi (Pembeli > 2x Penjual).
-
----
-
-## ⚙️ Konfigurasi (.env)
-
-```env
-# Wallet & RPC
-PRIVATE_KEY=your_key
-RPC_ENDPOINT=https://...
-WSS_ENDPOINT=wss://...
-
-# Budgeting
-TOTAL_CAPITAL=20
-RESERVE_AMOUNT=5
-TOTAL_SLOTS=4
-
-# Exit Strategy
-TAKE_PROFIT_PERCENT=20.0
-STOP_LOSS_PERCENT=40.0
-TRAILING_DISTANCE_PERCENT=1.5
-SLIPPAGE_BPS=100
-```
-
----
+*Created with ❤️ by Antigravity for Amirull Azmi.*
 
 ## 🏗️ Arsitektur
 
 ```
 ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
 │ ScannerService  │─────▶│ AnalyzerService │─────▶│  TradeService   │
-│ (Discovery)     │      │ (Safety Check)  │      │ (Execution)     │
+│ (Discovery)     │      // 🛡️ ADVANCED METRICS CHECK
+                         // 1. VoL Check (Min 0.02 - Sedikit lebih agresif)
+                         if (traction.volScore && traction.volScore < 0.02) {
+                             this.logger.debug(`[${tokenMint}] Low VoL Score: ${traction.volScore.toFixed(4)}. Supply not shocked enough.`);
+                             return { safe: false, reason: 'low_vol_score', metadata: baseMetadata };
+                         }
+
+                         // 2. Z-Score Anomaly Check (Z > 1.5 - Menangkap anomali lebih awal)
+                         if (traction.zScore && traction.zScore < 1.5) {
+                             this.logger.debug(`[${tokenMint}] Normal Volume (Z-Score: ${traction.zScore.toFixed(2)}). Waiting for anomaly...`);
+                             return { safe: false, reason: 'no_volume_anomaly', metadata: baseMetadata };
+                         }
 └─────────────────┘      └─────────────────┘      └────────┬────────┘
                                                            │
                                                            ▼
