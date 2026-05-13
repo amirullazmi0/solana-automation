@@ -123,7 +123,11 @@ export class TradeService implements OnModuleInit {
         return null;
     }
 
-    async attemptBuy(tokenMint: string, metadata?: TokenMetadata): Promise<{ success: boolean; message: string }> {
+    async attemptBuy(
+        tokenMint: string, 
+        metadata?: TokenMetadata, 
+        customAmountUSD?: number
+    ): Promise<{ success: boolean; message: string }> {
         // 1. Cek apakah sudah punya koin ini (OPEN) atau sudah pernah trading dalam 24 jam terakhir (Cooldown)
         const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
         const existing = await this.prismaService.trade.findFirst({
@@ -133,13 +137,13 @@ export class TradeService implements OnModuleInit {
             }
         });
 
-        if (existing) {
+        if (existing && !customAmountUSD) { // Jika manual buy (ada customAmount), abaikan cooldown
             const msg = existing.status === 'OPEN' ? `Already holding ${tokenMint}` : `Token ${tokenMint} is in 24h cooldown. Skip.`;
             return { success: false, message: msg };
         }
 
         const openTradesCount = await this.prismaService.trade.count({ where: { status: 'OPEN' } });
-        if (openTradesCount >= this.totalSlots) {
+        if (openTradesCount >= this.totalSlots && !customAmountUSD) {
             return { success: false, message: 'All trading slots are full.' };
         }
 
@@ -157,17 +161,22 @@ export class TradeService implements OnModuleInit {
             }
         }
 
-        // Calculate amount in SOL (Price is currently hardcoded for estimation)
-        const amountInSol = this.positionSizeUSD / 150; 
+        // Use custom amount if provided, otherwise use config
+        const buyAmountUSD = customAmountUSD || this.positionSizeUSD;
+        
+        // Ambil harga SOL terbaru
+        const solPrice = await this.getSolPrice();
+        const amountInSol = buyAmountUSD / solPrice; 
         const amountInLamports = Math.floor(amountInSol * 1_000_000_000);
 
-        this.logger.log(`[Slot ${slotToUse}] Attempting to buy ${tokenMint} with ${amountInSol.toFixed(4)} SOL`);
+        this.logger.log(`[Slot ${slotToUse}] Attempting to buy ${tokenMint} with $${buyAmountUSD} (${amountInSol.toFixed(4)} SOL)`);
 
         const { success, entryPrice, error } = await this.executeJupiterSwap(
             WRAPPED_SOL_MINT,
             tokenMint,
             amountInLamports,
             'BUY',
+            buyAmountUSD,
         );
 
         if (success && entryPrice > 0) {
@@ -209,7 +218,12 @@ export class TradeService implements OnModuleInit {
         return { success: false, message: `Swap failed: ${error || 'Unknown error'}` };
     }
 
-    async executeSell(tradeId: number, currentPrice: number, isStopLoss: boolean) {
+    async executeSell(
+        tradeId: number, 
+        currentPrice: number, 
+        isStopLoss: boolean,
+        percentage: number = 1.0
+    ) {
         const trade = await this.prismaService.trade.findUnique({ where: { id: tradeId } });
         if (!trade || trade.status !== 'OPEN') {
             this.logger.debug(`[Trade ${tradeId}] Already closed or not found. Skipping sell.`);
@@ -217,28 +231,32 @@ export class TradeService implements OnModuleInit {
         }
 
         try {
-            // 1. ATOMIC LOCK: Tandai status CLOSED sementara agar monitor lain tidak memproses
-            await this.prismaService.trade.update({
-                where: { id: tradeId },
-                data: { status: 'CLOSED' }
-            });
+            // 1. ATOMIC LOCK (Hanya jika full sell)
+            if (percentage >= 1.0) {
+                await this.prismaService.trade.update({
+                    where: { id: tradeId },
+                    data: { status: 'CLOSED' }
+                });
+            }
 
-            // 2. DAPETIN SALDO ASLI: Jangan tebak-tebak buah manggis dari USD
-            // Kita pakai balance asli di wallet biar gak "Insufficient Funds"
+            // 2. DAPETIN SALDO ASLI
             const actualBalance = await this.getTokenBalance(this.wallet.publicKey.toBase58(), trade.tokenMint);
+            const sellAmount = actualBalance * percentage;
             const decimals = await this.getTokenDecimals(trade.tokenMint);
-            const amountInLamports = Math.floor(actualBalance * Math.pow(10, decimals));
+            const amountInLamports = Math.floor(sellAmount * Math.pow(10, decimals));
 
             if (amountInLamports <= 0) {
                 this.logger.warn(`[Slot ${trade.slotNumber}] ⚠️ Zero balance for ${trade.tokenMint}. Closing trade.`);
-                await this.prismaService.trade.update({
-                    where: { id: tradeId },
-                    data: { exitPrice: 0, profitUsd: 0 }
-                });
+                if (percentage >= 1.0) {
+                    await this.prismaService.trade.update({
+                        where: { id: tradeId },
+                        data: { exitPrice: 0, profitUsd: 0 }
+                    });
+                }
                 return;
             }
 
-            this.logger.log(`[Slot ${trade.slotNumber}] 💸 Executing SELL for ${trade.symbol} (${trade.tokenMint}). Amount: ${actualBalance}`);
+            this.logger.log(`[Slot ${trade.slotNumber}] 💸 Executing SELL (${(percentage * 100).toFixed(0)}%) for ${trade.symbol} (${trade.tokenMint}). Amount: ${sellAmount}`);
             
             const { success, error } = await this.executeJupiterSwap(
                 trade.tokenMint,
@@ -249,18 +267,27 @@ export class TradeService implements OnModuleInit {
 
             if (success) {
                 const profit = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
-                
-                // Ambil harga SOL terbaru untuk konversi modal ke USD yang akurat
                 const solPrice = await this.getSolPrice();
-                const estimatedProfitUsd = (actualBalance * currentPrice) - (trade.amountInSol * solPrice);
+                const estimatedProfitUsd = (sellAmount * currentPrice) - ((trade.amountInSol * percentage) * solPrice);
 
-                await this.prismaService.trade.update({
-                    where: { id: tradeId },
-                    data: { 
-                        exitPrice: currentPrice,
-                        profitUsd: estimatedProfitUsd
-                    },
-                });
+                if (percentage >= 1.0) {
+                    await this.prismaService.trade.update({
+                        where: { id: tradeId },
+                        data: { 
+                            exitPrice: currentPrice,
+                            profitUsd: (trade.profitUsd || 0) + estimatedProfitUsd
+                        },
+                    });
+                } else {
+                    // Update trade record for partial sell
+                    await this.prismaService.trade.update({
+                        where: { id: tradeId },
+                        data: {
+                            amountInSol: trade.amountInSol * (1 - percentage),
+                            profitUsd: (trade.profitUsd || 0) + estimatedProfitUsd
+                        }
+                    });
+                }
                 
                 await this.reportingService.sendSellAlert(
                     trade.tokenMint,
@@ -269,19 +296,20 @@ export class TradeService implements OnModuleInit {
                     isStopLoss,
                     trade.symbol || undefined,
                 );
-                this.logger.log(`[Slot ${trade.slotNumber}] ✅ Position CLOSED. Profit: ${profit.toFixed(2)}%`);
+                this.logger.log(`[Slot ${trade.slotNumber}] ✅ Position ${percentage >= 1.0 ? 'CLOSED' : 'PARTIALLY SOLD'}. Profit: ${profit.toFixed(2)}%`);
             } else {
                 throw new Error(error || 'Swap failed');
             }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            this.logger.error(`[Slot ${trade.slotNumber}] ❌ SELL FAILED: ${message}. Rolling back to OPEN.`);
+            this.logger.error(`[Slot ${trade.slotNumber}] ❌ SELL FAILED: ${message}. Rolling back.`);
             
-            // Rollback status if swap fails so we can try again
-            await this.prismaService.trade.update({
-                where: { id: tradeId },
-                data: { status: 'OPEN' }
-            });
+            if (percentage >= 1.0) {
+                await this.prismaService.trade.update({
+                    where: { id: tradeId },
+                    data: { status: 'OPEN' }
+                });
+            }
         }
     }
 
@@ -290,6 +318,7 @@ export class TradeService implements OnModuleInit {
         outputMint: string,
         amount: number,
         side: 'BUY' | 'SELL',
+        buyAmountUSD?: number,
         retryCount = 0,
     ): Promise<{ success: boolean; entryPrice: number; error?: string }> {
         try {
@@ -333,7 +362,8 @@ export class TradeService implements OnModuleInit {
             let entryPrice = 0;
             if (side === 'BUY') {
                 const decimals = await this.getTokenDecimals(outputMint);
-                entryPrice = this.positionSizeUSD / (quoteData.outAmount / Math.pow(10, decimals));
+                const usdValue = buyAmountUSD || this.positionSizeUSD;
+                entryPrice = usdValue / (quoteData.outAmount / Math.pow(10, decimals));
             }
 
             const swapResponse = await axios.post(
@@ -438,5 +468,31 @@ export class TradeService implements OnModuleInit {
         } catch {
             return 150; // Fallback jika API Jupiter down
         }
+    }
+
+    /**
+     * Manual Trade Handlers for Telegram
+     */
+    async handleManualBuy(tokenMint: string, amountUSD: number): Promise<{ success: boolean; message: string }> {
+        this.logger.log(`[Manual Buy] Initiating buy for ${tokenMint} with $${amountUSD}`);
+        return this.attemptBuy(tokenMint, undefined, amountUSD);
+    }
+
+    async handleManualSell(tokenMint: string, percentage: number): Promise<{ success: boolean; message: string }> {
+        const trade = await this.prismaService.trade.findFirst({
+            where: { tokenMint, status: 'OPEN' }
+        });
+
+        if (!trade) {
+            return { success: false, message: 'No open trade found for this token.' };
+        }
+
+        const currentPrice = await this.reportingService.fetchCurrentPrice(tokenMint);
+        if (!currentPrice) {
+            return { success: false, message: 'Failed to fetch current price.' };
+        }
+
+        await this.executeSell(trade.id, currentPrice, false, percentage);
+        return { success: true, message: `Sell order for ${(percentage * 100).toFixed(0)}% executed.` };
     }
 }

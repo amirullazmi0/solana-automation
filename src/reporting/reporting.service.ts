@@ -6,6 +6,8 @@ import { Connection, PublicKey, Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
 import axios from 'axios';
 import { TokenMetadata } from '../analyzer/analyzer.service';
+import { ModuleRef } from '@nestjs/core';
+import { TradeService } from '../trade/trade.service';
 
 @Injectable()
 export class ReportingService implements OnModuleInit {
@@ -18,6 +20,7 @@ export class ReportingService implements OnModuleInit {
     constructor(
         private configService: ConfigService,
         private prismaService: PrismaService,
+        private moduleRef: ModuleRef,
     ) {
         const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
         this.chatId = this.configService.get<string>('TELEGRAM_CHAT_ID') || '';
@@ -65,19 +68,241 @@ export class ReportingService implements OnModuleInit {
                 return;
             }
 
+            if (!text) return;
+
             if (text === '/start' || text === '/help') {
-                await this.sendMessage(
-                    `🤖 *Solana Scalper Bot Active*\n\nAvailable commands:\n/status - Check open positions\n/balance - Check wallet balance\n/help - Show this message`,
-                );
-            } else if (text === '/status') {
+                await this.sendMainMenu();
+            } else if (text === '/status' || text === '📊 Status') {
                 await this.handleStatusRequest();
-            } else if (text === '/balance') {
+            } else if (text === '/balance' || text === '💰 Balance') {
                 await this.handleBalanceRequest();
+            } else if (text === '🔍 Watchlist') {
+                await this.handleWatchlistRequest();
+            } else if (text === '💼 Portfolio') {
+                await this.handlePortfolioRequest();
+            } else if (this.isSolanaAddress(text)) {
+                await this.handleTokenInput(text);
             }
+        });
+
+        this.bot.on('callback_query', async (query) => {
+            await this.handleCallbackQuery(query);
         });
     }
 
-    private async handleStatusRequest() {
+    private isSolanaAddress(text: string): boolean {
+        return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
+    }
+
+    private async sendMainMenu() {
+        const message = `🤖 *Solana Trend Follower Bot Active*\n\n` +
+                        `Selamat datang Amirull! Pilih menu di bawah untuk mengelola bot kamu.`;
+        
+        const options: TelegramBot.SendMessageOptions = {
+            reply_markup: {
+                keyboard: [
+                    [{ text: '📊 Status' }, { text: '💰 Balance' }],
+                    [{ text: '🔍 Watchlist' }, { text: '💼 Portfolio' }]
+                ],
+                resize_keyboard: true
+            }
+        };
+
+        await this.sendMessage(message, options);
+    }
+
+    private async handleWatchlistRequest() {
+        const pendingWatchlist = await this.prismaService.watchlist.findMany({
+            where: { status: 'PENDING' },
+            orderBy: { createdAt: 'desc' },
+            take: 10
+        });
+
+        if (pendingWatchlist.length === 0) {
+            await this.sendMessage('🔍 *Watchlist Kosong.* Saat ini tidak ada token yang dipantau.');
+            return;
+        }
+
+        let msg = '🔍 *Pending Watchlist:*\n\n';
+        for (const item of pendingWatchlist) {
+            const symbol = item.symbol || 'UNKNOWN';
+            msg += `💎 *${symbol}*\n`;
+            msg += `🆔 \`${item.tokenMint}\`\n`;
+            msg += `💹 MCap: \`$${item.mcap?.toLocaleString()}\` | Surge: \`${item.volumeSurge?.toFixed(1)}x\`\n`;
+            msg += `━━━━━━━━━━━━━━━━━━\n`;
+        }
+
+        await this.sendMessage(msg);
+    }
+
+    private async handlePortfolioRequest() {
+        const openTrades = await this.prismaService.trade.findMany({
+            where: { status: 'OPEN' },
+        });
+
+        if (openTrades.length === 0) {
+            await this.sendMessage('💼 *Portfolio Kosong.* Belum ada posisi terbuka.');
+            return;
+        }
+
+        await this.sendMessage('💼 *Mengambil data portfolio...*');
+
+        for (const trade of openTrades) {
+            const currentPrice = await this.fetchCurrentPrice(trade.tokenMint);
+            const profit = currentPrice 
+                ? ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100 
+                : 0;
+            
+            const priceDisplay = currentPrice ? `$${currentPrice.toFixed(8)}` : '(N/A)';
+            const profitDisplay = currentPrice ? `${profit >= 0 ? '+' : ''}${profit.toFixed(2)}%` : '(N/A)';
+            const emoji = profit >= 0 ? '📈' : '📉';
+            const displaySymbol = trade.symbol && trade.symbol !== 'UNKNOWN' ? trade.symbol : 'UNKNOWN';
+
+            let msg = `💎 *${displaySymbol}* (Slot #${trade.slotNumber})\n`;
+            msg += `🆔 \`${trade.tokenMint}\`\n`;
+            msg += `💰 Entry: \`$${trade.entryPrice.toFixed(8)}\` | Current: \`${priceDisplay}\` ${emoji}\n`;
+            msg += `📊 Profit: *${profitDisplay}*\n`;
+            msg += `🛑 Stop: \`$${trade.trailingStopPrice.toFixed(8)}\``;
+
+            const buttons: TelegramBot.InlineKeyboardButton[][] = [
+                [
+                    { text: '💵 Buy More', callback_data: `buy_menu:${trade.tokenMint}` },
+                    { text: '💸 Sell', callback_data: `sell_menu:${trade.tokenMint}` }
+                ],
+                [
+                    { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${trade.tokenMint}` }
+                ]
+            ];
+
+            await this.sendMessage(msg, {
+                reply_markup: { inline_keyboard: buttons }
+            });
+        }
+    }
+
+    private async handleTokenInput(mint: string) {
+        const symbol = await this.fetchTokenSymbolFromDex(mint);
+        const message = `🎯 *Token Detected: ${symbol}*\n` +
+                        `🆔 \`${mint}\`\n\n` +
+                        `Apa yang ingin kamu lakukan dengan token ini?`;
+        
+        const buttons: TelegramBot.InlineKeyboardButton[][] = [
+            [
+                { text: '💵 Buy', callback_data: `buy_menu:${mint}` },
+                { text: '💸 Sell', callback_data: `sell_menu:${mint}` }
+            ],
+            [
+                { text: '🛡️ RugCheck', url: `https://rugcheck.xyz/tokens/${mint}` },
+                { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${mint}` }
+            ]
+        ];
+
+        await this.sendMessage(message, {
+            reply_markup: { inline_keyboard: buttons }
+        });
+    }
+
+    private async handleCallbackQuery(query: TelegramBot.CallbackQuery) {
+        const data = query.data;
+        if (!data) return;
+
+        const [action, payload] = data.split(':');
+        const chatId = query.message?.chat.id.toString();
+
+        if (action === 'buy_menu') {
+            await this.sendBuyMenu(payload);
+        } else if (action === 'sell_menu') {
+            await this.sendSellMenu(payload);
+        } else if (action === 'buy_exec') {
+            const [mint, amount] = payload.split('|');
+            await this.executeManualBuy(mint, parseFloat(amount));
+        } else if (action === 'sell_exec') {
+            const [mint, percent] = payload.split('|');
+            await this.executeManualSell(mint, parseFloat(percent));
+        }
+
+        // Answer callback to remove loading state
+        await this.bot.answerCallbackQuery(query.id);
+    }
+
+    private async sendBuyMenu(mint: string) {
+        const message = `💵 *Pilih Jumlah Buy ($USD):*\nToken: \`${mint}\``;
+        const buttons: TelegramBot.InlineKeyboardButton[][] = [
+            [
+                { text: '$5', callback_data: `buy_exec:${mint}|5` },
+                { text: '$10', callback_data: `buy_exec:${mint}|10` }
+            ],
+            [
+                { text: '$15', callback_data: `buy_exec:${mint}|15` },
+                { text: '$20', callback_data: `buy_exec:${mint}|20` }
+            ]
+        ];
+
+        await this.sendMessage(message, {
+            reply_markup: { inline_keyboard: buttons }
+        });
+    }
+
+    private async sendSellMenu(mint: string) {
+        const message = `💸 *Pilih Persentase Sell:*\nToken: \`${mint}\``;
+        const buttons: TelegramBot.InlineKeyboardButton[][] = [
+            [
+                { text: '25%', callback_data: `sell_exec:${mint}|0.25` },
+                { text: '50%', callback_data: `sell_exec:${mint}|0.5` }
+            ],
+            [
+                { text: '75%', callback_data: `sell_exec:${mint}|0.75` },
+                { text: '100%', callback_data: `sell_exec:${mint}|1.0` }
+            ]
+        ];
+
+        await this.sendMessage(message, {
+            reply_markup: { inline_keyboard: buttons }
+        });
+    }
+
+    private async executeManualBuy(mint: string, amount: number) {
+        await this.sendMessage(`⏳ *Memproses Buy $${amount}...*`);
+        try {
+            const tradeService = this.moduleRef.get(TradeService, { strict: false });
+            const result = await tradeService.handleManualBuy(mint, amount);
+            if (result.success) {
+                await this.sendMessage(`✅ *Success:* ${result.message}`);
+            } else {
+                await this.sendMessage(`❌ *Failed:* ${result.message}`);
+            }
+        } catch (error) {
+            await this.sendMessage(`❌ *Error:* ${error.message}`);
+        }
+    }
+
+    private async executeManualSell(mint: string, percent: number) {
+        await this.sendMessage(`⏳ *Memproses Sell ${(percent * 100).toFixed(0)}%...*`);
+        try {
+            const tradeService = this.moduleRef.get(TradeService, { strict: false });
+            const result = await tradeService.handleManualSell(mint, percent);
+            if (result.success) {
+                await this.sendMessage(`✅ *Success:* ${result.message}`);
+            } else {
+                await this.sendMessage(`❌ *Failed:* ${result.message}`);
+            }
+        } catch (error) {
+            await this.sendMessage(`❌ *Error:* ${error.message}`);
+        }
+    }
+
+    private async fetchTokenSymbolFromDex(tokenMint: string): Promise<string> {
+        try {
+            const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
+                timeout: 5000,
+            });
+            return response.data?.pairs?.[0]?.baseToken?.symbol || 'UNKNOWN';
+        } catch {
+            return 'UNKNOWN';
+        }
+    }
+
+    async handleStatusRequest() {
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN' },
         });
@@ -112,7 +337,7 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(statusMsg);
     }
 
-    private async fetchCurrentPrice(tokenMint: string): Promise<number | null> {
+    async fetchCurrentPrice(tokenMint: string): Promise<number | null> {
         try {
             // Coba Jupiter dulu (Metis/Paid)
             const apiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
