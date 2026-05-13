@@ -70,7 +70,7 @@ export class AnalyzerService {
      */
     async isTokenSafeToBuy(tokenMint: string): Promise<{ safe: boolean; metadata?: TokenMetadata; reason?: string; permanent?: boolean }> {
         try {
-            // 1. DEXSCREENER (Traction & Metadata - Faster for new tokens)
+            // 1. DEXSCREENER (Traction & Metrics)
             const traction = await this.checkMarketTraction(tokenMint);
             
             const baseMetadata: TokenMetadata = {
@@ -92,6 +92,19 @@ export class AnalyzerService {
                 };
             }
 
+            // 🛡️ ADVANCED METRICS CHECK
+            // 1. VoL Check (Min 0.05 untuk koin breakout)
+            if (traction.volScore && traction.volScore < 0.05) {
+                this.logger.debug(`[${tokenMint}] Low VoL Score: ${traction.volScore.toFixed(4)}. Supply not shocked enough.`);
+                return { safe: false, reason: 'low_vol_score', metadata: baseMetadata };
+            }
+
+            // 2. Z-Score Anomaly Check (Z > 2.5 is anomaly)
+            if (traction.zScore && traction.zScore < 2.5) {
+                this.logger.debug(`[${tokenMint}] Normal Volume (Z-Score: ${traction.zScore.toFixed(2)}). Waiting for anomaly...`);
+                return { safe: false, reason: 'no_volume_anomaly', metadata: baseMetadata };
+            }
+
             // 2. RPC CHECK (Security)
             const isSafetyPassed = await this.checkTokenSecurityRPC(tokenMint);
             if (!isSafetyPassed) {
@@ -99,20 +112,20 @@ export class AnalyzerService {
                 return { safe: false, reason: 'safety_rpc_failed', permanent: true, metadata: baseMetadata };
             }
 
-            // 3. RUGCHECK (REST API)
-            const isRugCheckPassed = await this.checkRugCheckAPI(tokenMint);
-            if (!isRugCheckPassed) {
-                this.logger.warn(`[${tokenMint}] 🛑 RugCheck FAILED or High Risk. Skip.`);
-                return { safe: false, reason: 'rugcheck_failed', metadata: baseMetadata };
+            // 3. RUGCHECK (Advanced Safety Index & LP Burn)
+            const rugResult = await this.checkRugCheckAPI(tokenMint);
+            if (!rugResult.passed) {
+                this.logger.warn(`[${tokenMint}] 🛑 RugCheck FAILED: ${rugResult.reason}. Skip.`);
+                return { safe: false, reason: rugResult.reason || 'rugcheck_failed', metadata: baseMetadata };
             }
 
-            this.logger.log(`[${tokenMint}] ✅ Passed all filters. Ready to buy!`);
+            this.logger.log(`[${tokenMint}] ✅ Passed Advanced Filters (VoL: ${traction.volScore?.toFixed(3)}, Z: ${traction.zScore?.toFixed(1)}, Safety: ${rugResult.safetyIndex?.toFixed(2)}). Ready!`);
             return { 
                 safe: true, 
                 metadata: { 
                     ...baseMetadata,
-                    creator: isRugCheckPassed.creator,
-                    topHolder: isRugCheckPassed.topHolder
+                    creator: rugResult.creator,
+                    topHolder: rugResult.topHolder
                 } 
             };
         } catch (error) {
@@ -157,6 +170,8 @@ export class AnalyzerService {
         symbol?: string;
         pairCreatedAt?: number;
         volumeSurge?: number;
+        volScore?: number;
+        zScore?: number;
     }> {
         try {
             const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '30000'));
@@ -166,7 +181,6 @@ export class AnalyzerService {
             const minMCap = Number.parseFloat(this.configService.get<string>('MIN_MCAP', '30000'));
             const maxMCap = Number.parseFloat(this.configService.get<string>('MAX_MCAP', '150000'));
 
-            this.logger.log(`[${tokenMint}] Checking market traction via DexScreener...`);
             const response = await axios.get<{ pairs: DexScreenerPair[] }>(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
                 { timeout: 5000 },
@@ -177,6 +191,7 @@ export class AnalyzerService {
 
             const liquidity = pair.liquidity?.usd || 0;
             const volume5m = pair.volume?.m5 || 0;
+            const volumeH1 = pair.volume?.h1 || 0;
             const txns5m = pair.txns?.m5 || {};
             const buys5m = txns5m.buys || 0;
             const sells5m = txns5m.sells || 0;
@@ -189,6 +204,16 @@ export class AnalyzerService {
                 website: pair.info?.websites?.[0]?.url
             };
 
+            // 1. VoL (Velocity of Liquidity)
+            // Rumus: (Volume 5m / Liquidity) * Confidence Score
+            const confidenceScore = (buys5m / (buys5m + sells5m || 1));
+            const volScore = (volume5m / (liquidity || 1)) * confidenceScore;
+
+            // 2. Volume Z-Score (Anomaly Detection)
+            // Pseudo Z-Score: (Current - Avg) / StdDev (Asumsi StdDev = Avg * 0.5)
+            const avgVol5m = volumeH1 / 12;
+            const zScore = (volume5m - avgVol5m) / (avgVol5m * 0.5 || 1);
+
             // 🚫 HONEYPOT DETECTION
             if (buys5m >= 10 && sells5m === 0) {
                 return { passed: false, reason: 'honeypot', liquidity, marketCap, symbol, pairCreatedAt, socials };
@@ -196,49 +221,31 @@ export class AnalyzerService {
             
             const velocity = volume5m / (marketCap || 1);
             
-            // 📊 TREND FOLLOWER LOGIC: MCap Sweet Spot (Respect .env)
             if (marketCap < minMCap || marketCap > maxMCap) {
                 return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: true, marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
-            // 🕒 AGE CHECK (Second Wave: 2-96 Hours)
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
             if (ageHours < 2 || ageHours > 96) {
                 const isPerm = ageHours > 96 || ageHours < 1;
                 return { passed: false, reason: ageHours > 96 ? 'too_old' : 'too_young', permanent: isPerm, marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
-            // 🚀 VOLUME SURGE
-            const volumeH1 = pair.volume?.h1 || 0;
-            const volumeSurge = volume5m / (volumeH1 / 12 || 1);
-            
+            const volumeSurge = volume5m / (avgVol5m || 1);
             if (volumeSurge < 1.5) {
-                this.logger.debug(`[${tokenMint}] Surge low: ${volumeSurge.toFixed(2)}x. Waiting for breakout...`);
                 return { passed: false, reason: 'low_surge', volumeSurge, marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
-            // 🐋 SMART MONEY ACCUMULATION
             const priceChange1h = pair.priceChange?.h1 || 0;
-            const buys1h = pair.txns?.h1?.buys || 0;
-            const sells1h = pair.txns?.h1?.sells || 0;
-
-            // 📈 BULLISH TREND CHECK: Jangan beli koin yang harganya lagi terjun bebas
             if (priceChange1h <= 0) {
-                this.logger.warn(`[${tokenMint}] 📉 Price trend is bearish (${priceChange1h.toFixed(2)}%). Skip.`);
                 return { passed: false, reason: 'bearish_trend', marketCap, symbol, pairCreatedAt, socials, liquidity };
             }
 
-            const isAccumulating = Math.abs(priceChange1h) < 10 && buys1h > sells1h * 1.5;
-
             if (liquidity < minLiq || volume5m < minVol || buys5m < minBuys) {
-                // Jika koin sedang akumulasi, kita kasih toleransi volume sedikit lebih rendah
-                if (!isAccumulating) return { passed: false };
-                this.logger.log(`[${tokenMint}] 🐋 Accumulation detected! Price flat (${priceChange1h.toFixed(1)}%), Buys > Sells. Proceeding...`);
+                return { passed: false };
             }
 
-            // Velocity Check
             if (velocity < minVelocity) {
-                this.logger.warn(`[${tokenMint}] Low Velocity: ${velocity.toFixed(3)} (Min ${minVelocity}).`);
                 return { passed: false };
             }
 
@@ -250,7 +257,9 @@ export class AnalyzerService {
                 socials,
                 symbol,
                 pairCreatedAt,
-                volumeSurge
+                volumeSurge,
+                volScore,
+                zScore
             };
         } catch (error) {
             this.logger.error(`[${tokenMint}] Traction check failed: ${error.message}`);
@@ -296,43 +305,61 @@ export class AnalyzerService {
         });
     }
 
-    private async checkRugCheckAPI(tokenMint: string): Promise<{ passed: boolean; creator?: string; topHolder?: string }> {
+    private async checkRugCheckAPI(tokenMint: string): Promise<{ 
+        passed: boolean; 
+        creator?: string; 
+        topHolder?: string; 
+        reason?: string;
+        safetyIndex?: number;
+    }> {
         try {
-            // RugCheck API: Cek skor risiko dan daftar bahaya (danger)
             const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
                 timeout: 5000,
                 httpsAgent: this.getHttpsAgent()
             });
 
-            if (!response.data) return { passed: false };
+            if (!response.data) return { passed: false, reason: 'rugcheck_no_data' };
 
-            // 1. Cek Skor (Score > 3000 = Skip)
-            const score = response.data.score || 0;
-            if (score > 3000) {
-                this.logger.warn(`[${tokenMint}] High Risk Score: ${score}. Skip.`);
-                return { passed: false };
+            // 🛡️ SAFETY & HOLDER INDEX (Anti-Rug)
+            // Rumus: Safety Index = 1 - (Total Supply Top 10 / Total Supply)
+            const topHolders = response.data.topHolders || [];
+            const totalSupply = response.data.totalSupply || 1;
+            const top10Sum = topHolders.slice(0, 10).reduce((sum: number, h: any) => sum + (h.amount || 0), 0);
+            const safetyIndex = 1 - (top10Sum / totalSupply);
+
+            if (safetyIndex < 0.7) { // Berarti Top 10 pegang > 30%
+                this.logger.warn(`[${tokenMint}] 🛑 High Concentration: Top 10 pegang ${(1 - safetyIndex) * 100}%. Skip.`);
+                return { passed: false, reason: 'high_concentration', safetyIndex };
             }
 
-            // 2. Cek Risiko Spesifik (Danger = Skip)
+            // 🔥 MANDATORY: Liquidity Burned Check
+            const markets = response.data.markets || [];
+            const lpBurned = markets.some((m: any) => m.lpType === 'burned' || m.lpStatus === 'burned');
+            if (!lpBurned) {
+                this.logger.warn(`[${tokenMint}] 🛑 LP NOT BURNED. Skip.`);
+                return { passed: false, reason: 'lp_not_burned', safetyIndex };
+            }
+
+            const score = response.data.score || 0;
+            if (score > 3000) {
+                return { passed: false, reason: 'high_risk_score', safetyIndex };
+            }
+
             const risks = (response.data.risks as Array<{ level: string; name: string }>) || [];
             const highRisks = risks.filter((risk) => risk.level === 'danger');
             if (highRisks.length > 0) {
-                this.logger.warn(`[${tokenMint}] RugCheck DANGER: ${highRisks.map((r) => r.name).join(', ')}`);
-                return { passed: false };
+                return { passed: false, reason: 'danger_risks_detected', safetyIndex };
             }
-
-            // 3. Ekstrak Alamat Dompet "Musuh"
-            const creator = response.data.creator;
-            const topHolder = response.data.topHolders?.[0]?.address;
 
             return { 
                 passed: true, 
-                creator, 
-                topHolder 
+                creator: response.data.creator, 
+                topHolder: response.data.topHolders?.[0]?.address,
+                safetyIndex
             };
         } catch (error) {
             this.logger.error(`RugCheck API Error: ${error.message}`);
-            return { passed: false };
+            return { passed: false, reason: 'rugcheck_error' };
         }
     }
 }
