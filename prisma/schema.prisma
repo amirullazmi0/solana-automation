@@ -33,3 +33,16 @@ model Trade {
   createdAt             DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 }
+
+model Watchlist {
+  id            Int      @id @default(autoincrement())
+  tokenMint     String   @unique
+  symbol        String?
+  mcap          Float?
+  liquidity     Float?
+  volumeSurge   Float?
+  lastCheckedAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+  status        String   @default("PENDING") // PENDING, TRADED, FAILED
+  reason        String?
+}

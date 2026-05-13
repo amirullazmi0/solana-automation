@@ -6,8 +6,7 @@ import * as WebSocket from 'ws';
 import { AnalyzerService } from '../analyzer/analyzer.service';
 import { TradeService } from '../trade/trade.service';
 import { ReportingService } from '../reporting/reporting.service';
-
-// const RAYDIUM_PROGRAM_ID = new PublicKey('675kRwJGm1MqJCYR6ba8Lde6ygvwtq22U6cC1Fi991S8');
+import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class ScannerService implements OnModuleInit, OnModuleDestroy {
@@ -27,6 +26,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         private readonly tradeService: TradeService,
         private readonly analyzerService: AnalyzerService,
         private readonly reportingService: ReportingService,
+        private readonly prismaService: PrismaService,
     ) {}
 
     onModuleInit() {
@@ -48,6 +48,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
         // 2. Start Polling Discovery (DexScreener Fallback)
         this.startDiscoveryPolling();
+
+        // 3. Start Persistent Watchlist Monitoring
+        this.startWatchlistMonitoring();
     }
 
     private initPumpPortalWS() {
@@ -173,6 +176,40 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         }, 30000);
     }
 
+    private startWatchlistMonitoring() {
+        this.logger.log('Starting Persistent Watchlist Radar...');
+
+        // Re-check PENDING koin dari DB setiap 60 detik
+        setInterval(async () => {
+            try {
+                const pending = await this.prismaService.watchlist.findMany({
+                    where: { status: 'PENDING' },
+                    orderBy: { createdAt: 'desc' },
+                    take: 20 // Ambil 20 koin terbaru biar gak bottleneck
+                });
+
+                for (const item of pending) {
+                    // Jika koin sudah di-scan secara live, skip biar nggak double
+                    if (this.activeMonitoring >= this.MAX_CONCURRENT) continue;
+                    
+                    this.processNewToken(item.tokenMint);
+                    await new Promise(res => setTimeout(res, 1000));
+                }
+                
+                // Cleanup Watchlist: Hapus koin yang sudah > 24 jam dan gagal/pending
+                const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+                await this.prismaService.watchlist.deleteMany({
+                    where: { 
+                        createdAt: { lt: dayAgo },
+                        status: { in: ['FAILED', 'PENDING'] }
+                    }
+                });
+            } catch (error) {
+                this.logger.error(`Watchlist Monitoring error: ${error.message}`);
+            }
+        }, 60000);
+    }
+
     // Map<tokenMint, notifiedAt> — koin nggak bakal di-notif lagi selama 6 jam biarpun masuk monitor lagi
     private readonly notifiedTokens = new Map<string, number>();
 
@@ -191,20 +228,36 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         }
 
         try {
+            // Upsert ke Watchlist sebagai PENDING di awal
+            await this.prismaService.watchlist.upsert({
+                where: { tokenMint },
+                update: { lastCheckedAt: new Date() },
+                create: { tokenMint, status: 'PENDING' }
+            });
+
             while (Date.now() - startTime < maxWaitTime) {
                 try {
                     const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
+
+                    // Update metadata di Watchlist
+                    if (result.metadata) {
+                        await this.prismaService.watchlist.update({
+                            where: { tokenMint },
+                            data: {
+                                symbol: result.metadata.symbol,
+                                mcap: result.metadata.mcap,
+                                liquidity: result.metadata.liquidity,
+                                volumeSurge: result.metadata.volumeSurge,
+                                lastCheckedAt: new Date()
+                            }
+                        });
+                    }
 
                     // 🛡️ HARDENED ANTI-SPAM (V2)
                     const surge = result.metadata?.volumeSurge || 0;
                     const mcap = result.metadata?.mcap || 0;
                     const ageHours = result.metadata?.pairCreatedAt ? (Date.now() - result.metadata.pairCreatedAt) / (1000 * 60 * 60) : 0;
                     
-                    // SYARAT NOTIF (Lebih Ketat biar gak spam): 
-                    // 1. Belum di-notif (local & global 6h)
-                    // 2. Ada metadata & MCap masuk akal (Min $20k)
-                    // 3. Surge beneran panas (> 1.5x)
-                    // 4. Umur minimal masuk kriteria (1.5h+)
                     if (!localNotified && !this.notifiedTokens.has(tokenMint) && result.metadata && mcap >= 20000 && ageHours >= 1.5 && surge >= 1.5) {
                         await this.reportingService.sendWatchlistNotification(
                             tokenMint, 
@@ -220,26 +273,30 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
                     if (result.safe) {
                         this.logger.log(`[${tokenMint}] 🚀 Traction detected! Attempting to buy...`);
-                        await this.tradeService.attemptBuy(tokenMint, result.metadata);
+                        const buyResult = await this.tradeService.attemptBuy(tokenMint, result.metadata);
+                        
+                        if (buyResult.success) {
+                            await this.prismaService.watchlist.update({
+                                where: { tokenMint },
+                                data: { status: 'TRADED' }
+                            });
+                        }
                         return;
                     }
 
                     if (result.permanent) {
                         this.logger.debug(`[${tokenMint}] ⛔ Permanent filter fail (${result.reason}). Giving up immediately.`);
-                        // Hapus dari seenTokens supaya bisa di-re-evaluate kalau nanti kondisinya berubah
+                        await this.prismaService.watchlist.update({
+                            where: { tokenMint },
+                            data: { status: 'FAILED', reason: result.reason }
+                        });
                         this.seenTokens.delete(tokenMint);
                         return;
                     }
 
                     if (result.reason === 'too_young') {
-                        this.logger.debug(`[${tokenMint}] ⏳ Token is still too young. Releasing slot to monitor other candidates.`);
-                        return; // Jangan nungguin 10 menit kalau masih muda banget
-                    }
-
-                    if (result.reason && result.reason !== 'low_traction') {
-                        this.logger.warn(`[${tokenMint}] ⚠️ Safety failed (${result.reason}). Waiting 30s to re-check...`);
-                    } else {
-                        this.logger.log(`[${tokenMint}] Still quiet... waiting 30s to re-check.`);
+                        this.logger.debug(`[${tokenMint}] ⏳ Token is still too young. Releasing slot.`);
+                        return; 
                     }
 
                     await new Promise((res) => setTimeout(res, 30000));
@@ -251,8 +308,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 }
             }
 
-            this.logger.log(`[${tokenMint}] 💤 Token remained quiet after 10 minutes. Giving up.`);
-            // Setelah 10 menit, hapus dari seenTokens supaya kalau koin ini trending lagi bisa ditangkap
+            this.logger.log(`[${tokenMint}] 💤 Token remained quiet after 10 minutes.`);
             this.seenTokens.delete(tokenMint);
         } finally {
             this.activeMonitoring--;
