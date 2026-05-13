@@ -18,6 +18,7 @@ export class PriceMonitorService {
     private takeProfitPercent: number;
     // In-memory tracker untuk konfirmasi SL (trade ID -> jumlah konfirmasi)
     private readonly slConfirmCount = new Map<number, number>();
+    private readonly lastAlertTime = new Map<string, number>(); // Cooldown alert: tokenMint -> timestamp
     private ipCache: Record<string, string> = {
         'api.jup.ag': '18.239.105.107',
     };
@@ -59,10 +60,10 @@ export class PriceMonitorService {
                 const stats = await this.getCurrentStats(trade.tokenMint);
                 
                 if (stats && stats.price > 0) {
-                    // DETEKSI RUGPULL: Kalau likuiditas ditarik > 15%
+                    // DETEKSI RUGPULL: Kalau likuiditas ditarik > 35% (naik dari 15%)
                     if (trade.entryLiquidity && trade.entryLiquidity > 0 && stats.liquidity > 0) {
                         const liqDrop = ((trade.entryLiquidity - stats.liquidity) / trade.entryLiquidity) * 100;
-                        if (liqDrop > 15) {
+                        if (liqDrop > 35) {
                             this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 RUGPULL DETECTED! Liquidity dropped ${liqDrop.toFixed(2)}%. PANIC SELLING!`);
                             await this.tradeService.executeSell(trade.id, stats.price, true);
                             continue;
@@ -149,16 +150,17 @@ export class PriceMonitorService {
         if (trade.creatorAddress || trade.topHolderAddress) {
             if (trade.creatorAddress) {
                 const currentCreatorBalance = await this.tradeService.getTokenBalance(trade.creatorAddress, trade.tokenMint);
-                if (currentCreatorBalance < (trade.initialCreatorBalance || 0) * 0.99) { // 1% tolerance for fees/transfers
-                    this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 DEV IS SELLING! Creator dumped tokens. PANIC SELLING!`);
+                // Threshold naik jadi 15% (dari 1%) biar gak baperan
+                if (currentCreatorBalance < (trade.initialCreatorBalance || 0) * 0.85) { 
+                    this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 DEV IS SELLING! Creator dumped tokens (>15%). PANIC SELLING!`);
                     await this.tradeService.executeSell(trade.id, currentPrice, true);
                     return;
                 }
             }
             if (trade.topHolderAddress) {
                 const currentTopBalance = await this.tradeService.getTokenBalance(trade.topHolderAddress, trade.tokenMint);
-                if (currentTopBalance < (trade.initialTopHolderBalance || 0) * 0.99) {
-                    this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 TOP HOLDER IS SELLING! Top whale dumped. PANIC SELLING!`);
+                if (currentTopBalance < (trade.initialTopHolderBalance || 0) * 0.85) {
+                    this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 TOP HOLDER IS SELLING! Top whale dumped (>15%). PANIC SELLING!`);
                     await this.tradeService.executeSell(trade.id, currentPrice, true);
                     return;
                 }
@@ -217,7 +219,14 @@ export class PriceMonitorService {
                 });
 
                 this.logger.log(`[Slot ${trade.slotNumber}] New High: $${currentPrice}. TSL: $${newTrailingStop}`);
-                await this.reportingService.sendTrailingAlert(trade.tokenMint, newTrailingStop, currentPrice, trade.symbol || undefined);
+                
+                // ANTI-SPAM: Kirim alert trailing stop maksimal 5 menit sekali per token
+                const now = Date.now();
+                const lastAlert = this.lastAlertTime.get(trade.tokenMint) || 0;
+                if (now - lastAlert > 5 * 60 * 1000) {
+                    await this.reportingService.sendTrailingAlert(trade.tokenMint, newTrailingStop, currentPrice, trade.symbol || undefined);
+                    this.lastAlertTime.set(trade.tokenMint, now);
+                }
             }
         }
 

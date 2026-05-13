@@ -38,6 +38,7 @@ export interface TokenMetadata {
     mcap?: number;
     pairCreatedAt?: number;
     symbol?: string;
+    volumeSurge?: number;
     socials?: {
         twitter?: string;
         telegram?: string;
@@ -79,7 +80,8 @@ export class AnalyzerService {
                 mcap: traction.marketCap,
                 pairCreatedAt: traction.pairCreatedAt,
                 symbol: traction.symbol,
-                socials: traction.socials
+                socials: traction.socials,
+                volumeSurge: traction.volumeSurge
             };
 
             if (!traction.passed) {
@@ -143,6 +145,7 @@ export class AnalyzerService {
         permanent?: boolean;
         symbol?: string;
         pairCreatedAt?: number;
+        volumeSurge?: number;
     }> {
         try {
             const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '5000'));
@@ -197,6 +200,7 @@ export class AnalyzerService {
             // 🚀 VOLUME SURGE
             const volumeH1 = pair.volume?.h1 || 0;
             const volumeSurge = volume5m / (volumeH1 / 12 || 1);
+            
             if (volumeSurge < 1.5) {
                 return { 
                     passed: true, 
@@ -205,7 +209,8 @@ export class AnalyzerService {
                     velocity, 
                     socials,
                     symbol,
-                    pairCreatedAt
+                    pairCreatedAt,
+                    volumeSurge
                 };
             }
 
@@ -230,13 +235,12 @@ export class AnalyzerService {
             return { 
                 passed: true, 
                 liquidity, 
-                marketCap,
-                velocity,
-                socials: {
-                    twitter: pair.info?.socials?.find((s) => s.type === 'twitter')?.url,
-                    telegram: pair.info?.socials?.find((s) => s.type === 'telegram')?.url,
-                    website: pair.info?.websites?.[0]?.url
-                }
+                marketCap, 
+                velocity, 
+                socials,
+                symbol,
+                pairCreatedAt,
+                volumeSurge
             };
         } catch (error) {
             this.logger.error(`[${tokenMint}] Traction check failed: ${error.message}`);

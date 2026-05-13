@@ -106,8 +106,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         continue;
                     }
 
-                    // TTL 20 menit untuk koin yang baru masuk
-                    this.seenTokens.set(mint, now + 20 * 60 * 1000);
+                    // TTL 60 menit untuk koin yang baru masuk (Anti-Spam)
+                    this.seenTokens.set(mint, now + 60 * 60 * 1000);
                     this.logger.log(`🔍 [Discovery] Potential Second-Wave Candidate: ${mint}`);
 
                     this.processNewToken(mint);
@@ -121,33 +121,49 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         }, 30000);
     }
 
+    // Map<tokenMint, notifiedAt> — koin nggak bakal di-notif lagi selama 6 jam biarpun masuk monitor lagi
+    private readonly notifiedTokens = new Map<string, number>();
+
     private async processNewToken(tokenMint: string) {
         this.activeMonitoring++;
-        this.logger.log(`[${tokenMint}] Starting monitoring for market traction (Max 10 minutes)... [Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT}]`);
+        this.logger.log(`[${tokenMint}] Monitoring for traction... [Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT}]`);
 
         const startTime = Date.now();
-        const maxWaitTime = 10 * 60 * 1000; // 10 Menit
+        const maxWaitTime = 10 * 60 * 1000;
+        let localNotified = false;
 
-        let notified = false;
+        // Bersihkan notifiedTokens yang sudah > 6 jam
+        const now = Date.now();
+        for (const [mint, time] of this.notifiedTokens.entries()) {
+            if (now - time > 6 * 60 * 60 * 1000) this.notifiedTokens.delete(mint);
+        }
 
         try {
             while (Date.now() - startTime < maxWaitTime) {
                 try {
                     const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
 
-                    // Kirim notifikasi watchlist SEKALI saja pas data tersedia
-                    if (!notified && result.metadata) {
-                        const mcap = result.metadata.mcap || 0;
-                        const pairCreatedAt = result.metadata.pairCreatedAt || 0;
-                        const ageHours = (Date.now() - pairCreatedAt) / (1000 * 60 * 60);
-                        
+                    // 🛡️ HARDENED ANTI-SPAM (V2)
+                    const surge = result.metadata?.volumeSurge || 0;
+                    const mcap = result.metadata?.mcap || 0;
+                    const ageHours = result.metadata?.pairCreatedAt ? (Date.now() - result.metadata.pairCreatedAt) / (1000 * 60 * 60) : 0;
+                    
+                    // SYARAT NOTIF (Lebih Ketat biar gak spam): 
+                    // 1. Belum di-notif (local & global 6h)
+                    // 2. Ada metadata & MCap masuk akal (Min $20k)
+                    // 3. Surge beneran panas (> 1.5x)
+                    // 4. Umur minimal masuk kriteria (1.5h+)
+                    if (!localNotified && !this.notifiedTokens.has(tokenMint) && result.metadata && mcap >= 20000 && ageHours >= 1.5 && surge >= 1.5) {
                         await this.reportingService.sendWatchlistNotification(
                             tokenMint, 
                             mcap, 
                             ageHours, 
-                            result.metadata.symbol
+                            result.metadata.symbol,
+                            surge
                         );
-                        notified = true;
+                        localNotified = true;
+                        this.notifiedTokens.set(tokenMint, Date.now());
+                        this.logger.log(`[${tokenMint}] 🔔 Telegram Alert sent!`);
                     }
 
                     if (result.safe) {

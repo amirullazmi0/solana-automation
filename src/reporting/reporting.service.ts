@@ -202,9 +202,10 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(message);
     }
 
-    async sendWatchlistNotification(tokenMint: string, mcap: number, ageHours: number, symbol?: string) {
+    async sendWatchlistNotification(tokenMint: string, mcap: number, ageHours: number, symbol?: string, surge?: number) {
         const displaySymbol = symbol || 'UNKNOWN';
-        const message = `🔍 *WATCHLIST ADDED*\nToken: *${displaySymbol}*\nMint: \`${tokenMint}\`\nMCap: \`$${mcap.toLocaleString()}\`\nAge: \`${ageHours.toFixed(1)}h\``;
+        const surgeDisplay = surge ? `\nSurge: \`${surge.toFixed(2)}x\`` : '';
+        const message = `🔍 *WATCHLIST ADDED*${surgeDisplay}\nToken: *${displaySymbol}*\nMint: \`${tokenMint}\`\nMCap: \`$${mcap.toLocaleString()}\`\nAge: \`${ageHours.toFixed(1)}h\``;
         
         const buttons: TelegramBot.InlineKeyboardButton[] = [
             { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` }

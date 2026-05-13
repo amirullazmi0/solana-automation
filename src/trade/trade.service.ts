@@ -207,53 +207,70 @@ export class TradeService implements OnModuleInit {
     }
 
     async executeSell(tradeId: number, currentPrice: number, isStopLoss: boolean) {
-        // 1. ATOMIC CHECK & UPDATE: Langsung kunci di DB biar gak di-pick monitor lain
         const trade = await this.prismaService.trade.findUnique({ where: { id: tradeId } });
         if (!trade || trade.status !== 'OPEN') {
             this.logger.debug(`[Trade ${tradeId}] Already closed or not found. Skipping sell.`);
             return;
         }
 
-        // Lock trade status immediately
-        await this.prismaService.trade.update({
-            where: { id: tradeId },
-            data: { status: 'CLOSED' } // Kita anggap CLOSED dulu biar gak di-spam alert
-        });
-
-        const decimals = await this.getTokenDecimals(trade.tokenMint);
-        const tokenAmountToSell = Math.floor((this.positionSizeUSD / trade.entryPrice) * Math.pow(10, decimals));
-        
-        this.logger.log(`[Slot ${trade.slotNumber}] 💸 Executing SELL for ${trade.symbol} (${trade.tokenMint})...`);
-        
-        const { success, error } = await this.executeJupiterSwap(
-            trade.tokenMint,
-            WRAPPED_SOL_MINT,
-            tokenAmountToSell,
-            'SELL',
-        );
-
-        if (success) {
-            const profit = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
-            const estimatedProfitUsd = (this.positionSizeUSD / trade.entryPrice) * (currentPrice - trade.entryPrice);
-
+        try {
+            // 1. ATOMIC LOCK: Tandai status CLOSED sementara agar monitor lain tidak memproses
             await this.prismaService.trade.update({
                 where: { id: tradeId },
-                data: { 
-                    exitPrice: currentPrice,
-                    profitUsd: estimatedProfitUsd
-                },
+                data: { status: 'CLOSED' }
             });
+
+            // 2. DAPETIN SALDO ASLI: Jangan tebak-tebak buah manggis dari USD
+            // Kita pakai balance asli di wallet biar gak "Insufficient Funds"
+            const actualBalance = await this.getTokenBalance(this.wallet.publicKey.toBase58(), trade.tokenMint);
+            const decimals = await this.getTokenDecimals(trade.tokenMint);
+            const amountInLamports = Math.floor(actualBalance * Math.pow(10, decimals));
+
+            if (amountInLamports <= 0) {
+                this.logger.warn(`[Slot ${trade.slotNumber}] ⚠️ Zero balance for ${trade.tokenMint}. Closing trade.`);
+                await this.prismaService.trade.update({
+                    where: { id: tradeId },
+                    data: { exitPrice: 0, profitUsd: 0 }
+                });
+                return;
+            }
+
+            this.logger.log(`[Slot ${trade.slotNumber}] 💸 Executing SELL for ${trade.symbol} (${trade.tokenMint}). Amount: ${actualBalance}`);
             
-            await this.reportingService.sendSellAlert(
+            const { success, error } = await this.executeJupiterSwap(
                 trade.tokenMint,
-                currentPrice,
-                profit,
-                isStopLoss,
-                trade.symbol || undefined,
+                WRAPPED_SOL_MINT,
+                amountInLamports,
+                'SELL',
             );
-            this.logger.log(`[Slot ${trade.slotNumber}] ✅ Position CLOSED. Profit: ${profit.toFixed(2)}% ($${estimatedProfitUsd.toFixed(2)})`);
-        } else {
-            this.logger.error(`[Slot ${trade.slotNumber}] ❌ SELL FAILED: ${error}. Rolling back status to OPEN.`);
+
+            if (success) {
+                const profit = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
+                const estimatedProfitUsd = actualBalance * currentPrice - (trade.amountInSol * 150); // Estimated USD profit
+
+                await this.prismaService.trade.update({
+                    where: { id: tradeId },
+                    data: { 
+                        exitPrice: currentPrice,
+                        profitUsd: estimatedProfitUsd
+                    },
+                });
+                
+                await this.reportingService.sendSellAlert(
+                    trade.tokenMint,
+                    currentPrice,
+                    profit,
+                    isStopLoss,
+                    trade.symbol || undefined,
+                );
+                this.logger.log(`[Slot ${trade.slotNumber}] ✅ Position CLOSED. Profit: ${profit.toFixed(2)}%`);
+            } else {
+                throw new Error(error || 'Swap failed');
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error(`[Slot ${trade.slotNumber}] ❌ SELL FAILED: ${message}. Rolling back to OPEN.`);
+            
             // Rollback status if swap fails so we can try again
             await this.prismaService.trade.update({
                 where: { id: tradeId },
