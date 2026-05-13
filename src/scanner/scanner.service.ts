@@ -214,6 +214,17 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private readonly notifiedTokens = new Map<string, number>();
 
     private async processNewToken(tokenMint: string) {
+        // 🛡️ Tembok Pelindung: Cek dulu status di DB. Kalau sudah FAILED/TRADED, jangan diproses lagi.
+        const existing = await this.prismaService.watchlist.findUnique({
+            where: { tokenMint }
+        });
+
+        if (existing && (existing.status === 'FAILED' || existing.status === 'TRADED')) {
+            // Khusus FAILED, kita hapus dari seenTokens biar nggak kena log debug terus-menerus
+            this.seenTokens.set(tokenMint, Date.now() + 2 * 60 * 60 * 1000); // Cooldown 2 jam biar nggak masuk discovery lagi
+            return;
+        }
+
         this.activeMonitoring++;
         this.logger.log(`[${tokenMint}] Monitoring for traction... [Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT}]`);
 
