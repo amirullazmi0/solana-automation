@@ -20,7 +20,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private readonly seenTokens = new Map<string, number>();
     // Batasi max token yang dipantau bersamaan biar nggak kelebihan memory
     private activeMonitoring = 0;
-    private readonly MAX_CONCURRENT = 10;
+    private readonly MAX_CONCURRENT = 50;
 
     constructor(
         private readonly configService: ConfigService,
@@ -229,6 +229,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         // Hapus dari seenTokens supaya bisa di-re-evaluate kalau nanti kondisinya berubah
                         this.seenTokens.delete(tokenMint);
                         return;
+                    }
+
+                    if (result.reason === 'too_young') {
+                        this.logger.debug(`[${tokenMint}] ⏳ Token is still too young. Releasing slot to monitor other candidates.`);
+                        return; // Jangan nungguin 10 menit kalau masih muda banget
                     }
 
                     if (result.reason && result.reason !== 'low_traction') {
