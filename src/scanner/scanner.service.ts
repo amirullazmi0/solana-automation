@@ -301,14 +301,19 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         return;
                     }
 
-                    // 🧠 SMART RETRY: Kalau cuma "muda" atau "MCap kecil", jangan jadikan FAILED.
+                    // 🧠 SMART RETRY: Kalau cuma "muda", "MCap kecil", "Volume sepi", atau "RPC lemot", jangan jadikan FAILED.
                     // Biarkan tetap PENDING supaya di-recheck sama background radar nanti.
-                    if (result.reason === 'too_young' || result.reason === 'mcap_too_low' || result.reason === 'low_surge') {
+                    if (result.reason === 'too_young' || 
+                        result.reason === 'mcap_too_low' || 
+                        result.reason === 'low_surge' || 
+                        result.reason === 'safety_rpc_failed' ||
+                        result.reason === 'bearish_trend'
+                    ) {
                         this.logger.debug(`[${tokenMint}] ⏳ Temporary fail (${result.reason}). Keeping in Watchlist for re-check.`);
                         
-                        // Tapi kalau sudah dicek > 100 kali dan masih PENDING, kita FAILED-kan saja biar gak beban DB
+                        // Tapi kalau sudah dicek > 150 kali dan masih PENDING, kita FAILED-kan saja (Basi)
                         const currentWatchlist = await this.prismaService.watchlist.findUnique({ where: { tokenMint } });
-                        if (currentWatchlist && currentWatchlist.checkCount > 100) {
+                        if (currentWatchlist && currentWatchlist.checkCount > 150) {
                             await this.prismaService.watchlist.update({
                                 where: { tokenMint },
                                 data: { status: 'FAILED', reason: 'stagnant_timeout' }
