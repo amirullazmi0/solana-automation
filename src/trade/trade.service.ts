@@ -4,6 +4,7 @@ import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
+import { ModuleRef } from '@nestjs/core';
 import { TokenMetadata } from '../analyzer/analyzer.service';
 import axios from 'axios';
 import * as https from 'https';
@@ -36,7 +37,7 @@ export class TradeService implements OnModuleInit {
     constructor(
         private readonly configService: ConfigService,
         private readonly prismaService: PrismaService,
-        private readonly reportingService: ReportingService,
+        private readonly moduleRef: ModuleRef,
     ) {
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
         this.connection = new Connection(rpcEndpoint, 'confirmed');
@@ -50,6 +51,10 @@ export class TradeService implements OnModuleInit {
         this.positionSizeUSD = Number.parseFloat(this.configService.get<string>('POSITION_SIZE_USD', '3'));
 
         this.slippageBps = Number.parseInt(this.configService.get<string>('SLIPPAGE_BPS', '100'), 10);
+    }
+
+    private get reportingService(): ReportingService {
+        return this.moduleRef.get(ReportingService, { strict: false });
     }
 
     async onModuleInit() {

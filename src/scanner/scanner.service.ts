@@ -7,6 +7,7 @@ import { AnalyzerService } from '../analyzer/analyzer.service';
 import { TradeService } from '../trade/trade.service';
 import { ReportingService } from '../reporting/reporting.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { ModuleRef } from '@nestjs/core';
 
 @Injectable()
 export class ScannerService implements OnModuleInit, OnModuleDestroy {
@@ -23,12 +24,19 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
     constructor(
         private readonly configService: ConfigService,
-        private readonly tradeService: TradeService,
         private readonly analyzerService: AnalyzerService,
-        private readonly reportingService: ReportingService,
         private readonly prismaService: PrismaService,
+        private readonly moduleRef: ModuleRef,
     ) {
         this.MAX_CONCURRENT = Number.parseInt(this.configService.get<string>('SCANNER_MAX_CONCURRENT', '100'), 10);
+    }
+
+    private get tradeService(): TradeService {
+        return this.moduleRef.get(TradeService, { strict: false });
+    }
+
+    private get reportingService(): ReportingService {
+        return this.moduleRef.get(ReportingService, { strict: false });
     }
 
     onModuleInit() {
