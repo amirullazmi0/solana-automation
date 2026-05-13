@@ -13,36 +13,42 @@ enum TradeStatus {
 }
 
 model Trade {
-  id                Int         @id @default(autoincrement())
-  tokenMint         String
-  symbol            String?     @default("UNKNOWN")
-  slotNumber        Int
-  entryPrice        Float
-  highestPrice      Float
-  trailingStopPrice Float
-  exitPrice         Float?
-  profitUsd         Float?
-  entryLiquidity    Float?
-  entryMarketCap    Float?
-  status            TradeStatus @default(OPEN)
-  amountInSol       Float
-  creatorAddress        String?
-  topHolderAddress      String?
+  id                      Int         @id @default(autoincrement())
+  tokenMint               String
+  symbol                  String?     @default("UNKNOWN")
+  slotNumber              Int
+  entryPrice              Float
+  highestPrice            Float
+  trailingStopPrice       Float
+  exitPrice               Float?
+  profitUsd               Float?
+  entryLiquidity          Float?
+  entryMarketCap          Float?
+  status                  TradeStatus @default(OPEN)
+  amountInSol             Float
+  creatorAddress          String?
+  topHolderAddress        String?
   initialCreatorBalance   Float?
   initialTopHolderBalance Float?
-  createdAt             DateTime    @default(now())
-  updatedAt         DateTime    @updatedAt
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+}
+
+enum WatchlistStatus {
+  PENDING
+  TRADED
+  FAILED
 }
 
 model Watchlist {
-  id            Int      @id @default(autoincrement())
-  tokenMint     String   @unique
+  id            Int             @id @default(autoincrement())
+  tokenMint     String          @unique
   symbol        String?
   mcap          Float?
   liquidity     Float?
   volumeSurge   Float?
-  lastCheckedAt DateTime @default(now())
-  createdAt     DateTime @default(now())
-  status        String   @default("PENDING") // PENDING, TRADED, FAILED
+  lastCheckedAt DateTime        @default(now())
+  createdAt     DateTime        @default(now())
+  status        WatchlistStatus @default(PENDING)
   reason        String?
 }
