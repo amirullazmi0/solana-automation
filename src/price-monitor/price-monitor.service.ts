@@ -30,7 +30,7 @@ export class PriceMonitorService {
         private readonly reportingService: ReportingService,
     ) {
         this.trailingDistancePercent = parseFloat(
-            this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '1.5'),
+            this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '5.0'),
         );
         this.stopLossPercent = parseFloat(
             this.configService.get<string>('STOP_LOSS_PERCENT', '40.0'),
@@ -177,6 +177,9 @@ export class PriceMonitorService {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
         let devDumped = false;
 
+        this.logger.debug(`[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)}, Profit: ${profitPercent.toFixed(2)}%, SL: -${this.stopLossPercent}%, TSL: $${trade.trailingStopPrice.toFixed(8)}`);
+
+
         // 1. ANALISIS HOLDER (Insting Intelijen)
         if (trade.creatorAddress || trade.topHolderAddress) {
             if (trade.creatorAddress) {
@@ -210,13 +213,17 @@ export class PriceMonitorService {
         }
 
         // 3. TRAILING STOP LOGIC (Update Peak & TSL)
-        if (currentPrice > trade.highestPrice) {
-            const newTrailingStop = currentPrice * (1 - (this.trailingDistancePercent / 100));
+        // 🚀 Hanya update peak kalau harga sudah naik minimal 2% (Safe Zone)
+        if (currentPrice > trade.highestPrice && profitPercent >= 2) {
+            const calculatedStop = currentPrice * (1 - (this.trailingDistancePercent / 100));
+            // 🛡️ Fail-safe: Jaring jual (TSL) TIDAK BOLEH lebih rendah dari harga beli
+            const newTrailingStop = Math.max(calculatedStop, trade.entryPrice);
+            
             await this.prismaService.trade.update({
                 where: { id: trade.id },
                 data: { highestPrice: currentPrice, trailingStopPrice: newTrailingStop },
             });
-            this.logger.debug(`[Slot ${trade.slotNumber}] 📈 New Peak: $${currentPrice.toFixed(8)}. TSL: $${newTrailingStop.toFixed(8)}`);
+            this.logger.debug(`[Slot ${trade.slotNumber}] 📈 New Peak: $${currentPrice.toFixed(8)}. TSL Locked at: $${newTrailingStop.toFixed(8)}`);
             
             // Anti-Spam Trailing Alert
             const now = Date.now();
@@ -228,7 +235,9 @@ export class PriceMonitorService {
         }
 
         // 4. EXIT CONDITION: Trailing Stop Reached
-        if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice) {
+        // 🛡️ Hanya trigger Trailing Stop kalau harganya sudah pernah naik (highestPrice > entry)
+        // Dan hanya kalau profit > 0 (Biarkan SL Protocol yang handle kerugian murni)
+        if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice && currentPrice > trade.entryPrice) {
             // 🧠 DIAMOND HAND PASS: Kalau Dev masih hold, kasih nafas 3% lagi
             if (!devDumped && trade.creatorAddress) {
                 const leniencyPrice = trade.trailingStopPrice * 0.97;
@@ -238,8 +247,8 @@ export class PriceMonitorService {
                 }
             }
 
-            const reason = profitPercent > 0 ? 'TAKE_PROFIT' : 'TRAILING_STOP';
-            this.logger.log(`[Slot ${trade.slotNumber}] 💸 ${reason} at $${currentPrice.toFixed(8)}`);
+            const reason = profitPercent > 0 ? 'TAKE_PROFIT' : 'TRAILING_STOP_LOSS';
+            this.logger.log(`[Slot ${trade.slotNumber}] 💸 ${reason} at $${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`);
             await this.tradeService.executeSell(trade.id, currentPrice, reason);
             return;
         }

@@ -219,7 +219,7 @@ export class TradeService implements OnModuleInit {
                     slotNumber: slotToUse,
                     entryPrice,
                     highestPrice: entryPrice,
-                    trailingStopPrice: entryPrice * (1 - (trailingDistance / 100)),
+                    trailingStopPrice: 0, // 🛡️ Initialized to 0, PriceMonitor will activate it once in profit
                     status: 'OPEN',
                     amountInSol,
                     entryLiquidity: metadata?.liquidity || 0,
