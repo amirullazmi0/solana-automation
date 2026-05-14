@@ -43,6 +43,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     onModuleInit() {
         const wssEndpoint = this.configService.get<string>('WSS_ENDPOINT');
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
+        const botMode = this.configService.get<string>('BOT_MODE', 'whale');
 
         if (!wssEndpoint || !rpcEndpoint) {
             this.logger.error('RPC or WSS endpoints not configured. Scanner will not start.');
@@ -54,10 +55,17 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             commitment: 'confirmed',
         });
 
-        // 1. Start WebSocket Discovery (Pump.fun Migrations)
-        this.initPumpPortalWS();
+        this.logger.log(`🤖 Bot Mode: ${botMode.toUpperCase()}`);
 
-        // 2. Start Polling Discovery (DexScreener Fallback)
+        if (botMode === 'micin') {
+            // 1. Start WebSocket Discovery (Pump.fun Migrations) — ONLY in micin mode
+            this.initPumpPortalWS();
+            this.logger.log('🔌 PumpPortal WS ENABLED (Micin Sniper Mode)');
+        } else {
+            this.logger.log('🐋 PumpPortal WS DISABLED (Second Whale Mode — DexScreener Only)');
+        }
+
+        // 2. Start Polling Discovery (DexScreener — Always Active)
         this.startDiscoveryPolling();
 
         // 3. Start Persistent Watchlist Monitoring
