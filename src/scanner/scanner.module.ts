@@ -7,5 +7,6 @@ import { AnalyzerModule } from 'src/analyzer/analyzer.module';
 @Module({
     imports: [TradeModule, AnalyzerModule, ReportingModule],
     providers: [ScannerService],
+    exports: [ScannerService],
 })
 export class ScannerModule {}
