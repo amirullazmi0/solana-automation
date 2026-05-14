@@ -67,6 +67,20 @@ export class TradeService implements OnModuleInit {
                 const message = error instanceof Error ? error.message : String(error);
                 this.logger.error(`Failed to fetch wallet balance: ${message}`);
             }
+
+            // 🚀 RESUME MONITORING: Pantau lagi koin yang masih nyangkut/open
+            await this.startMonitoringAllTrades();
+        }
+    }
+
+    private async startMonitoringAllTrades() {
+        const openTrades = await this.prismaService.trade.findMany({
+            where: { status: 'OPEN' }
+        });
+
+        this.logger.log(`[Monitor] Found ${openTrades.length} open positions to monitor.`);
+        for (const trade of openTrades) {
+            this.monitorPrice(trade.tokenMint, trade.slotNumber, trade.entryPrice, trade.id);
         }
     }
 
@@ -217,6 +231,16 @@ export class TradeService implements OnModuleInit {
             });
             this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
             await this.reportingService.sendBuyAlert(tokenMint, entryPrice, slotToUse, symbol, metadata?.socials);
+            
+            // 🔥 START MONITORING: Langsung pantau harganya biar bisa jual!
+            const newTrade = await this.prismaService.trade.findFirst({
+                where: { tokenMint, status: 'OPEN' },
+                orderBy: { createdAt: 'desc' }
+            });
+            if (newTrade) {
+                this.monitorPrice(tokenMint, slotToUse, entryPrice, newTrade.id);
+            }
+
             return { success: true, message: `Successfully bought ${symbol} at slot ${slotToUse}` };
         }
 
@@ -554,5 +578,59 @@ export class TradeService implements OnModuleInit {
             this.logger.error(`Failed to fetch wallet holdings: ${error.message}`);
             return [];
         }
+    }
+
+    private async monitorPrice(tokenMint: string, slotNumber: number, entryPrice: number, tradeId: number) {
+        this.logger.log(`[Monitor] Starting price tracker for ${tokenMint} (Slot #${slotNumber})`);
+        
+        const interval = setInterval(async () => {
+            try {
+                // 1. Cek apakah koin masih OPEN di DB
+                const trade = await this.prismaService.trade.findUnique({ where: { id: tradeId } });
+                if (!trade || trade.status !== 'OPEN') {
+                    this.logger.debug(`[Monitor] Trade ${tradeId} closed or removed. Stopping monitor.`);
+                    clearInterval(interval);
+                    return;
+                }
+
+                // 2. Ambil harga terbaru
+                const currentPrice = await this.reportingService.fetchCurrentPrice(tokenMint);
+                if (!currentPrice) return;
+
+                const profit = ((currentPrice - entryPrice) / entryPrice) * 100;
+                const slPercent = Number.parseFloat(this.configService.get<string>('STOP_LOSS_PERCENT', '30.0'));
+                const trailingDistance = Number.parseFloat(this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '5.0'));
+
+                // 🚀 TRAILING STOP LOGIC
+                if (currentPrice > trade.highestPrice) {
+                    const newTrailingStop = currentPrice * (1 - (trailingDistance / 100));
+                    await this.prismaService.trade.update({
+                        where: { id: tradeId },
+                        data: { 
+                            highestPrice: currentPrice,
+                            trailingStopPrice: newTrailingStop
+                        }
+                    });
+                    this.logger.debug(`[Slot ${slotNumber}] 📈 New Peak: $${currentPrice.toFixed(8)}. Trailing Stop: $${newTrailingStop.toFixed(8)}`);
+                }
+
+                // 💸 EXIT CONDITION 1: Take Profit (Hit Trailing Stop)
+                if (currentPrice <= trade.trailingStopPrice && currentPrice > entryPrice) {
+                    this.logger.log(`[Slot ${slotNumber}] 💰 Trailing Stop Triggered at $${currentPrice.toFixed(8)}. Profit: ${profit.toFixed(2)}%`);
+                    clearInterval(interval);
+                    await this.executeSell(tradeId, currentPrice, false);
+                }
+
+                // 🛑 EXIT CONDITION 2: Hard Stop Loss
+                if (profit <= -slPercent) {
+                    this.logger.warn(`[Slot ${slotNumber}] 🛑 Stop Loss Triggered at $${currentPrice.toFixed(8)}. Loss: ${profit.toFixed(2)}%`);
+                    clearInterval(interval);
+                    await this.executeSell(tradeId, currentPrice, true);
+                }
+
+            } catch (error) {
+                this.logger.error(`[Monitor] Error tracking price for ${tokenMint}: ${error.message}`);
+            }
+        }, 10000); // Cek tiap 10 detik
     }
 }
