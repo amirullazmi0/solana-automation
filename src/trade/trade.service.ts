@@ -17,6 +17,7 @@ export class TradeService implements OnModuleInit {
     private readonly logger = new Logger(TradeService.name);
     private connection: Connection;
     private wallet: Keypair;
+    private readonly sellingTrades = new Set<number>();
 
     private readonly totalCapital: number;
     private readonly reserveAmount: number;
@@ -94,7 +95,8 @@ export class TradeService implements OnModuleInit {
                 this.wallet = Keypair.fromSecretKey(secretKey);
                 this.logger.log(`Wallet loaded: ${this.wallet.publicKey.toBase58()}`);
             } catch (error) {
-                this.logger.error(`Failed to decode private key: ${error.message}`);
+                const msg = error instanceof Error ? error.message : String(error);
+                this.logger.error(`Failed to decode private key: ${msg}`);
             }
         }
     }
@@ -187,7 +189,7 @@ export class TradeService implements OnModuleInit {
 
         this.logger.log(`[Slot ${slotToUse}] Attempting to buy ${tokenMint} with $${buyAmountUSD} (${amountInSol.toFixed(4)} SOL)`);
 
-        const { success, entryPrice, error } = await this.executeJupiterSwap(
+        const { success, entryPrice, error, txHash } = await this.executeJupiterSwap(
             WRAPPED_SOL_MINT,
             tokenMint,
             amountInLamports,
@@ -222,6 +224,7 @@ export class TradeService implements OnModuleInit {
                     trailingStopPrice: 0, // 🛡️ Initialized to 0, PriceMonitor will activate it once in profit
                     status: 'OPEN',
                     amountInSol,
+                    buyTxHash: txHash || null,
                     entryLiquidity: metadata?.liquidity || 0,
                     entryMarketCap: metadata?.marketCap || 0,
                     creatorAddress: metadata?.creator,
@@ -252,16 +255,15 @@ export class TradeService implements OnModuleInit {
             return false;
         }
 
-        try {
-            // 1. ATOMIC LOCK (Hanya jika full sell)
-            if (percentage >= 1.0) {
-                await this.prismaService.trade.update({
-                    where: { id: tradeId },
-                    data: { status: 'CLOSED' }
-                });
-            }
+        // 🛡️ IN-MEMORY LOCK: Prevent double-sell tanpa corrupt DB state
+        if (this.sellingTrades.has(tradeId)) {
+            this.logger.debug(`[Trade ${tradeId}] Sell already in progress. Skipping.`);
+            return false;
+        }
+        this.sellingTrades.add(tradeId);
 
-            // 2. DAPETIN SALDO ASLI
+        try {
+            // 1. DAPETIN SALDO ASLI
             const actualBalance = await this.getTokenBalance(this.wallet.publicKey.toBase58(), trade.tokenMint);
             if (actualBalance === null) {
                 this.logger.error(`[Slot ${trade.slotNumber}] ❌ Failed to fetch balance from RPC. Aborting sell to prevent errors.`);
@@ -277,7 +279,7 @@ export class TradeService implements OnModuleInit {
                 if (percentage >= 1.0) {
                     await this.prismaService.trade.update({
                         where: { id: tradeId },
-                        data: { exitPrice: 0, profitUsd: 0 }
+                        data: { status: 'CLOSED', exitPrice: 0, profitUsd: 0, exitReason }
                     });
                 }
                 return false;
@@ -285,11 +287,11 @@ export class TradeService implements OnModuleInit {
 
             this.logger.log(`[Slot ${trade.slotNumber}] 💸 Executing SELL (${(percentage * 100).toFixed(0)}%) for ${trade.symbol} (${trade.tokenMint}). Amount: ${sellAmount}`);
             
-            // 3. PANIC SLIPPAGE: Kalau SL atau Rugpull, hajar slippage 15% (1500 bps) biar pasti laku
+            // 2. PANIC SLIPPAGE: Kalau SL atau Rugpull, hajar slippage 15% (1500 bps) biar pasti laku
             const isUrgent = ['STOP_LOSS', 'DEV_DUMP', 'RUGPULL'].includes(exitReason);
             const sellSlippage = isUrgent ? 1500 : this.slippageBps;
             
-            const { success, entryPrice: exitPriceResult, error } = await this.executeJupiterSwap(
+            const { success, entryPrice: exitPriceResult, error, txHash } = await this.executeJupiterSwap(
                 trade.tokenMint,
                 'So11111111111111111111111111111111111111112',
                 amountInLamports,
@@ -300,10 +302,12 @@ export class TradeService implements OnModuleInit {
             );
 
             if (success) {
-                const currentPrice = exitPriceResult || 0;
-                const profit = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
+                const exitPrice = exitPriceResult || 0;
+                const profit = ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100;
                 const solPrice = await this.getSolPrice();
-                const estimatedProfitUsd = (sellAmount * currentPrice) - ((trade.amountInSol * percentage) * solPrice);
+                const entryValueUsd = (trade.amountInSol * percentage) * solPrice;
+                const exitValueUsd = sellAmount * exitPrice;
+                const estimatedProfitUsd = exitValueUsd - entryValueUsd;
 
                 // ✅ DATABASE UPDATE: Hanya dilakukan jika transaksi Solana SUKSES
                 if (percentage >= 1.0) {
@@ -311,7 +315,9 @@ export class TradeService implements OnModuleInit {
                         where: { id: tradeId },
                         data: { 
                             status: 'CLOSED',
-                            exitPrice: currentPrice,
+                            exitPrice,
+                            exitReason,
+                            sellTxHash: txHash || null,
                             profitUsd: (trade.profitUsd || 0) + estimatedProfitUsd
                         },
                     });
@@ -327,7 +333,7 @@ export class TradeService implements OnModuleInit {
                 
                 await this.reportingService.sendSellAlert(
                     trade.tokenMint,
-                    currentPrice,
+                    exitPrice,
                     profit,
                     exitReason,
                     trade.symbol || undefined,
@@ -335,11 +341,14 @@ export class TradeService implements OnModuleInit {
                 return true;
             }
             
-            this.logger.error(`[Slot ${trade.slotNumber}] ❌ SELL FAILED on Solana: ${error}. Keeping trade OPEN.`);
+            // ❌ SELL FAILED — trade tetap OPEN (tidak pernah di-CLOSED sebelum swap)
+            this.logger.error(`[Slot ${trade.slotNumber}] ❌ SELL FAILED on Solana: ${error}. Trade remains OPEN for retry.`);
             return false;
         } catch (error) {
             this.logger.error(`[Slot ${trade.slotNumber}] ❌ SELL CRITICAL ERROR: ${error instanceof Error ? error.message : String(error)}`);
             return false;
+        } finally {
+            this.sellingTrades.delete(tradeId);
         }
     }
 
@@ -351,7 +360,7 @@ export class TradeService implements OnModuleInit {
         buyAmountUSD?: number,
         retryCount = 0,
         customSlippageBps?: number
-    ): Promise<{ success: boolean; entryPrice: number; error?: string }> {
+    ): Promise<{ success: boolean; entryPrice: number; error?: string; txHash?: string }> {
         const maxRetries = 3;
         try {
             // Jurus Pamungkas: Pakai Paid Endpoint & API Key
@@ -406,6 +415,19 @@ export class TradeService implements OnModuleInit {
                 const outAmountSol = quoteData.outAmount / 1_000_000_000;
                 const inAmountToken = amount / Math.pow(10, decimals);
                 price = (outAmountSol * solPrice) / inAmountToken;
+
+                // 🛡️ SANITY CHECK: Sell price tidak mungkin > $1 untuk microcap token
+                // Jika price > $1 atau <= 0, kemungkinan besar decimals error
+                if (price > 1 || price <= 0) {
+                    this.logger.error(`[Jupiter] ⚠️ INSANE SELL PRICE: $${price.toFixed(8)} for ${inputMint}. Likely decimals error (got ${decimals}). Falling back to Jupiter Price API.`);
+                    const fallbackPrice = await this.getSellPriceFallback(inputMint);
+                    if (fallbackPrice && fallbackPrice > 0 && fallbackPrice < 1) {
+                        price = fallbackPrice;
+                        this.logger.log(`[Jupiter] ✅ Fallback price: $${price.toFixed(8)}`);
+                    } else {
+                        this.logger.error(`[Jupiter] ❌ Fallback price also failed. Using raw calculated price.`);
+                    }
+                }
             }
 
             // ⛽ DYNAMIC FEES: Naikin gas tiap kali gagal (Auto-Multiplier + Retry Bonus)
@@ -449,7 +471,7 @@ export class TradeService implements OnModuleInit {
                 throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
             }
 
-            return { success: true, entryPrice: price || 0.00000001 };
+            return { success: true, entryPrice: price || 0.00000001, txHash: txid };
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             if (retryCount < maxRetries - 1) {
@@ -458,7 +480,7 @@ export class TradeService implements OnModuleInit {
                 await new Promise(res => setTimeout(res, waitTime));
                 return this.executeJupiterSwap(inputMint, outputMint, amount, side, buyAmountUSD, retryCount + 1, customSlippageBps);
             }
-            return { success: false, entryPrice: 0, error: message };
+            return { success: false, entryPrice: 0, error: message, txHash: undefined };
         }
     }
     private async fetchTokenSymbol(tokenMint: string): Promise<string> {
@@ -489,8 +511,26 @@ export class TradeService implements OnModuleInit {
             const mintInfo = await getMint(this.connection, mintPublicKey);
             return mintInfo.decimals;
         } catch (error) {
-            this.logger.error(`Failed to fetch decimals for ${tokenMint}: ${error.message}. Defaulting to 9.`);
-            return 9; 
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Failed to fetch decimals for ${tokenMint}: ${msg}. Defaulting to 6 (microcap standard).`);
+            return 6; // Majority of microcap Solana tokens use 6 decimals
+        }
+    }
+
+    /**
+     * Fallback price fetcher using Jupiter Price API.
+     * Used when sell price calculation produces impossible values.
+     */
+    private async getSellPriceFallback(tokenMint: string): Promise<number | null> {
+        try {
+            const response = await axios.get(`https://api.jup.ag/price/v2?ids=${tokenMint}`, {
+                timeout: 5000,
+                headers: { 'x-api-key': this.jupiterApiKey }
+            });
+            const price = parseFloat(response.data?.data?.[tokenMint]?.price);
+            return price && !isNaN(price) ? price : null;
+        } catch {
+            return null;
         }
     }
 
@@ -506,7 +546,8 @@ export class TradeService implements OnModuleInit {
             }
             return 0;
         } catch (error) {
-            this.logger.error(`Failed to get token balance for ${walletAddress}: ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Failed to get token balance for ${walletAddress}: ${msg}`);
             return null; // Return null biar bot tahu ini error API, bukan saldo 0
         }
     }
@@ -595,7 +636,8 @@ export class TradeService implements OnModuleInit {
 
             return holdings;
         } catch (error) {
-            this.logger.error(`Failed to fetch wallet holdings: ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Failed to fetch wallet holdings: ${msg}`);
             return [];
         }
     }

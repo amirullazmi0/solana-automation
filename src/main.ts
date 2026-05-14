@@ -9,6 +9,9 @@ async function bootstrap() {
     console.log('[DEBUG] Starting NestJS Bootstrap...');
     const app = await NestFactory.create(AppModule);
     
+    // 🛡️ GRACEFUL SHUTDOWN: Biar in-progress sell bisa selesai sebelum restart
+    app.enableShutdownHooks();
+
     const port = 3000;
     console.log(`[DEBUG] Attempting to listen on port ${port}...`);
     
@@ -16,3 +19,4 @@ async function bootstrap() {
     console.log(`[DEBUG] Application is successfully listening on port ${port}`);
 }
 bootstrap();
+

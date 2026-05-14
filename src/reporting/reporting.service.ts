@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import * as TelegramBot from 'node-telegram-bot-api';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
@@ -235,7 +236,8 @@ export class ReportingService implements OnModuleInit {
                 await this.sendMessage(`❌ *Failed:* ${result.message}`);
             }
         } catch (error) {
-            await this.sendMessage(`❌ *Error:* ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            await this.sendMessage(`❌ *Error:* ${msg}`);
         }
     }
 
@@ -250,7 +252,8 @@ export class ReportingService implements OnModuleInit {
                 await this.sendMessage(`❌ *Failed:* ${result.message}`);
             }
         } catch (error) {
-            await this.sendMessage(`❌ *Error:* ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            await this.sendMessage(`❌ *Error:* ${msg}`);
         }
     }
 
@@ -342,7 +345,8 @@ export class ReportingService implements OnModuleInit {
                 return parseFloat(dexResponse.data.pairs[0].priceUsd);
             }
         } catch (error) {
-            this.logger.error(`Error fetching price for report: ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Error fetching price for report: ${msg}`);
         }
         return null;
     }
@@ -492,5 +496,65 @@ export class ReportingService implements OnModuleInit {
         } else {
             this.logger.log(`[ALERT]: ${message.replace(/\n/g, ' | ')}`);
         }
+    
+    }
+
+    /**
+     * Daily P&L Summary — Sent every day at midnight UTC
+     */
+    @Cron('0 0 * * *')
+    async sendDailyPnLSummary() {
+        try {
+            const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+            const trades = await this.prismaService.trade.findMany({
+                where: { 
+                    status: 'CLOSED',
+                    updatedAt: { gte: dayAgo }
+                }
+            });
+
+            if (trades.length === 0) {
+                await this.sendMessage('📊 *Daily Summary:* No trades closed in the last 24 hours.');
+                return;
+            }
+
+            const totalPnl = trades.reduce((sum, t) => sum + (t.profitUsd || 0), 0);
+            const wins = trades.filter(t => (t.profitUsd || 0) > 0).length;
+            const losses = trades.filter(t => (t.profitUsd || 0) <= 0).length;
+            const winRate = trades.length > 0 ? ((wins / trades.length) * 100).toFixed(1) : '0';
+            const avgPnl = trades.length > 0 ? (totalPnl / trades.length) : 0;
+
+            const bestTrade = trades.reduce((best, t) => (t.profitUsd || 0) > (best.profitUsd || 0) ? t : best, trades[0]);
+            const worstTrade = trades.reduce((worst, t) => (t.profitUsd || 0) < (worst.profitUsd || 0) ? t : worst, trades[0]);
+
+            const pnlEmoji = totalPnl >= 0 ? '💰' : '🔻';
+            const message = `📊 *DAILY P&L SUMMARY* 📊\n` +
+                `━━━━━━━━━━━━━━━━━━\n` +
+                `${pnlEmoji} *Total P&L:* \`${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}\`\n` +
+                `📈 *Trades:* \`${trades.length}\` (✅ ${wins} wins | ❌ ${losses} losses)\n` +
+                `🎯 *Win Rate:* \`${winRate}%\`\n` +
+                `📉 *Avg P&L:* \`${avgPnl >= 0 ? '+' : ''}$${avgPnl.toFixed(2)}\`\n` +
+                `━━━━━━━━━━━━━━━━━━\n` +
+                `🏆 *Best:* ${bestTrade.symbol || 'N/A'} (\`+$${(bestTrade.profitUsd || 0).toFixed(2)}\`)\n` +
+                `💀 *Worst:* ${worstTrade.symbol || 'N/A'} (\`$${(worstTrade.profitUsd || 0).toFixed(2)}\`)\n` +
+                `━━━━━━━━━━━━━━━━━━\n` +
+                this.getExitReasonBreakdown(trades);
+
+            await this.sendMessage(message);
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Failed to send daily P&L summary: ${msg}`);
+        }
+    }
+
+    private getExitReasonBreakdown(trades: Array<{ exitReason?: string | null }>): string {
+        const reasons: Record<string, number> = {};
+        for (const t of trades) {
+            const reason = t.exitReason || 'UNKNOWN';
+            reasons[reason] = (reasons[reason] || 0) + 1;
+        }
+        return Object.entries(reasons)
+            .map(([reason, count]) => `⚡ ${reason.replace(/_/g, ' ')}: \`${count}\``)
+            .join('\n');
     }
 }

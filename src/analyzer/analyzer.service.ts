@@ -141,7 +141,8 @@ export class AnalyzerService {
                 } 
             };
         } catch (error) {
-            this.logger.error(`[${tokenMint}] Analysis failed: ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`[${tokenMint}] Analysis failed: ${msg}`);
             return { safe: false, reason: 'error' };
         }
     }
@@ -231,6 +232,16 @@ export class AnalyzerService {
                 website: pair.info?.websites?.[0]?.url
             };
 
+            // 🛡️ HARD REJECT: Token tanpa liquidity = impossible to sell tanpa massive slippage
+            if (!liquidity || liquidity < 1000) {
+                return { 
+                    passed: false, 
+                    reason: 'zero_liquidity', 
+                    permanent: true,
+                    liquidity, marketCap, symbol, pairCreatedAt, socials 
+                };
+            }
+
             // 1. VoL (Velocity of Liquidity)
             // Rumus: (Volume 5m / Liquidity) * Confidence Score
             const confidenceScore = (buys5m / (buys5m + sells5m || 1));
@@ -296,7 +307,8 @@ export class AnalyzerService {
                 zScore
             };
         } catch (error) {
-            this.logger.error(`[${tokenMint}] Traction check failed: ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`[${tokenMint}] Traction check failed: ${msg}`);
             return { passed: false };
         }
     }
@@ -320,7 +332,8 @@ export class AnalyzerService {
             const ip = response?.data?.Answer?.[0]?.data;
             if (ip && /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) return ip;
         } catch (error) {
-            this.logger.error(`[${hostname}] DNS resolution failed: ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`[${hostname}] DNS resolution failed: ${msg}`);
         }
         return hostname;
     }
@@ -392,7 +405,8 @@ export class AnalyzerService {
                 safetyIndex
             };
         } catch (error) {
-            this.logger.error(`RugCheck API Error: ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`RugCheck API Error: ${msg}`);
             return { passed: false, reason: 'rugcheck_error' };
         }
     }

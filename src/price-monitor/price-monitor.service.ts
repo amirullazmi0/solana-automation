@@ -15,9 +15,6 @@ export class PriceMonitorService {
     private trailingDistancePercent: number;
     private jupiterApiKey: string;
     private stopLossPercent: number;
-    private takeProfitPercent: number;
-    // In-memory tracker untuk konfirmasi SL (trade ID -> jumlah konfirmasi)
-    private readonly slConfirmCount = new Map<number, number>();
     private readonly lastAlertTime = new Map<string, number>(); // Cooldown alert: tokenMint -> timestamp
     private ipCache: Record<string, string> = {
         'api.jup.ag': '18.239.105.107',
@@ -35,15 +32,12 @@ export class PriceMonitorService {
         this.stopLossPercent = parseFloat(
             this.configService.get<string>('STOP_LOSS_PERCENT', '40.0'),
         );
-        this.takeProfitPercent = parseFloat(
-            this.configService.get<string>('TAKE_PROFIT_PERCENT', '20.0'),
-        );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
 
     private readonly processingTrades = new Set<number>();
 
-    @Interval(2000)
+    @Interval(5000)
     async monitorPrices() {
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN' },
@@ -73,7 +67,8 @@ export class PriceMonitorService {
                     await this.evaluateTrade(trade, stats.price);
                 }
             } catch (error) {
-                this.logger.error(`Error monitoring for ${trade.tokenMint}: ${error.message}`);
+                const msg = error instanceof Error ? error.message : String(error);
+                this.logger.error(`Error monitoring for ${trade.tokenMint}: ${msg}`);
             } finally {
                 this.processingTrades.delete(trade.id);
             }
@@ -107,7 +102,8 @@ export class PriceMonitorService {
                 };
             }
         } catch (error) {
-            this.logger.debug(`[PriceMonitor] Jupiter Price API error for ${tokenMint}: ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.debug(`[PriceMonitor] Jupiter Price API error for ${tokenMint}: ${msg}`);
         }
 
         // 2. Fallback total ke DexScreener jika Jupiter bermasalah
@@ -255,6 +251,13 @@ export class PriceMonitorService {
 
         // 5. EXIT CONDITION: Patience Protocol (10-Minute SL)
         if (profitPercent <= -this.stopLossPercent) {
+            // 🛡️ BUY PRESSURE CHECK: Jika masih ada buying pressure kuat, tunda SL
+            const hasBuyPressure = await this.checkBuyPressure(trade.tokenMint);
+            if (hasBuyPressure && !trade.slTriggeredAt) {
+                this.logger.log(`[Slot ${trade.slotNumber}] 🟢 Buy pressure detected in SL zone! Delaying SL timer...`);
+                return;
+            }
+
             if (!trade.slTriggeredAt) {
                 this.logger.warn(`[Slot ${trade.slotNumber}] 🛑 Stop Loss zone. Starting 10-minute patience timer...`);
                 await this.prismaService.trade.update({
@@ -303,7 +306,8 @@ export class PriceMonitorService {
 
             return false;
         } catch (error) {
-            this.logger.error(`Failed to check buy pressure: ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Failed to check buy pressure: ${msg}`);
             return false;
         }
     }

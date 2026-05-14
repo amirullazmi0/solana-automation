@@ -90,7 +90,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         this.handleWsDiscovery(message.mint);
                     }
                 } catch (e) {
-                    this.logger.error(`Error parsing PumpPortal message: ${e.message}`);
+                    const msg = e instanceof Error ? e.message : String(e);
+                    this.logger.error(`Error parsing PumpPortal message: ${msg}`);
                 }
             });
 
@@ -103,7 +104,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 this.logger.error(`🔌 PumpPortal WS Error: ${err.message}`);
             });
         } catch (error) {
-            this.logger.error(`Failed to init PumpPortal WS: ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Failed to init PumpPortal WS: ${msg}`);
         }
     }
 
@@ -181,8 +183,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         continue;
                     }
 
-                    // TTL 60 menit untuk koin yang baru masuk (Anti-Spam)
-                    this.seenTokens.set(mint, now + 60 * 60 * 1000);
+                    // TTL 6 jam untuk koin yang baru masuk (Anti-Spam — mencegah re-discovery loop)
+                    this.seenTokens.set(mint, now + 6 * 60 * 60 * 1000);
                     this.logger.log(`🔍 [Discovery] Potential Second-Wave Candidate: ${mint}`);
 
                     this.activeMonitoring++;
@@ -231,7 +233,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     }
                 });
             } catch (error) {
-                this.logger.error(`Watchlist Monitoring error: ${error.message}`);
+                const msg = error instanceof Error ? error.message : String(error);
+                this.logger.error(`Watchlist Monitoring error: ${msg}`);
             }
         }, Number.parseInt(this.configService.get<string>('SCANNER_RADAR_INTERVAL', '20000'), 10));
     }
@@ -259,8 +262,25 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             });
 
             if (existing && (existing.status === 'FAILED' || existing.status === 'TRADED')) {
-                // Khusus FAILED, kita hapus dari seenTokens biar nggak kena log debug terus-menerus
-                this.seenTokens.set(tokenMint, Date.now() + 2 * 60 * 60 * 1000); // Cooldown 2 jam biar nggak masuk discovery lagi
+                this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); // Cooldown 6 jam
+                return;
+            }
+
+            // 🛡️ ANTI-REPEAT BUY: Cek apakah token ini sudah pernah di-trade dalam 24 jam terakhir
+            const recentTrade = await this.prismaService.trade.findFirst({
+                where: {
+                    tokenMint,
+                    createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+                }
+            });
+            if (recentTrade) {
+                this.logger.debug(`[${tokenMint}] ⛔ Already traded in last 24h (Trade #${recentTrade.id}). Skip.`);
+                await this.prismaService.watchlist.upsert({
+                    where: { tokenMint },
+                    update: { status: 'FAILED', reason: 'already_traded_24h' },
+                    create: { tokenMint, status: 'FAILED', reason: 'already_traded_24h' }
+                });
+                this.seenTokens.set(tokenMint, Date.now() + 24 * 60 * 60 * 1000); // Cooldown 24 jam
                 return;
             }
 
@@ -297,18 +317,14 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     const currentItem = await this.prismaService.watchlist.findUnique({ where: { tokenMint } });
                     if (!currentItem || currentItem.status === 'FAILED' || currentItem.status === 'TRADED') return;
 
-                    // 🛡️ CONVICTION PLAY: Kalau sudah dicek 100x dan masih PENDING, hajar aja!
-                    if (currentItem.checkCount >= 100) {
-                        this.logger.log(`[${tokenMint}] 💎 CONVICTION DETECTED! (Checked ${currentItem.checkCount}x). Forcing entry...`);
-                        const metadata = await this.analyzerService.getTokenMetadata(tokenMint);
-                        const buyResult = await this.tradeService.attemptBuy(tokenMint, metadata);
-                        
-                        if (buyResult.success) {
-                            await this.prismaService.watchlist.update({
-                                where: { tokenMint },
-                                data: { status: 'TRADED' }
-                            });
-                        }
+                    // 🛡️ STAGNANT TIMEOUT: Kalau sudah dicek 50x dan masih PENDING, mark as FAILED (bukan force buy)
+                    if (currentItem.checkCount >= 50) {
+                        this.logger.debug(`[${tokenMint}] 💤 Stagnant after ${currentItem.checkCount} checks. Marking FAILED.`);
+                        await this.prismaService.watchlist.update({
+                            where: { tokenMint },
+                            data: { status: 'FAILED', reason: 'stagnant_timeout' }
+                        });
+                        this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
                         return;
                     }
 
@@ -381,14 +397,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     ) {
                         this.logger.debug(`[${tokenMint}] ⏳ Temporary fail (${result.reason}). Keeping in Watchlist for re-check.`);
                         
-                        // Tapi kalau sudah dicek > 150 kali dan masih PENDING, kita FAILED-kan saja (Basi)
-                        const currentWatchlist = await this.prismaService.watchlist.findUnique({ where: { tokenMint } });
-                        if (currentWatchlist && currentWatchlist.checkCount > 150) {
-                            await this.prismaService.watchlist.update({
-                                where: { tokenMint },
-                                data: { status: 'FAILED', reason: 'stagnant_timeout' }
-                            });
-                        }
+                        // Stagnant timeout sudah dihandle di atas (checkCount >= 50)
                         return; 
                     }
 

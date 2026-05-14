@@ -21,11 +21,15 @@ model Trade {
   highestPrice            Float
   trailingStopPrice       Float
   exitPrice               Float?
+  exitReason              String?
   profitUsd               Float?
   entryLiquidity          Float?
   entryMarketCap          Float?
   status                  TradeStatus @default(OPEN)
   amountInSol             Float
+  buyTxHash               String?
+  sellTxHash              String?
+  feesPaid                Float?
   creatorAddress          String?
   topHolderAddress        String?
   initialCreatorBalance   Float?
@@ -33,6 +37,9 @@ model Trade {
   createdAt               DateTime    @default(now())
   updatedAt               DateTime    @updatedAt
   slTriggeredAt           DateTime?
+
+  @@index([status])
+  @@index([tokenMint, createdAt])
 }
 
 enum WatchlistStatus {
