@@ -464,13 +464,20 @@ export class TradeService implements OnModuleInit {
     }
 
     async getTokenDecimals(tokenMint: string): Promise<number> {
+        // 💊 PUMP.FUN DETECTOR: Koin pump.fun selalu 6 desimal
+        if (tokenMint.toLowerCase().endsWith('pump')) {
+            return 6;
+        }
+
         try {
-            const mintPublicKey = new (await import('@solana/web3.js')).PublicKey(tokenMint);
-            const mintInfo = await (await import('@solana/spl-token')).getMint(this.connection, mintPublicKey);
+            const { PublicKey } = await import('@solana/web3.js');
+            const { getMint } = await import('@solana/spl-token');
+            const mintPublicKey = new PublicKey(tokenMint);
+            const mintInfo = await getMint(this.connection, mintPublicKey);
             return mintInfo.decimals;
         } catch (error) {
             this.logger.error(`Failed to fetch decimals for ${tokenMint}: ${error.message}. Defaulting to 9.`);
-            return 9; // Fallback ke 9 desimal (standar SPL)
+            return 9; 
         }
     }
 
@@ -579,6 +586,7 @@ export class TradeService implements OnModuleInit {
             return [];
         }
     }
+
 
     private async monitorPrice(tokenMint: string, slotNumber: number, entryPrice: number, tradeId: number) {
         this.logger.log(`[Monitor] Starting price tracker for ${tokenMint} (Slot #${slotNumber})`);
