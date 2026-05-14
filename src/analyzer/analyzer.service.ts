@@ -146,6 +146,19 @@ export class AnalyzerService {
         }
     }
 
+    async getTokenMetadata(tokenMint: string): Promise<TokenMetadata> {
+        const traction = await this.checkMarketTraction(tokenMint);
+        return {
+            liquidity: traction.liquidity || 0,
+            marketCap: traction.marketCap || 0,
+            mcap: traction.marketCap,
+            pairCreatedAt: traction.pairCreatedAt,
+            symbol: traction.symbol,
+            socials: traction.socials,
+            volumeSurge: traction.volumeSurge
+        };
+    }
+
     private async getJupiterPrice(tokenMint: string): Promise<number | null> {
         try {
             const response = await axios.get(`https://api.jup.ag/price/v2?ids=${tokenMint}`, {
