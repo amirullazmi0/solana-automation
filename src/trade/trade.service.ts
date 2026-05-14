@@ -405,11 +405,17 @@ export class TradeService implements OnModuleInit {
             const quoteResponse = await axios.get(quoteUrl, config);
             const quoteData = quoteResponse.data;
 
-            let entryPrice = 0;
+            let price = 0;
+            const decimals = await this.getTokenDecimals(side === 'BUY' ? outputMint : inputMint);
             if (side === 'BUY') {
-                const decimals = await this.getTokenDecimals(outputMint);
                 const usdValue = buyAmountUSD || this.positionSizeUSD;
-                entryPrice = usdValue / (quoteData.outAmount / Math.pow(10, decimals));
+                price = usdValue / (quoteData.outAmount / Math.pow(10, decimals));
+            } else {
+                // SELL: Price = (outAmount_sol * solPrice) / inAmount_token
+                const solPrice = await this.getSolPrice();
+                const outAmountSol = quoteData.outAmount / 1_000_000_000;
+                const inAmountToken = amount / Math.pow(10, decimals);
+                price = (outAmountSol * solPrice) / inAmountToken;
             }
 
             // ⛽ DYNAMIC FEES: Naikin gas tiap kali gagal (Auto-Multiplier + Retry Bonus)
@@ -453,7 +459,7 @@ export class TradeService implements OnModuleInit {
                 throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
             }
 
-            return { success: true, entryPrice: entryPrice || 1 };
+            return { success: true, entryPrice: price || 0.00000001 };
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             if (retryCount < maxRetries - 1) {
