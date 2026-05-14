@@ -180,8 +180,8 @@ export class PriceMonitorService {
         if (trade.creatorAddress || trade.topHolderAddress) {
             if (trade.creatorAddress) {
                 const currentCreatorBalance = await this.tradeService.getTokenBalance(trade.creatorAddress, trade.tokenMint);
-                // Threshold naik jadi 15% (dari 1%) biar gak baperan
-                if (currentCreatorBalance < (trade.initialCreatorBalance || 0) * 0.85) { 
+                // ✅ FIXED: Cek tipe data biar nggak error 'possibly null'
+                if (typeof currentCreatorBalance === 'number' && currentCreatorBalance < (trade.initialCreatorBalance || 0) * 0.85) { 
                     this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 DEV IS SELLING! Creator dumped tokens (>15%). PANIC SELLING!`);
                     await this.tradeService.executeSell(trade.id, currentPrice, true);
                     return;
@@ -189,7 +189,8 @@ export class PriceMonitorService {
             }
             if (trade.topHolderAddress) {
                 const currentTopBalance = await this.tradeService.getTokenBalance(trade.topHolderAddress, trade.tokenMint);
-                if (currentTopBalance < (trade.initialTopHolderBalance || 0) * 0.85) {
+                // ✅ FIXED: Cek tipe data biar nggak error 'possibly null'
+                if (typeof currentTopBalance === 'number' && currentTopBalance < (trade.initialTopHolderBalance || 0) * 0.85) {
                     this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 TOP HOLDER IS SELLING! Top whale dumped (>15%). PANIC SELLING!`);
                     await this.tradeService.executeSell(trade.id, currentPrice, true);
                     return;

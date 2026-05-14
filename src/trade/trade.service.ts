@@ -274,6 +274,11 @@ export class TradeService implements OnModuleInit {
 
             // 2. DAPETIN SALDO ASLI
             const actualBalance = await this.getTokenBalance(this.wallet.publicKey.toBase58(), trade.tokenMint);
+            if (actualBalance === null) {
+                this.logger.error(`[Slot ${trade.slotNumber}] ❌ Failed to fetch balance from RPC. Aborting sell to prevent errors.`);
+                return false;
+            }
+
             const sellAmount = actualBalance * percentage;
             const decimals = await this.getTokenDecimals(trade.tokenMint);
             const amountInLamports = Math.floor(sellAmount * Math.pow(10, decimals));
@@ -546,7 +551,7 @@ export class TradeService implements OnModuleInit {
         } else {
             // Manual sell for token not in DB
             const actualBalance = await this.getTokenBalance(this.wallet.publicKey.toBase58(), tokenMint);
-            if (actualBalance <= 0) return { success: false, message: 'Zero balance in wallet.' };
+            if (actualBalance === null || actualBalance <= 0) return { success: false, message: 'Zero or invalid balance in wallet.' };
 
             const decimals = await this.getTokenDecimals(tokenMint);
             const amountInLamports = Math.floor(actualBalance * percentage * Math.pow(10, decimals));
