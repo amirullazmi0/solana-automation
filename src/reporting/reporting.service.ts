@@ -122,16 +122,25 @@ export class ReportingService implements OnModuleInit {
             return;
         }
 
-        let msg = '🔍 *Pending Watchlist:*\n\n';
+        await this.sendMessage(`🔍 *Menampilkan ${pendingWatchlist.length} token di Watchlist...*`);
+
         for (const item of pendingWatchlist) {
             const symbol = item.symbol || 'UNKNOWN';
-            msg += `💎 *${symbol}*\n`;
+            let msg = `💎 *${symbol}*\n`;
             msg += `🆔 \`${item.tokenMint}\`\n`;
             msg += `💹 MCap: \`$${item.mcap?.toLocaleString()}\` | Surge: \`${item.volumeSurge?.toFixed(1)}x\`\n`;
-            msg += `━━━━━━━━━━━━━━━━━━\n`;
-        }
+            
+            const buttons: TelegramBot.InlineKeyboardButton[][] = [
+                [
+                    { text: '💊 Pump.fun', url: `https://pump.fun/coin/${item.tokenMint}` },
+                    { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${item.tokenMint}` }
+                ]
+            ];
 
-        await this.sendMessage(msg);
+            await this.sendMessage(msg, {
+                reply_markup: { inline_keyboard: buttons }
+            });
+        }
     }
 
     private async handleTokenInput(mint: string) {
@@ -361,6 +370,7 @@ export class ReportingService implements OnModuleInit {
         if (socials?.telegram) row1.push({ text: '📱 Telegram', url: socials.telegram });
         
         const row2: TelegramBot.InlineKeyboardButton[] = [
+            { text: '💊 Pump.fun', url: `https://pump.fun/coin/${tokenMint}` },
             { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` },
             { text: '🛡️ RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` }
         ];
@@ -434,14 +444,19 @@ export class ReportingService implements OnModuleInit {
                         `━━━━━━━ 🛡️ ━━━━━━━\n` +
                         `✅ *Status:* MONITORING...`;
         
-        const buttons: TelegramBot.InlineKeyboardButton[] = [
-            { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` },
-            { text: '🛡️ RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` }
+        const buttons: TelegramBot.InlineKeyboardButton[][] = [
+            [
+                { text: '💊 Pump.fun', url: `https://pump.fun/coin/${tokenMint}` },
+                { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` }
+            ],
+            [
+                { text: '🛡️ RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` }
+            ]
         ];
 
         await this.sendMessage(message, {
             reply_markup: {
-                inline_keyboard: [buttons]
+                inline_keyboard: buttons
             }
         });
     }
