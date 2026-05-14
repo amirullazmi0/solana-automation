@@ -302,6 +302,23 @@ export class ReportingService implements OnModuleInit {
             statusMsg += `Stop: \`$${trade.trailingStopPrice.toFixed(8)}\`\n\n`;
         }
 
+        // 🕒 RECENT HISTORY: Tampilkan 5 transaksi terakhir yang laku
+        const recentTrades = await this.prismaService.trade.findMany({
+            where: { status: 'CLOSED' },
+            orderBy: { updatedAt: 'desc' },
+            take: 5
+        });
+
+        if (recentTrades.length > 0) {
+            statusMsg += `━━━━━━━━━━━━━━━━━━\n`;
+            statusMsg += `🕒 *Recent History (Last 5):*\n\n`;
+            for (const trade of recentTrades) {
+                const profit = trade.profitUsd || 0;
+                const emoji = profit >= 0 ? '💰' : '🛑';
+                statusMsg += `${emoji} *${trade.symbol}*: ${profit >= 0 ? '+' : ''}$${profit.toFixed(2)}\n`;
+            }
+        }
+
         await this.sendMessage(statusMsg);
     }
 

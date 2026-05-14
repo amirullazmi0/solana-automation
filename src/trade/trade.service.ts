@@ -622,7 +622,7 @@ export class TradeService implements OnModuleInit {
                 const slPercent = Number.parseFloat(this.configService.get<string>('STOP_LOSS_PERCENT', '30.0'));
                 const trailingDistance = Number.parseFloat(this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '5.0'));
 
-                // 🚀 TRAILING STOP LOGIC
+                // 🚀 TRAILING STOP LOGIC (Update Batas Untung)
                 if (currentPrice > trade.highestPrice) {
                     const newTrailingStop = currentPrice * (1 - (trailingDistance / 100));
                     await this.prismaService.trade.update({
@@ -635,33 +635,73 @@ export class TradeService implements OnModuleInit {
                     this.logger.debug(`[Slot ${slotNumber}] 📈 New Peak: $${currentPrice.toFixed(8)}. Trailing Stop: $${newTrailingStop.toFixed(8)}`);
                 }
 
-                // 💸 EXIT CONDITION 1: Take Profit (Hit Trailing Stop)
-                if (currentPrice <= trade.trailingStopPrice && currentPrice > entryPrice) {
-                    this.logger.log(`[Slot ${slotNumber}] 💰 Trailing Stop Triggered at $${currentPrice.toFixed(8)}. Profit: ${profit.toFixed(2)}%`);
-                    const success = await this.executeSell(tradeId, currentPrice, false);
-                    if (success) {
-                        clearInterval(interval);
-                    } else {
-                        this.logger.warn(`[Slot ${slotNumber}] ⚠️ Take Profit failed. Retrying in next cycle...`);
+                // 3. ANALISIS HOLDER (Insting Intelijen)
+                let devDumped = false;
+                if (trade.creatorAddress) {
+                    const currentDevBalance = await this.getTokenBalance(trade.creatorAddress, tokenMint);
+                    if (currentDevBalance < (trade.initialCreatorBalance || 0) * 0.5) {
+                        this.logger.warn(`[Slot ${slotNumber}] 🔥 EMERGENCY: Developer is dumping! (Balance: ${currentDevBalance} vs Initial: ${trade.initialCreatorBalance}). Action: PANIC SELL.`);
+                        devDumped = true;
                     }
                 }
 
-                // 🛑 EXIT CONDITION 2: Hard Stop Loss
-                if (profit <= -slPercent) {
-                    this.logger.warn(`[Slot ${slotNumber}] 🛑 Stop Loss Potential at $${currentPrice.toFixed(8)}. Loss: ${profit.toFixed(2)}%. Double checking...`);
+                // 💸 EXIT CONDITION 1: Take Profit (Hit Trailing Stop)
+                if (currentPrice <= trade.trailingStopPrice && currentPrice > entryPrice) {
+                    this.logger.log(`[Slot ${slotNumber}] 💰 Trailing Stop Reached at $${currentPrice.toFixed(8)}. Analyzing...`);
                     
-                    // 🔍 DOUBLE CHECK: Tunggu 2 detik, cek lagi harganya. Anti-Glitch!
-                    await new Promise(res => setTimeout(res, 2000));
-                    const reCheckPrice = await this.reportingService.fetchCurrentPrice(tokenMint);
-                    
-                    if (reCheckPrice && ((reCheckPrice - entryPrice) / entryPrice) * 100 <= -slPercent) {
-                        this.logger.warn(`[Slot ${slotNumber}] 🛑 Stop Loss CONFIRMED. Executing SELL.`);
-                        const success = await this.executeSell(tradeId, currentPrice, true);
-                        if (success) {
-                            clearInterval(interval);
+                    // 🧠 DIAMOND HAND PASS: Kalau Dev masih hold, kasih nafas 3% lagi
+                    if (!devDumped && trade.creatorAddress) {
+                        const leniencyPrice = trade.trailingStopPrice * 0.97;
+                        if (currentPrice > leniencyPrice) {
+                            this.logger.log(`[Slot ${slotNumber}] 💎 Dev is still holding. Applying Diamond Hand Pass (Waiting for $${leniencyPrice.toFixed(8)})`);
+                            return;
                         }
+                    }
+
+                    this.logger.log(`[Slot ${slotNumber}] 💸 Executing Profit Sell.`);
+                    const success = await this.executeSell(tradeId, currentPrice, false);
+                    if (success) clearInterval(interval);
+                }
+
+                // 🛑 EXIT CONDITION 2: Hard Stop Loss or Dev Dump
+                if (profit <= -slPercent || devDumped) {
+                    const reason = devDumped ? 'DEV DUMP' : 'STOP LOSS';
+                    
+                    // 🚨 EMERGENCY: Jika Rugpull (-80%) atau Dev Dump, JANGAN TUNGGU!
+                    if (profit <= -80 || devDumped) {
+                        this.logger.warn(`[Slot ${slotNumber}] 🛑 ${reason} (CRITICAL) at $${currentPrice.toFixed(8)}. Executing IMMEDIATE SELL.`);
+                        const success = await this.executeSell(tradeId, currentPrice, true);
+                        if (success) clearInterval(interval);
+                        return;
+                    }
+
+                    // 🕒 10-MINUTE PATIENCE RULE: Tunggu pemulihan buat SL
+                    if (!trade.slTriggeredAt) {
+                        this.logger.warn(`[Slot ${slotNumber}] 🛑 Stop Loss Potential. Starting 10-minute patience timer...`);
+                        await this.prismaService.trade.update({
+                            where: { id: tradeId },
+                            data: { slTriggeredAt: new Date() }
+                        });
                     } else {
-                        this.logger.log(`[Slot ${slotNumber}] 🛡️ Fake Stop Loss avoided. Price recovered or API glitch.`);
+                        const elapsedMs = Date.now() - new Date(trade.slTriggeredAt).getTime();
+                        const elapsedMin = elapsedMs / (1000 * 60);
+                        
+                        if (elapsedMin >= 10) {
+                            this.logger.warn(`[Slot ${slotNumber}] 🕒 10 minutes passed and no recovery. Executing FINAL SL SELL.`);
+                            const success = await this.executeSell(tradeId, currentPrice, true);
+                            if (success) clearInterval(interval);
+                        } else {
+                            this.logger.log(`[Slot ${slotNumber}] 🕒 Still in SL zone. Waiting for recovery... (${(10 - elapsedMin).toFixed(1)} min left)`);
+                        }
+                    }
+                } else {
+                    // ✅ RECOVERY: Jika harga balik sehat, reset timernya
+                    if (trade.slTriggeredAt) {
+                        this.logger.log(`[Slot ${slotNumber}] ✨ Price recovered! Resetting SL timer.`);
+                        await this.prismaService.trade.update({
+                            where: { id: tradeId },
+                            data: { slTriggeredAt: null }
+                        });
                     }
                 }
 

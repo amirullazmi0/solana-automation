@@ -32,6 +32,7 @@ model Trade {
   initialTopHolderBalance Float?
   createdAt               DateTime    @default(now())
   updatedAt               DateTime    @updatedAt
+  slTriggeredAt           DateTime?
 }
 
 enum WatchlistStatus {

@@ -21,6 +21,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     // Batasi max token yang dipantau bersamaan biar nggak kelebihan memory
     private activeMonitoring = 0;
     private readonly MAX_CONCURRENT: number;
+    private readonly processingTokens = new Set<string>();
 
     constructor(
         private readonly configService: ConfigService,
@@ -240,9 +241,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     }
 
     private async processNewToken(tokenMint: string) {
-        // Jika dipanggil dari radar/poll yang sudah increment, jangan double increment
-        // Tapi kita handle increment di pemanggil biar race-condition free.
-        // Di sini kita pastikan decrement tetap jalan di finally.
+        if (this.processingTokens.has(tokenMint)) return;
+        this.processingTokens.add(tokenMint);
         
         try {
             // 🛡️ Tembok Pelindung: Cek dulu status di DB. Kalau sudah FAILED/TRADED, jangan diproses lagi.
@@ -285,22 +285,24 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
             while (Date.now() - startTime < maxWaitTime) {
                 try {
+                    // 🛡️ RE-FETCH LATEST DATA
+                    const currentItem = await this.prismaService.watchlist.findUnique({ where: { tokenMint } });
+                    if (!currentItem || currentItem.status === 'FAILED' || currentItem.status === 'TRADED') return;
+
                     // 🛡️ CONVICTION PLAY: Kalau sudah dicek 100x dan masih PENDING, hajar aja!
-            const checkCount = existing?.checkCount || 0;
-            if (checkCount >= 100) {
-                this.logger.log(`[${tokenMint}] 💎 CONVICTION DETECTED! (Checked 100x). Forcing entry...`);
-                // Ambil metadata minimal buat buy
-                const metadata = await this.analyzerService.getTokenMetadata(tokenMint);
-                const buyResult = await this.tradeService.attemptBuy(tokenMint, metadata);
-                
-                if (buyResult.success) {
-                    await this.prismaService.watchlist.update({
-                        where: { tokenMint },
-                        data: { status: 'TRADED' }
-                    });
-                }
-                return;
-            }
+                    if (currentItem.checkCount >= 100) {
+                        this.logger.log(`[${tokenMint}] 💎 CONVICTION DETECTED! (Checked ${currentItem.checkCount}x). Forcing entry...`);
+                        const metadata = await this.analyzerService.getTokenMetadata(tokenMint);
+                        const buyResult = await this.tradeService.attemptBuy(tokenMint, metadata);
+                        
+                        if (buyResult.success) {
+                            await this.prismaService.watchlist.update({
+                                where: { tokenMint },
+                                data: { status: 'TRADED' }
+                            });
+                        }
+                        return;
+                    }
 
             const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
 
@@ -402,6 +404,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             this.seenTokens.delete(tokenMint);
         } finally {
             this.activeMonitoring--;
+            this.processingTokens.delete(tokenMint);
         }
     }
 }
