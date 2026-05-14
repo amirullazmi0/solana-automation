@@ -252,7 +252,7 @@ export class TradeService implements OnModuleInit {
         currentPrice: number, 
         isStopLoss: boolean,
         percentage: number = 1.0
-    ) {
+    ): Promise<boolean> {
         const trade = await this.prismaService.trade.findUnique({ where: { id: tradeId } });
         if (!trade || trade.status !== 'OPEN') {
             this.logger.debug(`[Trade ${tradeId}] Already closed or not found. Skipping sell.`);
@@ -287,11 +287,17 @@ export class TradeService implements OnModuleInit {
 
             this.logger.log(`[Slot ${trade.slotNumber}] 💸 Executing SELL (${(percentage * 100).toFixed(0)}%) for ${trade.symbol} (${trade.tokenMint}). Amount: ${sellAmount}`);
             
+            // 3. PANIC SLIPPAGE: Kalau SL, hajar slippage 15% (1500 bps) biar pasti laku
+            const sellSlippage = isStopLoss ? 1500 : this.slippageBps;
+            
             const { success, error } = await this.executeJupiterSwap(
                 trade.tokenMint,
                 WRAPPED_SOL_MINT,
                 amountInLamports,
                 'SELL',
+                undefined,
+                0,
+                sellSlippage
             );
 
             if (success) {
@@ -325,10 +331,7 @@ export class TradeService implements OnModuleInit {
                     isStopLoss,
                     trade.symbol || undefined,
                 );
-                this.logger.log(`[Slot ${trade.slotNumber}] ✅ Position ${percentage >= 1.0 ? 'CLOSED' : 'PARTIALLY SOLD'}. Profit: ${profit.toFixed(2)}%`);
-            } else {
-                throw new Error(error || 'Swap failed');
-            }
+            return true; // Success
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logger.error(`[Slot ${trade.slotNumber}] ❌ SELL FAILED: ${message}. Rolling back.`);
@@ -339,6 +342,7 @@ export class TradeService implements OnModuleInit {
                     data: { status: 'OPEN' }
                 });
             }
+            return false; // Failed
         }
     }
 
@@ -349,6 +353,7 @@ export class TradeService implements OnModuleInit {
         side: 'BUY' | 'SELL',
         buyAmountUSD?: number,
         retryCount = 0,
+        customSlippageBps?: number
     ): Promise<{ success: boolean; entryPrice: number; error?: string }> {
         try {
             if (retryCount === 0) await new Promise((res) => setTimeout(res, Math.random() * 2000));
@@ -385,7 +390,8 @@ export class TradeService implements OnModuleInit {
                 }),
             };
 
-            const quoteUrl = `${baseUrl}/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${this.slippageBps}`;
+            const slippage = customSlippageBps || this.slippageBps;
+            const quoteUrl = `${baseUrl}/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippage}`;
             const quoteResponse = await axios.get(quoteUrl, config);
             const quoteData = quoteResponse.data;
 
@@ -625,15 +631,24 @@ export class TradeService implements OnModuleInit {
                 // 💸 EXIT CONDITION 1: Take Profit (Hit Trailing Stop)
                 if (currentPrice <= trade.trailingStopPrice && currentPrice > entryPrice) {
                     this.logger.log(`[Slot ${slotNumber}] 💰 Trailing Stop Triggered at $${currentPrice.toFixed(8)}. Profit: ${profit.toFixed(2)}%`);
-                    clearInterval(interval);
-                    await this.executeSell(tradeId, currentPrice, false);
+                    const success = await this.executeSell(tradeId, currentPrice, false);
+                    if (success) {
+                        clearInterval(interval);
+                    } else {
+                        this.logger.warn(`[Slot ${slotNumber}] ⚠️ Take Profit failed. Retrying in next cycle...`);
+                    }
                 }
 
                 // 🛑 EXIT CONDITION 2: Hard Stop Loss
                 if (profit <= -slPercent) {
                     this.logger.warn(`[Slot ${slotNumber}] 🛑 Stop Loss Triggered at $${currentPrice.toFixed(8)}. Loss: ${profit.toFixed(2)}%`);
-                    clearInterval(interval);
-                    await this.executeSell(tradeId, currentPrice, true);
+                    // Untuk SL, kita pakai slippage lebih "Ganas" (Auto-Panic)
+                    const success = await this.executeSell(tradeId, currentPrice, true);
+                    if (success) {
+                        clearInterval(interval);
+                    } else {
+                        this.logger.warn(`[Slot ${slotNumber}] ⚠️ Stop Loss failed. Retrying aggressively...`);
+                    }
                 }
 
             } catch (error) {
