@@ -256,7 +256,7 @@ export class TradeService implements OnModuleInit {
         const trade = await this.prismaService.trade.findUnique({ where: { id: tradeId } });
         if (!trade || trade.status !== 'OPEN') {
             this.logger.debug(`[Trade ${tradeId}] Already closed or not found. Skipping sell.`);
-            return;
+            return false;
         }
 
         try {
@@ -282,7 +282,7 @@ export class TradeService implements OnModuleInit {
                         data: { exitPrice: 0, profitUsd: 0 }
                     });
                 }
-                return;
+                return false;
             }
 
             this.logger.log(`[Slot ${trade.slotNumber}] 💸 Executing SELL (${(percentage * 100).toFixed(0)}%) for ${trade.symbol} (${trade.tokenMint}). Amount: ${sellAmount}`);
@@ -331,7 +331,9 @@ export class TradeService implements OnModuleInit {
                     isStopLoss,
                     trade.symbol || undefined,
                 );
-            return true; // Success
+                return true; // Success
+            }
+            throw new Error(error || 'Swap failed');
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logger.error(`[Slot ${trade.slotNumber}] ❌ SELL FAILED: ${message}. Rolling back.`);
