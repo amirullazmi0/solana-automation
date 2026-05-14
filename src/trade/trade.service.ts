@@ -211,6 +211,8 @@ export class TradeService implements OnModuleInit {
                 initialTopHolderBalance = await this.getTokenBalance(metadata.topHolder, tokenMint);
             }
 
+            const trailingDistance = Number.parseFloat(this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '5.0'));
+            
             await this.prismaService.trade.create({
                 data: {
                     tokenMint,
@@ -218,7 +220,7 @@ export class TradeService implements OnModuleInit {
                     slotNumber: slotToUse,
                     entryPrice,
                     highestPrice: entryPrice,
-                    trailingStopPrice: entryPrice * 0.9,
+                    trailingStopPrice: entryPrice * (1 - (trailingDistance / 100)),
                     status: 'OPEN',
                     amountInSol,
                     entryLiquidity: metadata?.liquidity || 0,
@@ -597,8 +599,11 @@ export class TradeService implements OnModuleInit {
 
 
     private async monitorPrice(tokenMint: string, slotNumber: number, entryPrice: number, tradeId: number) {
-        this.logger.log(`[Monitor] Starting price tracker for ${tokenMint} (Slot #${slotNumber})`);
+        this.logger.log(`[Monitor] Starting price tracker for ${tokenMint} (Slot #${slotNumber}). Grace period: 20s.`);
         
+        // ☕ GRACE PERIOD: Jangan langsung pantau, biarin API update dulu
+        await new Promise(resolve => setTimeout(resolve, 20000));
+
         const interval = setInterval(async () => {
             try {
                 // 1. Cek apakah koin masih OPEN di DB
@@ -643,13 +648,20 @@ export class TradeService implements OnModuleInit {
 
                 // 🛑 EXIT CONDITION 2: Hard Stop Loss
                 if (profit <= -slPercent) {
-                    this.logger.warn(`[Slot ${slotNumber}] 🛑 Stop Loss Triggered at $${currentPrice.toFixed(8)}. Loss: ${profit.toFixed(2)}%`);
-                    // Untuk SL, kita pakai slippage lebih "Ganas" (Auto-Panic)
-                    const success = await this.executeSell(tradeId, currentPrice, true);
-                    if (success) {
-                        clearInterval(interval);
+                    this.logger.warn(`[Slot ${slotNumber}] 🛑 Stop Loss Potential at $${currentPrice.toFixed(8)}. Loss: ${profit.toFixed(2)}%. Double checking...`);
+                    
+                    // 🔍 DOUBLE CHECK: Tunggu 2 detik, cek lagi harganya. Anti-Glitch!
+                    await new Promise(res => setTimeout(res, 2000));
+                    const reCheckPrice = await this.reportingService.fetchCurrentPrice(tokenMint);
+                    
+                    if (reCheckPrice && ((reCheckPrice - entryPrice) / entryPrice) * 100 <= -slPercent) {
+                        this.logger.warn(`[Slot ${slotNumber}] 🛑 Stop Loss CONFIRMED. Executing SELL.`);
+                        const success = await this.executeSell(tradeId, currentPrice, true);
+                        if (success) {
+                            clearInterval(interval);
+                        }
                     } else {
-                        this.logger.warn(`[Slot ${slotNumber}] ⚠️ Stop Loss failed. Retrying aggressively...`);
+                        this.logger.log(`[Slot ${slotNumber}] 🛡️ Fake Stop Loss avoided. Price recovered or API glitch.`);
                     }
                 }
 
