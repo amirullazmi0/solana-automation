@@ -14,7 +14,7 @@ async function forceSell() {
     for (const id of idsToSell) {
         try {
             // Kita pakai harga estimasi tertinggi sekarang $0.1283
-            await tradeService.executeSell(id, 0.1283, false);
+            await tradeService.executeSell(id, 0.1283, 'FORCE_SELL');
             console.log(`✅ Slot ID ${id} berhasil dijual! Profit diamankan.`);
         } catch (e) {
             console.error(`❌ Gagal jual Slot ID ${id}:`, e.message);

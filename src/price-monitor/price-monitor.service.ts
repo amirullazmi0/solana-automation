@@ -65,7 +65,7 @@ export class PriceMonitorService {
                         const liqDrop = ((trade.entryLiquidity - stats.liquidity) / trade.entryLiquidity) * 100;
                         if (liqDrop > 25) {
                             this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 RUGPULL DETECTED! Liquidity dropped ${liqDrop.toFixed(2)}%. PANIC SELLING!`);
-                            await this.tradeService.executeSell(trade.id, stats.price, true);
+                            await this.tradeService.executeSell(trade.id, stats.price, 'RUGPULL');
                             continue;
                         }
                     }
@@ -175,73 +175,101 @@ export class PriceMonitorService {
 
     private async evaluateTrade(trade: Trade, currentPrice: number) {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
-        // const holdingTimeSeconds = (Date.now() - new Date(trade.createdAt).getTime()) / 1000;
-        // 0. PANIC SELL: DEV SELL WATCH
+        let devDumped = false;
+
+        // 1. ANALISIS HOLDER (Insting Intelijen)
         if (trade.creatorAddress || trade.topHolderAddress) {
             if (trade.creatorAddress) {
                 const currentCreatorBalance = await this.tradeService.getTokenBalance(trade.creatorAddress, trade.tokenMint);
-                // ✅ FIXED: Cek tipe data biar nggak error 'possibly null'
-                if (typeof currentCreatorBalance === 'number' && currentCreatorBalance < (trade.initialCreatorBalance || 0) * 0.85) { 
-                    this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 DEV IS SELLING! Creator dumped tokens (>15%). PANIC SELLING!`);
-                    await this.tradeService.executeSell(trade.id, currentPrice, true);
-                    return;
+                if (typeof currentCreatorBalance === 'number' && trade.initialCreatorBalance) {
+                    if (currentCreatorBalance < trade.initialCreatorBalance * 0.5) { // Dev dump 50%
+                        this.logger.warn(`[Slot ${trade.slotNumber}] 🔥 EMERGENCY: Developer is dumping! PANIC SELL.`);
+                        devDumped = true;
+                        await this.tradeService.executeSell(trade.id, currentPrice, 'DEV_DUMP');
+                        return;
+                    }
                 }
             }
+            // Top Whale Check (Leniency 15%)
             if (trade.topHolderAddress) {
                 const currentTopBalance = await this.tradeService.getTokenBalance(trade.topHolderAddress, trade.tokenMint);
-                // ✅ FIXED: Cek tipe data biar nggak error 'possibly null'
-                if (typeof currentTopBalance === 'number' && currentTopBalance < (trade.initialTopHolderBalance || 0) * 0.85) {
-                    this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 TOP HOLDER IS SELLING! Top whale dumped (>15%). PANIC SELLING!`);
-                    await this.tradeService.executeSell(trade.id, currentPrice, true);
+                if (typeof currentTopBalance === 'number' && trade.initialTopHolderBalance) {
+                    if (currentTopBalance < trade.initialTopHolderBalance * 0.85) {
+                        this.logger.warn(`[Slot ${trade.slotNumber}] 🐋 Whale is dumping!`);
+                        // We don't necessarily panic sell on one whale, but we mark it
+                    }
+                }
+            }
+        }
+
+        // 2. RUGPULL PROTECTION (Instant Exit)
+        if (profitPercent <= -80) {
+            this.logger.error(`[Slot ${trade.slotNumber}] 💀 RUGPULL DETECTED (-80%). IMMEDIATE EXIT.`);
+            await this.tradeService.executeSell(trade.id, currentPrice, 'RUGPULL');
+            return;
+        }
+
+        // 3. TRAILING STOP LOGIC (Update Peak & TSL)
+        if (currentPrice > trade.highestPrice) {
+            const newTrailingStop = currentPrice * (1 - (this.trailingDistancePercent / 100));
+            await this.prismaService.trade.update({
+                where: { id: trade.id },
+                data: { highestPrice: currentPrice, trailingStopPrice: newTrailingStop },
+            });
+            this.logger.debug(`[Slot ${trade.slotNumber}] 📈 New Peak: $${currentPrice.toFixed(8)}. TSL: $${newTrailingStop.toFixed(8)}`);
+            
+            // Anti-Spam Trailing Alert
+            const now = Date.now();
+            const lastAlert = this.lastAlertTime.get(trade.tokenMint) || 0;
+            if (profitPercent >= 5 && now - lastAlert > 5 * 60 * 1000) {
+                await this.reportingService.sendTrailingAlert(trade.tokenMint, newTrailingStop, currentPrice, trade.symbol || undefined);
+                this.lastAlertTime.set(trade.tokenMint, now);
+            }
+        }
+
+        // 4. EXIT CONDITION: Trailing Stop Reached
+        if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice) {
+            // 🧠 DIAMOND HAND PASS: Kalau Dev masih hold, kasih nafas 3% lagi
+            if (!devDumped && trade.creatorAddress) {
+                const leniencyPrice = trade.trailingStopPrice * 0.97;
+                if (currentPrice > leniencyPrice) {
+                    this.logger.log(`[Slot ${trade.slotNumber}] 💎 Dev is holding. Applying Diamond Hand Pass (Waiting for $${leniencyPrice.toFixed(8)})`);
                     return;
                 }
             }
+
+            const reason = profitPercent > 0 ? 'TAKE_PROFIT' : 'TRAILING_STOP';
+            this.logger.log(`[Slot ${trade.slotNumber}] 💸 ${reason} at $${currentPrice.toFixed(8)}`);
+            await this.tradeService.executeSell(trade.id, currentPrice, reason);
+            return;
         }
 
-        // 1. HARD STOP LOSS (Immediate Exit)
-        const stopLossThreshold = trade.entryPrice - trade.entryPrice * (this.stopLossPercent / 100);
-        
-        if (trade.highestPrice <= trade.entryPrice * 1.05) {
-            if (currentPrice <= stopLossThreshold) {
-                this.logger.warn(`[Slot ${trade.slotNumber}] ❌ Stop Loss hit. Selling immediately at $${currentPrice}`);
-                await this.tradeService.executeSell(trade.id, currentPrice, true);
-                return;
-            }
-        }
-
-        // 2. Update Trailing Stop if price hits new highs (Profit >= 3% - Micro Compound Mode)
-        if (profitPercent >= 3) {
-            if (currentPrice > trade.highestPrice) {
-                const newTrailingStop = currentPrice - currentPrice * (this.trailingDistancePercent / 100);
+        // 5. EXIT CONDITION: Patience Protocol (10-Minute SL)
+        if (profitPercent <= -this.stopLossPercent) {
+            if (!trade.slTriggeredAt) {
+                this.logger.warn(`[Slot ${trade.slotNumber}] 🛑 Stop Loss zone. Starting 10-minute patience timer...`);
                 await this.prismaService.trade.update({
                     where: { id: trade.id },
-                    data: { highestPrice: currentPrice, trailingStopPrice: newTrailingStop },
+                    data: { slTriggeredAt: new Date() }
                 });
-
-                this.logger.log(`[Slot ${trade.slotNumber}] New High: $${currentPrice}. TSL: $${newTrailingStop}`);
-                
-                // ANTI-SPAM: Kirim alert trailing stop maksimal 5 menit sekali per token
-                const now = Date.now();
-                const lastAlert = this.lastAlertTime.get(trade.tokenMint) || 0;
-                if (now - lastAlert > 5 * 60 * 1000) {
-                    await this.reportingService.sendTrailingAlert(trade.tokenMint, newTrailingStop, currentPrice, trade.symbol || undefined);
-                    this.lastAlertTime.set(trade.tokenMint, now);
+            } else {
+                const elapsedMin = (Date.now() - new Date(trade.slTriggeredAt).getTime()) / (1000 * 60);
+                if (elapsedMin >= 10) {
+                    this.logger.warn(`[Slot ${trade.slotNumber}] 🕒 10 minutes passed. Executing FINAL STOP LOSS.`);
+                    await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
+                } else {
+                    this.logger.log(`[Slot ${trade.slotNumber}] 🕒 In SL zone. Waiting... (${(10 - elapsedMin).toFixed(1)} min left)`);
                 }
             }
-        }
-
-        // 3. Trailing Stop Loss Check
-        if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice) {
-            this.logger.warn(`[Slot ${trade.slotNumber}] Trailing Stop Triggered at $${currentPrice}`);
-            await this.tradeService.executeSell(trade.id, currentPrice, false);
-            return;
-        }
-
-        // 4. Quick Take Profit Check
-        if (profitPercent >= this.takeProfitPercent) {
-            this.logger.log(`[Slot ${trade.slotNumber}] Quick Take Profit hit at $${currentPrice} (+${profitPercent.toFixed(2)}%)`);
-            await this.tradeService.executeSell(trade.id, currentPrice, false);
-            return;
+        } else {
+            // ✅ RECOVERY: Reset SL timer if price recovers
+            if (trade.slTriggeredAt) {
+                this.logger.log(`[Slot ${trade.slotNumber}] ✨ Price recovered! Resetting SL timer.`);
+                await this.prismaService.trade.update({
+                    where: { id: trade.id },
+                    data: { slTriggeredAt: null }
+                });
+            }
         }
     }
 

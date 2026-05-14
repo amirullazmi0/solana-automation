@@ -419,13 +419,13 @@ export class ReportingService implements OnModuleInit {
         tokenMint: string,
         sellPrice: number,
         netProfitPercent: number,
-        isStopLoss: boolean,
+        exitReason: string,
         symbol?: string,
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
-        const emoji = netProfitPercent >= 0 ? '💰' : '🛑';
-        const action = netProfitPercent >= 0 ? 'TAKE PROFIT' : 'STOP LOSS';
-        const profitEmoji = netProfitPercent >= 0 ? '🟢' : '🔴';
+        const isSuccess = netProfitPercent >= 0;
+        const emoji = isSuccess ? '💰' : '🛑';
+        const profitEmoji = isSuccess ? '🟢' : '🔴';
         
         const message = `${emoji} *SOLANA SELL ALERT* ${emoji}\n` +
                         `━━━━━━━━━━━━━━━━━━\n` +
@@ -434,7 +434,7 @@ export class ReportingService implements OnModuleInit {
                         `💰 *Sell Price:* \`$${sellPrice.toFixed(8)}\`\n` +
                         `📊 *Result:* ${profitEmoji} *${netProfitPercent.toFixed(2)}%*\n` +
                         `━━━━━━━━━━━━━━━━━━\n` +
-                        `⚡ *Action:* ${action} TRIGGERED`;
+                        `⚡ *Action:* ${exitReason.replace(/_/g, ' ')} TRIGGERED`;
 
         const buttons: TelegramBot.InlineKeyboardButton[] = [
             { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` },

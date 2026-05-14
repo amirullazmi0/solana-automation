@@ -74,14 +74,11 @@ export class TradeService implements OnModuleInit {
     }
 
     private async startMonitoringAllTrades() {
-        const openTrades = await this.prismaService.trade.findMany({
+        const openTrades = await this.prismaService.trade.count({
             where: { status: 'OPEN' }
         });
 
-        this.logger.log(`[Monitor] Found ${openTrades.length} open positions to monitor.`);
-        for (const trade of openTrades) {
-            this.monitorPrice(trade.tokenMint, trade.slotNumber, trade.entryPrice, trade.id);
-        }
+        this.logger.log(`[Monitor] Found ${openTrades} open positions. PriceMonitorService will handle tracking.`);
     }
 
     private setupWalletAndConnection() {
@@ -236,15 +233,7 @@ export class TradeService implements OnModuleInit {
             this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
             await this.reportingService.sendBuyAlert(tokenMint, entryPrice, slotToUse, symbol, metadata?.socials);
             
-            // 🔥 START MONITORING: Langsung pantau harganya biar bisa jual!
-            const newTrade = await this.prismaService.trade.findFirst({
-                where: { tokenMint, status: 'OPEN' },
-                orderBy: { createdAt: 'desc' }
-            });
-            if (newTrade) {
-                this.monitorPrice(tokenMint, slotToUse, entryPrice, newTrade.id);
-            }
-
+            // 🚀 MONITORING: PriceMonitorService otomatis akan mendeteksi trade baru dari DB
             return { success: true, message: `Successfully bought ${symbol} at slot ${slotToUse}` };
         }
 
@@ -254,7 +243,7 @@ export class TradeService implements OnModuleInit {
     async executeSell(
         tradeId: number, 
         currentPrice: number, 
-        isStopLoss: boolean,
+        exitReason: string,
         percentage: number = 1.0
     ): Promise<boolean> {
         const trade = await this.prismaService.trade.findUnique({ where: { id: tradeId } });
@@ -296,8 +285,9 @@ export class TradeService implements OnModuleInit {
 
             this.logger.log(`[Slot ${trade.slotNumber}] 💸 Executing SELL (${(percentage * 100).toFixed(0)}%) for ${trade.symbol} (${trade.tokenMint}). Amount: ${sellAmount}`);
             
-            // 3. PANIC SLIPPAGE: Kalau SL, hajar slippage 15% (1500 bps) biar pasti laku
-            const sellSlippage = isStopLoss ? 1500 : this.slippageBps;
+            // 3. PANIC SLIPPAGE: Kalau SL atau Rugpull, hajar slippage 15% (1500 bps) biar pasti laku
+            const isUrgent = ['STOP_LOSS', 'DEV_DUMP', 'RUGPULL'].includes(exitReason);
+            const sellSlippage = isUrgent ? 1500 : this.slippageBps;
             
             const { success, entryPrice: exitPriceResult, error } = await this.executeJupiterSwap(
                 trade.tokenMint,
@@ -339,7 +329,7 @@ export class TradeService implements OnModuleInit {
                     trade.tokenMint,
                     currentPrice,
                     profit,
-                    isStopLoss,
+                    exitReason,
                     trade.symbol || undefined,
                 );
                 return true;
@@ -552,7 +542,7 @@ export class TradeService implements OnModuleInit {
         }
 
         if (trade) {
-            await this.executeSell(trade.id, currentPrice, false, percentage);
+            await this.executeSell(trade.id, currentPrice, 'MANUAL_SELL', percentage);
             return { success: true, message: `Sell order for ${(percentage * 100).toFixed(0)}% executed.` };
         } else {
             // Manual sell for token not in DB
@@ -611,119 +601,4 @@ export class TradeService implements OnModuleInit {
     }
 
 
-    private async monitorPrice(tokenMint: string, slotNumber: number, entryPrice: number, tradeId: number) {
-        this.logger.log(`[Monitor] Starting price tracker for ${tokenMint} (Slot #${slotNumber}). Grace period: 20s.`);
-        
-        // ☕ GRACE PERIOD: Jangan langsung pantau, biarin API update dulu
-        await new Promise(resolve => setTimeout(resolve, 20000));
-
-        const interval = setInterval(async () => {
-            try {
-                // 1. Cek apakah koin masih OPEN di DB
-                const trade = await this.prismaService.trade.findUnique({ where: { id: tradeId } });
-                if (!trade || trade.status !== 'OPEN') {
-                    this.logger.debug(`[Monitor] Trade ${tradeId} closed or removed. Stopping monitor.`);
-                    clearInterval(interval);
-                    return;
-                }
-
-                // 2. Ambil harga terbaru
-                const currentPrice = await this.reportingService.fetchCurrentPrice(tokenMint);
-                if (!currentPrice) return;
-
-                const profit = ((currentPrice - entryPrice) / entryPrice) * 100;
-                const slPercent = Number.parseFloat(this.configService.get<string>('STOP_LOSS_PERCENT', '30.0'));
-                const trailingDistance = Number.parseFloat(this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '5.0'));
-
-                // 🚀 TRAILING STOP LOGIC (Update Batas Untung)
-                if (currentPrice > trade.highestPrice) {
-                    const newTrailingStop = currentPrice * (1 - (trailingDistance / 100));
-                    await this.prismaService.trade.update({
-                        where: { id: tradeId },
-                        data: { 
-                            highestPrice: currentPrice,
-                            trailingStopPrice: newTrailingStop
-                        }
-                    });
-                    this.logger.debug(`[Slot ${slotNumber}] 📈 New Peak: $${currentPrice.toFixed(8)}. Trailing Stop: $${newTrailingStop.toFixed(8)}`);
-                }
-
-                // 3. ANALISIS HOLDER (Insting Intelijen)
-                let devDumped = false;
-                if (trade.creatorAddress) {
-                    const currentDevBalance = await this.getTokenBalance(trade.creatorAddress, tokenMint);
-                    // 🛡️ Hanya anggap dump kalau data saldo valid (bukan null)
-                    if (typeof currentDevBalance === 'number' && trade.initialCreatorBalance) {
-                        if (currentDevBalance < trade.initialCreatorBalance * 0.5) {
-                            this.logger.warn(`[Slot ${slotNumber}] 🔥 EMERGENCY: Developer is dumping! (Balance: ${currentDevBalance} vs Initial: ${trade.initialCreatorBalance}). Action: PANIC SELL.`);
-                            devDumped = true;
-                        }
-                    }
-                }
-
-                // 💸 EXIT CONDITION 1: Take Profit (Hit Trailing Stop)
-                if (currentPrice <= trade.trailingStopPrice && currentPrice > entryPrice) {
-                    this.logger.log(`[Slot ${slotNumber}] 💰 Trailing Stop Reached at $${currentPrice.toFixed(8)}. Analyzing...`);
-                    
-                    // 🧠 DIAMOND HAND PASS: Kalau Dev masih hold, kasih nafas 3% lagi
-                    if (!devDumped && trade.creatorAddress) {
-                        const leniencyPrice = trade.trailingStopPrice * 0.97;
-                        if (currentPrice > leniencyPrice) {
-                            this.logger.log(`[Slot ${slotNumber}] 💎 Dev is still holding. Applying Diamond Hand Pass (Waiting for $${leniencyPrice.toFixed(8)})`);
-                            return;
-                        }
-                    }
-
-                    this.logger.log(`[Slot ${slotNumber}] 💸 Executing Profit Sell.`);
-                    const success = await this.executeSell(tradeId, currentPrice, false);
-                    if (success) clearInterval(interval);
-                }
-
-                // 🛑 EXIT CONDITION 2: Hard Stop Loss or Dev Dump
-                if (profit <= -slPercent || devDumped) {
-                    const reason = devDumped ? 'DEV DUMP' : 'STOP LOSS';
-                    
-                    // 🚨 EMERGENCY: Jika Rugpull (-80%) atau Dev Dump, JANGAN TUNGGU!
-                    if (profit <= -80 || devDumped) {
-                        this.logger.warn(`[Slot ${slotNumber}] 🛑 ${reason} (CRITICAL) at $${currentPrice.toFixed(8)}. Executing IMMEDIATE SELL.`);
-                        const success = await this.executeSell(tradeId, currentPrice, true);
-                        if (success) clearInterval(interval);
-                        return;
-                    }
-
-                    // 🕒 10-MINUTE PATIENCE RULE: Tunggu pemulihan buat SL
-                    if (!trade.slTriggeredAt) {
-                        this.logger.warn(`[Slot ${slotNumber}] 🛑 Stop Loss Potential. Starting 10-minute patience timer...`);
-                        await this.prismaService.trade.update({
-                            where: { id: tradeId },
-                            data: { slTriggeredAt: new Date() }
-                        });
-                    } else {
-                        const elapsedMs = Date.now() - new Date(trade.slTriggeredAt).getTime();
-                        const elapsedMin = elapsedMs / (1000 * 60);
-                        
-                        if (elapsedMin >= 10) {
-                            this.logger.warn(`[Slot ${slotNumber}] 🕒 10 minutes passed and no recovery. Executing FINAL SL SELL.`);
-                            const success = await this.executeSell(tradeId, currentPrice, true);
-                            if (success) clearInterval(interval);
-                        } else {
-                            this.logger.log(`[Slot ${slotNumber}] 🕒 Still in SL zone. Waiting for recovery... (${(10 - elapsedMin).toFixed(1)} min left)`);
-                        }
-                    }
-                } else {
-                    // ✅ RECOVERY: Jika harga balik sehat, reset timernya
-                    if (trade.slTriggeredAt) {
-                        this.logger.log(`[Slot ${slotNumber}] ✨ Price recovered! Resetting SL timer.`);
-                        await this.prismaService.trade.update({
-                            where: { id: tradeId },
-                            data: { slTriggeredAt: null }
-                        });
-                    }
-                }
-
-            } catch (error) {
-                this.logger.error(`[Monitor] Error tracking price for ${tokenMint}: ${error.message}`);
-            }
-        }, 10000); // Cek tiap 10 detik
-    }
 }
