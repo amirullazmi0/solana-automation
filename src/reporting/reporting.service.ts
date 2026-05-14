@@ -482,7 +482,7 @@ export class ReportingService implements OnModuleInit {
         });
     }
 
-    private async sendMessage(message: string, options: TelegramBot.SendMessageOptions = {}) {
+    private async sendMessage(message: string, options: TelegramBot.SendMessageOptions = {}, retryCount = 0) {
         if (this.bot && this.chatId) {
             try {
                 await this.bot.sendMessage(this.chatId, message, { 
@@ -490,13 +490,21 @@ export class ReportingService implements OnModuleInit {
                     ...options
                 });
             } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                this.logger.error(`Failed to send telegram message: ${message}`);
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                
+                // 🔄 RETRY LOGIC: Kalau socket hang up atau timeout, coba lagi sampe 3x
+                if (retryCount < 3 && (errorMsg.includes('socket hang up') || errorMsg.includes('ECONNRESET') || errorMsg.includes('ETIMEDOUT'))) {
+                    const delay = (retryCount + 1) * 2000;
+                    this.logger.warn(`Telegram send failed (${errorMsg}). Retrying in ${delay}ms... (Attempt ${retryCount + 1}/3)`);
+                    await new Promise(res => setTimeout(res, delay));
+                    return this.sendMessage(message, options, retryCount + 1);
+                }
+                
+                this.logger.error(`Failed to send telegram message after retries: ${errorMsg}`);
             }
         } else {
             this.logger.log(`[ALERT]: ${message.replace(/\n/g, ' | ')}`);
         }
-    
     }
 
     /**

@@ -341,14 +341,7 @@ export class AnalyzerService {
     private getHttpsAgent() {
         return new https.Agent({
             family: 4,
-            lookup: async (h, o, cb) => {
-                try {
-                    const ip = await this.resolveDns(h);
-                    cb(null, ip as string, 4);
-                } catch (e) {
-                    cb(e as Error, '', 4);
-                }
-            }
+            keepAlive: true,
         });
     }
 
