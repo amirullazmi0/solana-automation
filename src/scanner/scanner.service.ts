@@ -285,7 +285,24 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
             while (Date.now() - startTime < maxWaitTime) {
                 try {
-                    const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
+                    // 🛡️ CONVICTION PLAY: Kalau sudah dicek 100x dan masih PENDING, hajar aja!
+            const checkCount = existing?.checkCount || 0;
+            if (checkCount >= 100) {
+                this.logger.log(`[${tokenMint}] 💎 CONVICTION DETECTED! (Checked 100x). Forcing entry...`);
+                // Ambil metadata minimal buat buy
+                const metadata = await this.analyzerService.getTokenMetadata(tokenMint);
+                const buyResult = await this.tradeService.attemptBuy(tokenMint, metadata);
+                
+                if (buyResult.success) {
+                    await this.prismaService.watchlist.update({
+                        where: { tokenMint },
+                        data: { status: 'TRADED' }
+                    });
+                }
+                return;
+            }
+
+            const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
 
                     // Update metadata di Watchlist
                     if (result.metadata) {
