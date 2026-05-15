@@ -317,16 +317,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     const currentItem = await this.prismaService.watchlist.findUnique({ where: { tokenMint } });
                     if (!currentItem || currentItem.status === 'FAILED' || currentItem.status === 'TRADED') return;
 
-                    // 🛡️ STAGNANT TIMEOUT: Kalau sudah dicek 50x dan masih PENDING, mark as FAILED (bukan force buy)
-                    if (currentItem.checkCount >= 50) {
-                        this.logger.debug(`[${tokenMint}] 💤 Stagnant after ${currentItem.checkCount} checks. Marking FAILED.`);
-                        await this.prismaService.watchlist.update({
-                            where: { tokenMint },
-                            data: { status: 'FAILED', reason: 'stagnant_timeout' }
-                        });
-                        this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
-                        return;
-                    }
+
 
             const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
 
@@ -422,7 +413,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 }
             }
 
-            this.logger.log(`[${tokenMint}] 💤 Token remained quiet after 10 minutes.`);
+            this.logger.log(`[${tokenMint}] 💤 Token remained quiet after ${maxWaitMin} minutes.`);
+            await this.prismaService.watchlist.update({
+                where: { tokenMint },
+                data: { status: 'FAILED', reason: 'stagnant_timeout' }
+            });
             this.seenTokens.delete(tokenMint);
         } finally {
             this.activeMonitoring--;
