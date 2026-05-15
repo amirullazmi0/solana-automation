@@ -399,14 +399,38 @@ export class AnalyzerService {
             }
 
             const score = response.data.score || 0;
-            if (score > 3000) {
+            if (score > 2000) { // Lebih ketat dari sebelumnya (3000)
+                this.logger.warn(`[${tokenMint}] 🛑 High Risk Score: ${score}. Skip.`);
                 return { passed: false, reason: 'high_risk_score', safetyIndex };
             }
 
+            // ⛔ HONEYPOT & PERMISSIONS CHECK
             const risks = (response.data.risks as Array<{ level: string; name: string }>) || [];
+            const hasHoneypotRisk = risks.some(r => 
+                r.name.toLowerCase().includes('honeypot') || 
+                r.name.toLowerCase().includes('freeze') ||
+                r.name.toLowerCase().includes('mint authority')
+            );
+
+            if (hasHoneypotRisk) {
+                this.logger.warn(`[${tokenMint}] 🛑 HONEYPOT/FREEZE RISK detected. Skip.`);
+                return { passed: false, reason: 'honeypot_detected', safetyIndex };
+            }
+
             const highRisks = risks.filter((risk) => risk.level === 'danger');
             if (highRisks.length > 0) {
                 return { passed: false, reason: 'danger_risks_detected', safetyIndex };
+            }
+
+            // 🧑‍💻 CREATOR BALANCE CHECK (Anti-Dump)
+            const creator = response.data.creator;
+            if (creator) {
+                const creatorHolder = topHolders.find(h => h.address === creator);
+                const creatorPct = creatorHolder ? (creatorHolder.amount / totalSupply) * 100 : 0;
+                if (creatorPct > 5) {
+                    this.logger.warn(`[${tokenMint}] 🛑 Creator holds too much (${creatorPct.toFixed(2)}%). Skip.`);
+                    return { passed: false, reason: 'creator_holds_too_much', safetyIndex };
+                }
             }
 
             return { 
