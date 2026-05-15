@@ -1,13 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Interval } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
-import { PrismaService } from '../prisma/prisma.service';
-import { TradeService } from '../trade/trade.service';
-import { ReportingService } from '../reporting/reporting.service';
+import { Interval } from '@nestjs/schedule';
 import { Trade } from '@prisma/client';
 import axios from 'axios';
 import * as https from 'https';
-import { lookup } from 'dns';
+import { PrismaService } from '../prisma/prisma.service';
+import { ReportingService } from '../reporting/reporting.service';
+import { TradeService } from '../trade/trade.service';
 
 @Injectable()
 export class PriceMonitorService {
@@ -60,14 +59,12 @@ export class PriceMonitorService {
                 // DETEKSI RUGPULL (Gua tetep pake 25% drop liq)
                 // Karena likuiditas butuh DexScreener (boros kalau tiap 2 detik),
                 // kita cek likuiditas cuma tiap 10 detik atau kalau harga drop parah.
-                let liquidity = trade.entryLiquidity || 0;
                 const isPriceDroppingFast = currentPrice < (trade.entryPrice * 0.8); // Drop > 20%
-
-                if (isPriceDroppingFast || Math.random() < 0.2) { // 20% chance to check liq (avg once per 10s)
+                const entryLiq = trade.entryLiquidity || 0;
+                if (entryLiq > 0 && (isPriceDroppingFast || Math.random() < 0.2)) { // 20% chance to check liq
                     const latestLiq = await this.getLiquidityOnly(trade.tokenMint);
                     if (latestLiq && latestLiq > 0) {
-                        liquidity = latestLiq;
-                        const liqDrop = ((trade.entryLiquidity - liquidity) / trade.entryLiquidity) * 100;
+                        const liqDrop = ((entryLiq - latestLiq) / entryLiq) * 100;
                         if (liqDrop > 25) {
                             this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 RUGPULL DETECTED! Liquidity dropped ${liqDrop.toFixed(2)}%.`);
                             await this.tradeService.executeSell(trade.id, currentPrice, 'RUGPULL');
@@ -78,7 +75,8 @@ export class PriceMonitorService {
 
                 await this.evaluateTrade(trade, currentPrice);
             } catch (error) {
-                this.logger.error(`Error evaluating ${trade.tokenMint}: ${error.message}`);
+                const msg = error instanceof Error ? error.message : String(error);
+                this.logger.error(`Error evaluating ${trade.tokenMint}: ${msg}`);
             } finally {
                 this.processingTrades.delete(trade.id);
             }
@@ -105,7 +103,8 @@ export class PriceMonitorService {
                 }
             }
         } catch (error) {
-            this.logger.error(`Batch price fetch failed: ${error.message}`);
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Batch price fetch failed: ${msg}`);
         }
         return result;
     }
@@ -113,7 +112,10 @@ export class PriceMonitorService {
 
     private async getLiquidityOnly(tokenMint: string): Promise<number | null> {
         try {
-            const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, { timeout: 3000 });
+            const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, { 
+                timeout: 5000,
+                httpsAgent: new https.Agent({ family: 4 })
+            });
             return response.data.pairs?.[0]?.liquidity?.usd || 0;
         } catch {
             return null;
@@ -146,12 +148,12 @@ export class PriceMonitorService {
                 this.ipCache[hostname] = ip;
                 return ip;
             }
+            return null;
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logger.error(`[${hostname}] DNS resolution failed: ${message}. Safety skip.`);
             return null;
-         }
-        return null;
+        }
     }
 
     private async evaluateTrade(trade: Trade, currentPrice: number) {
