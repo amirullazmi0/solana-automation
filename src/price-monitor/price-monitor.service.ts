@@ -73,6 +73,23 @@ export class PriceMonitorService {
                     }
                 }
 
+                // 🕵️ CREATOR WATCHDOG (Anti-Dump)
+                if (trade.creatorAddress && trade.initialCreatorBalance > 0) {
+                    // Cek saldo creator tiap ~6 detik atau kalau harga turun
+                    if (isPriceDroppingFast || Math.random() < 0.3) {
+                        const currentDevBal = await this.tradeService.getTokenBalance(trade.creatorAddress, trade.tokenMint);
+                        if (currentDevBal !== null) {
+                            // Kalau saldo berkurang > 1% dari awal (toleransi dikit buat gas/fee)
+                            const devSold = (trade.initialCreatorBalance - currentDevBal) / trade.initialCreatorBalance;
+                            if (devSold > 0.01) {
+                                this.logger.warn(`[Slot ${trade.slotNumber}] ⚠️ DEV IS DUMPING! Sold ${(devSold * 100).toFixed(2)}% of their bag. Front-running...`);
+                                await this.tradeService.executeSell(trade.id, currentPrice, 'DEV_DUMP');
+                                continue;
+                            }
+                        }
+                    }
+                }
+
                 await this.evaluateTrade(trade, currentPrice);
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
