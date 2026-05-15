@@ -251,10 +251,10 @@ export class PriceMonitorService {
 
         // 5. EXIT CONDITION: Patience Protocol (10-Minute SL)
         if (profitPercent <= -this.stopLossPercent) {
-            // 🛡️ BUY PRESSURE CHECK: Jika masih ada buying pressure kuat, tunda SL
+            // 🛡️ BUY PRESSURE CHECK: Jika masih ada buying pressure kuat, JANGAN JUAL (biarpun timer habis)
             const hasBuyPressure = await this.checkBuyPressure(trade.tokenMint);
-            if (hasBuyPressure && !trade.slTriggeredAt) {
-                this.logger.log(`[Slot ${trade.slotNumber}] 🟢 Buy pressure detected in SL zone! Delaying SL timer...`);
+            if (hasBuyPressure) {
+                this.logger.log(`[Slot ${trade.slotNumber}] 🟢 Buy pressure detected in SL zone! DIAMOND HANDS — Delaying exit...`);
                 return;
             }
 
@@ -267,7 +267,7 @@ export class PriceMonitorService {
             } else {
                 const elapsedMin = (Date.now() - new Date(trade.slTriggeredAt).getTime()) / (1000 * 60);
                 if (elapsedMin >= 10) {
-                    this.logger.warn(`[Slot ${trade.slotNumber}] 🕒 10 minutes passed. Executing FINAL STOP LOSS.`);
+                    this.logger.warn(`[Slot ${trade.slotNumber}] 🕒 10 minutes passed with no buy pressure. Executing FINAL STOP LOSS.`);
                     await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
                 } else {
                     this.logger.log(`[Slot ${trade.slotNumber}] 🕒 In SL zone. Waiting... (${(10 - elapsedMin).toFixed(1)} min left)`);

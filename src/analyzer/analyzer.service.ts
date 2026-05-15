@@ -234,10 +234,11 @@ export class AnalyzerService {
 
             // 🛡️ HARD REJECT: Token tanpa liquidity = impossible to sell tanpa massive slippage
             if (!liquidity || liquidity < 1000) {
+                const isYoung = (Date.now() - (pair.pairCreatedAt || 0)) < 1000 * 60 * 60; // < 1 hour
                 return { 
                     passed: false, 
                     reason: 'zero_liquidity', 
-                    permanent: true,
+                    permanent: !isYoung, // Hanya permanent kalau koin sudah lama tapi likuiditas tetep 0
                     liquidity, marketCap, symbol, pairCreatedAt, socials 
                 };
             }
@@ -266,8 +267,13 @@ export class AnalyzerService {
 
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
             if (ageHours < minAge || ageHours > 96) {
-                const isPerm = ageHours > 96 || ageHours < (minAge / 2);
-                return { passed: false, reason: ageHours > 96 ? 'too_old' : 'too_young', permanent: isPerm, marketCap, symbol, pairCreatedAt, socials, liquidity };
+                const isTooOld = ageHours > 96;
+                return { 
+                    passed: false, 
+                    reason: isTooOld ? 'too_old' : 'too_young', 
+                    permanent: isTooOld, // too_young TIDAK BOLEH permanent biar bisa di-recheck
+                    marketCap, symbol, pairCreatedAt, socials, liquidity 
+                };
             }
 
             const volumeSurge = volume5m / (avgVol5m || 1);

@@ -14,15 +14,15 @@ import { ScannerService } from '../scanner/scanner.service';
 @Injectable()
 export class ReportingService implements OnModuleInit {
     private readonly logger = new Logger(ReportingService.name);
-    private bot: TelegramBot;
-    private chatId: string;
-    private connection: Connection;
-    private walletPublicKey: string;
+    private readonly bot: TelegramBot;
+    private readonly chatId: string;
+    private readonly connection: Connection;
+    private readonly walletPublicKey: string;
 
     constructor(
-        private configService: ConfigService,
-        private prismaService: PrismaService,
-        private moduleRef: ModuleRef,
+        private readonly configService: ConfigService,
+        private readonly prismaService: PrismaService,
+        private readonly moduleRef: ModuleRef,
     ) {
         const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
         this.chatId = this.configService.get<string>('TELEGRAM_CHAT_ID') || '';
@@ -171,7 +171,6 @@ export class ReportingService implements OnModuleInit {
         if (!data) return;
 
         const [action, payload] = data.split(':');
-        // const chatId = query.message?.chat.id.toString();
 
         if (action === 'buy_menu') {
             await this.sendBuyMenu(payload);
@@ -179,10 +178,10 @@ export class ReportingService implements OnModuleInit {
             await this.sendSellMenu(payload);
         } else if (action === 'buy_exec') {
             const [mint, amount] = payload.split('|');
-            await this.executeManualBuy(mint, parseFloat(amount));
+            await this.executeManualBuy(mint, Number.parseFloat(amount));
         } else if (action === 'sell_exec') {
             const [mint, percent] = payload.split('|');
-            await this.executeManualSell(mint, parseFloat(percent));
+            await this.executeManualSell(mint, Number.parseFloat(percent));
         }
 
         // Answer callback to remove loading state
