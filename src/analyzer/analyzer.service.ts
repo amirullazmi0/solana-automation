@@ -278,12 +278,14 @@ export class AnalyzerService {
             }
 
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
-            if (ageHours < minAge || ageHours > 96) {
-                const isTooOld = ageHours > 96;
+            const maxAge = Number.parseFloat(this.configService.get<string>('MAX_AGE_HOURS', '24.0'));
+            
+            if (ageHours < minAge || ageHours > maxAge) {
+                const isTooOld = ageHours > maxAge;
                 return { 
                     passed: false, 
                     reason: isTooOld ? 'too_old' : 'too_young', 
-                    permanent: isTooOld, // too_young TIDAK BOLEH permanent biar bisa di-recheck
+                    permanent: isTooOld, 
                     marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun
                 };
             }
