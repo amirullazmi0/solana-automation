@@ -293,7 +293,7 @@ export class AnalyzerService {
             if (volumeSurge < minSurge) {
                 return { passed: false, reason: 'low_surge', volumeSurge, marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
             }
-            if (priceChange1h <= 0) {
+            if (priceChange1h < -15) {
                 return { passed: false, reason: 'bearish_trend', marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
             }
 
