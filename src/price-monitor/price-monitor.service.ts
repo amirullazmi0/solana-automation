@@ -180,32 +180,7 @@ export class PriceMonitorService {
         this.logger.debug(`[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)}, Profit: ${profitPercent.toFixed(2)}%, SL: -${this.stopLossPercent}%, TSL: $${trade.trailingStopPrice.toFixed(8)}`);
 
 
-        // 1. ANALISIS HOLDER (Insting Intelijen)
-        if (trade.creatorAddress || trade.topHolderAddress) {
-            if (trade.creatorAddress) {
-                const currentCreatorBalance = await this.tradeService.getTokenBalance(trade.creatorAddress, trade.tokenMint);
-                if (typeof currentCreatorBalance === 'number' && trade.initialCreatorBalance) {
-                    if (currentCreatorBalance < trade.initialCreatorBalance * 0.8) { // Dev dump > 20% (Lebih sensitif buat modal kecil)
-                        this.logger.warn(`[Slot ${trade.slotNumber}] 🔥 EMERGENCY: Developer is dumping! PANIC SELL.`);
-                        devDumped = true;
-                        await this.tradeService.executeSell(trade.id, currentPrice, 'DEV_DUMP');
-                        return;
-                    }
-                }
-            }
-            // Top Whale Check (Leniency 15%)
-            if (trade.topHolderAddress) {
-                const currentTopBalance = await this.tradeService.getTokenBalance(trade.topHolderAddress, trade.tokenMint);
-                if (typeof currentTopBalance === 'number' && trade.initialTopHolderBalance) {
-                    if (currentTopBalance < trade.initialTopHolderBalance * 0.85) {
-                        this.logger.warn(`[Slot ${trade.slotNumber}] 🐋 Whale is dumping!`);
-                        // We don't necessarily panic sell on one whale, but we mark it
-                    }
-                }
-            }
-        }
-
-        // 2. RUGPULL PROTECTION (Instant Exit)
+        // 1. RUGPULL PROTECTION (Instant Exit)
         if (profitPercent <= -80) {
             this.logger.error(`[Slot ${trade.slotNumber}] 💀 RUGPULL DETECTED (-80%). IMMEDIATE EXIT.`);
             await this.tradeService.executeSell(trade.id, currentPrice, 'RUGPULL');
