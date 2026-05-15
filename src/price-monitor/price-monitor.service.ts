@@ -37,7 +37,7 @@ export class PriceMonitorService {
 
     private readonly processingTrades = new Set<number>();
 
-    @Interval(5000)
+    @Interval(2000)
     async monitorPrices() {
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN' },
@@ -45,70 +45,71 @@ export class PriceMonitorService {
 
         if (openTrades.length === 0) return;
 
+        // 📦 BATCHING: Get all prices in one go
+        const mints = openTrades.map(t => t.tokenMint);
+        const priceMap = await this.getBatchPrices(mints);
+
         for (const trade of openTrades) {
-            // Skip if this trade is already being processed (sold or evaluated)
             if (this.processingTrades.has(trade.id)) continue;
+
+            const currentPrice = priceMap[trade.tokenMint];
+            if (!currentPrice || currentPrice <= 0) continue;
 
             this.processingTrades.add(trade.id);
             try {
-                const stats = await this.getCurrentStats(trade.tokenMint);
-                
-                if (stats && stats.price > 0) {
-                    // DETEKSI RUGPULL: Kalau likuiditas ditarik > 25% (lebih sensitif)
-                    if (trade.entryLiquidity && trade.entryLiquidity > 0 && stats.liquidity > 0) {
-                        const liqDrop = ((trade.entryLiquidity - stats.liquidity) / trade.entryLiquidity) * 100;
+                // DETEKSI RUGPULL (Gua tetep pake 25% drop liq)
+                // Karena likuiditas butuh DexScreener (boros kalau tiap 2 detik),
+                // kita cek likuiditas cuma tiap 10 detik atau kalau harga drop parah.
+                let liquidity = trade.entryLiquidity || 0;
+                const isPriceDroppingFast = currentPrice < (trade.entryPrice * 0.8); // Drop > 20%
+
+                if (isPriceDroppingFast || Math.random() < 0.2) { // 20% chance to check liq (avg once per 10s)
+                    const latestLiq = await this.getLiquidityOnly(trade.tokenMint);
+                    if (latestLiq && latestLiq > 0) {
+                        liquidity = latestLiq;
+                        const liqDrop = ((trade.entryLiquidity - liquidity) / trade.entryLiquidity) * 100;
                         if (liqDrop > 25) {
-                            this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 RUGPULL DETECTED! Liquidity dropped ${liqDrop.toFixed(2)}%. PANIC SELLING!`);
-                            await this.tradeService.executeSell(trade.id, stats.price, 'RUGPULL');
+                            this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 RUGPULL DETECTED! Liquidity dropped ${liqDrop.toFixed(2)}%.`);
+                            await this.tradeService.executeSell(trade.id, currentPrice, 'RUGPULL');
                             continue;
                         }
                     }
-
-                    await this.evaluateTrade(trade, stats.price);
                 }
+
+                await this.evaluateTrade(trade, currentPrice);
             } catch (error) {
-                const msg = error instanceof Error ? error.message : String(error);
-                this.logger.error(`Error monitoring for ${trade.tokenMint}: ${msg}`);
+                this.logger.error(`Error evaluating ${trade.tokenMint}: ${error.message}`);
             } finally {
                 this.processingTrades.delete(trade.id);
             }
         }
     }
 
-    private async getCurrentStats(tokenMint: string): Promise<{ price: number; liquidity: number } | null> {
-        // 1. Ambil Harga dari JUPITER (Prioritas #1 - Super Fast)
+    private async getBatchPrices(mints: string[]): Promise<Record<string, number>> {
+        const result: Record<string, number> = {};
+        if (mints.length === 0) return result;
+
         try {
             const hostname = 'api.jup.ag';
-            const response = await axios.get(`https://${hostname}/price/v2?ids=${tokenMint}`, {
-                timeout: 5000,
+            const ids = mints.join(',');
+            const response = await axios.get(`https://${hostname}/price/v2?ids=${ids}`, {
+                timeout: 3000,
                 headers: { 'x-api-key': this.jupiterApiKey },
-                httpsAgent: new https.Agent({
-                    family: 4,
-                    lookup: async (h, o, cb) => {
-                        const ip = await this.resolveDns(h);
-                        if (ip) cb(null, ip, 4); else lookup(h, o, cb);
-                    }
-                })
+                httpsAgent: new https.Agent({ family: 4 })
             });
 
-            const jupPrice = response.data?.data?.[tokenMint]?.price;
-            if (jupPrice) {
-                // Harga dapet! Sekarang kita butuh likuiditas (Fallback ke DexScreener atau hitung manual)
-                // Sementara likuiditas tetap ambil dari DexScreener karena Jup gak sedia data likuiditas USD
-                const dexStats = await this.getLiquidityOnly(tokenMint);
-                return { 
-                    price: parseFloat(jupPrice), 
-                    liquidity: dexStats || 0 
-                };
+            const data = response.data?.data || {};
+            for (const mint of mints) {
+                if (data[mint]?.price) {
+                    result[mint] = parseFloat(data[mint].price);
+                }
             }
         } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            this.logger.debug(`[PriceMonitor] Jupiter Price API error for ${tokenMint}: ${msg}`);
+            this.logger.error(`Batch price fetch failed: ${error.message}`);
         }
-
-        // 2. Fallback total ke DexScreener jika Jupiter bermasalah
-        return this.getDexScreenerStats(tokenMint);
+        return result;
     }
+
 
     private async getLiquidityOnly(tokenMint: string): Promise<number | null> {
         try {
@@ -119,22 +120,6 @@ export class PriceMonitorService {
         }
     }
 
-    private async getDexScreenerStats(tokenMint: string): Promise<{ price: number; liquidity: number } | null> {
-        try {
-            const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, { timeout: 5000 });
-            const pair = response.data.pairs?.[0];
-            if (pair) {
-                return { 
-                    price: parseFloat(pair.priceUsd), 
-                    liquidity: pair.liquidity?.usd || 0 
-                };
-            }
-            return null;
-        } catch {
-
-            return null;
-        }
-    }
 
     private async resolveDns(hostname: string): Promise<string | null> {
         if (this.ipCache[hostname]) return this.ipCache[hostname];
@@ -181,7 +166,7 @@ export class PriceMonitorService {
             if (trade.creatorAddress) {
                 const currentCreatorBalance = await this.tradeService.getTokenBalance(trade.creatorAddress, trade.tokenMint);
                 if (typeof currentCreatorBalance === 'number' && trade.initialCreatorBalance) {
-                    if (currentCreatorBalance < trade.initialCreatorBalance * 0.5) { // Dev dump 50%
+                    if (currentCreatorBalance < trade.initialCreatorBalance * 0.8) { // Dev dump > 20% (Lebih sensitif buat modal kecil)
                         this.logger.warn(`[Slot ${trade.slotNumber}] 🔥 EMERGENCY: Developer is dumping! PANIC SELL.`);
                         devDumped = true;
                         await this.tradeService.executeSell(trade.id, currentPrice, 'DEV_DUMP');
@@ -212,8 +197,13 @@ export class PriceMonitorService {
         // 🚀 Hanya update peak kalau harga sudah naik minimal 2% (Safe Zone)
         if (currentPrice > trade.highestPrice && profitPercent >= 2) {
             const calculatedStop = currentPrice * (1 - (this.trailingDistancePercent / 100));
-            // 🛡️ Fail-safe: Jaring jual (TSL) TIDAK BOLEH lebih rendah dari harga beli
-            const newTrailingStop = Math.max(calculatedStop, trade.entryPrice);
+            
+            // 🛡️ ZERO-LOSS PROTECTION: Kalau untung >= 10%, jaring jual MINIMAL di harga beli + 1%
+            let newTrailingStop = Math.max(calculatedStop, trade.entryPrice);
+            if (profitPercent >= 10) {
+                const breakEvenPlus = trade.entryPrice * 1.01;
+                newTrailingStop = Math.max(newTrailingStop, breakEvenPlus);
+            }
             
             await this.prismaService.trade.update({
                 where: { id: trade.id },
@@ -230,9 +220,26 @@ export class PriceMonitorService {
             }
         }
 
-        // 4. EXIT CONDITION: Trailing Stop Reached
-        // 🛡️ Hanya trigger Trailing Stop kalau harganya sudah pernah naik (highestPrice > entry)
-        // Dan hanya kalau profit > 0 (Biarkan SL Protocol yang handle kerugian murni)
+        // 4. EXIT CONDITION: Take Profit or Trailing Stop
+        const baseTP = parseFloat(this.configService.get<string>('TAKE_PROFIT_PERCENT', '30.0'));
+        
+        // 🚀 DYNAMIC TP: Kalau volume lagi "Sakit" (Surge gede), targetin lebih tinggi
+        // Kita butuh volumeSurge dari database (Watchlist) kalau ada, atau kita asumsikan dari momentum
+        // Untuk sekarang kita pake multiplier kalau highestPrice naik kenceng
+        let dynamicTP = baseTP;
+        if (profitPercent >= baseTP && trade.highestPrice > trade.entryPrice * 1.5) {
+            this.logger.log(`[Slot ${trade.slotNumber}] 🔥 HIGH MOMENTUM DETECTED! Increasing TP target to 60%...`);
+            dynamicTP = 60.0; // Serakah dikit karena koin lagi kenceng
+        }
+
+        // Trigger TP if price hits target
+        if (profitPercent >= dynamicTP) {
+            this.logger.log(`[Slot ${trade.slotNumber}] 🎯 TARGET HIT! Exit at ${profitPercent.toFixed(2)}% profit.`);
+            await this.tradeService.executeSell(trade.id, currentPrice, 'TAKE_PROFIT');
+            return;
+        }
+
+        // 🛡️ Trailing Stop Trigger
         if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice && currentPrice > trade.entryPrice) {
             // 🧠 DIAMOND HAND PASS: Kalau Dev masih hold, kasih nafas 3% lagi
             if (!devDumped && trade.creatorAddress) {
@@ -243,7 +250,7 @@ export class PriceMonitorService {
                 }
             }
 
-            const reason = profitPercent > 0 ? 'TAKE_PROFIT' : 'TRAILING_STOP_LOSS';
+            const reason = 'TRAILING_STOP';
             this.logger.log(`[Slot ${trade.slotNumber}] 💸 ${reason} at $${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`);
             await this.tradeService.executeSell(trade.id, currentPrice, reason);
             return;
