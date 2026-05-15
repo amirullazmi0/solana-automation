@@ -39,6 +39,10 @@ export interface TokenMetadata {
     pairCreatedAt?: number;
     symbol?: string;
     volumeSurge?: number;
+    volScore?: number;
+    zScore?: number;
+    priceChange1h?: number;
+    isPumpFun?: boolean;
     socials?: {
         twitter?: string;
         telegram?: string;
@@ -90,7 +94,11 @@ export class AnalyzerService {
                 pairCreatedAt: traction.pairCreatedAt,
                 symbol: traction.symbol,
                 socials: traction.socials,
-                volumeSurge: traction.volumeSurge
+                volumeSurge: traction.volumeSurge,
+                volScore: traction.volScore,
+                zScore: traction.zScore,
+                priceChange1h: traction.priceChange1h,
+                isPumpFun: traction.isPumpFun
             };
 
             if (!traction.passed) {
@@ -198,6 +206,8 @@ export class AnalyzerService {
         volumeSurge?: number;
         volScore?: number;
         zScore?: number;
+        priceChange1h?: number;
+        isPumpFun?: boolean;
     }> {
         try {
             const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '30000'));
@@ -255,14 +265,16 @@ export class AnalyzerService {
 
             // 🚫 HONEYPOT DETECTION
             if (buys5m >= 10 && sells5m === 0) {
-                return { passed: false, reason: 'honeypot', liquidity, marketCap, symbol, pairCreatedAt, socials };
+                return { passed: false, reason: 'honeypot', liquidity, marketCap, symbol, pairCreatedAt, socials, volScore, zScore, priceChange1h: pair.priceChange?.h1 || 0, isPumpFun: pair.info?.websites?.some(w => w.url.includes('pump.fun')) || false };
             }
             
             const velocity = volume5m / (marketCap || 1);
+            const isPumpFun = pair.info?.websites?.some(w => w.url.includes('pump.fun')) || false;
+            const priceChange1h = pair.priceChange?.h1 || 0;
             
             if (marketCap < minMCap || marketCap > maxMCap) {
                 const isPerm = marketCap > maxMCap; // MCap kegedean baru permanent
-                return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: isPerm, marketCap, symbol, pairCreatedAt, socials, liquidity };
+                return { passed: false, reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low', permanent: isPerm, marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
             }
 
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
@@ -272,32 +284,30 @@ export class AnalyzerService {
                     passed: false, 
                     reason: isTooOld ? 'too_old' : 'too_young', 
                     permanent: isTooOld, // too_young TIDAK BOLEH permanent biar bisa di-recheck
-                    marketCap, symbol, pairCreatedAt, socials, liquidity 
+                    marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun
                 };
             }
 
             const volumeSurge = volume5m / (avgVol5m || 1);
             const minSurge = Number.parseFloat(this.configService.get<string>('ANALYZER_MIN_VOLUME_SURGE', '1.5'));
             if (volumeSurge < minSurge) {
-                return { passed: false, reason: 'low_surge', volumeSurge, marketCap, symbol, pairCreatedAt, socials, liquidity };
+                return { passed: false, reason: 'low_surge', volumeSurge, marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
             }
-
-            const priceChange1h = pair.priceChange?.h1 || 0;
             if (priceChange1h <= 0) {
-                return { passed: false, reason: 'bearish_trend', marketCap, symbol, pairCreatedAt, socials, liquidity };
+                return { passed: false, reason: 'bearish_trend', marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
             }
 
             // 📊 BUY VS SELL RATIO (Confidence Score)
             if (confidenceScore < minConfidence) {
-                return { passed: false, reason: 'low_buy_confidence', marketCap, symbol, pairCreatedAt, socials, liquidity };
+                return { passed: false, reason: 'low_buy_confidence', marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
             }
 
             if (liquidity < minLiq || volume5m < minVol || buys5m < minBuys) {
-                return { passed: false };
+                return { passed: false, reason: 'low_metrics', marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
             }
 
             if (velocity < minVelocity) {
-                return { passed: false };
+                return { passed: false, reason: 'low_velocity', marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
             }
 
             return { 
@@ -310,7 +320,9 @@ export class AnalyzerService {
                 pairCreatedAt,
                 volumeSurge,
                 volScore,
-                zScore
+                zScore,
+                priceChange1h,
+                isPumpFun
             };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);

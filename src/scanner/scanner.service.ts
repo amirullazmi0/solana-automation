@@ -339,6 +339,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                 mcap: result.metadata.mcap,
                                 liquidity: result.metadata.liquidity,
                                 volumeSurge: result.metadata.volumeSurge,
+                                volScore: result.metadata.volScore,
+                                zScore: result.metadata.zScore,
+                                priceChange1h: result.metadata.priceChange1h,
+                                isPumpFun: result.metadata.isPumpFun || false,
+                                pairCreatedAt: result.metadata.pairCreatedAt ? new Date(result.metadata.pairCreatedAt) : null,
                                 lastCheckedAt: new Date()
                             }
                         });

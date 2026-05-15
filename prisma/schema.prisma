@@ -55,6 +55,11 @@ model Watchlist {
   mcap          Float?
   liquidity     Float?
   volumeSurge   Float?
+  volScore      Float?
+  zScore        Float?
+  priceChange1h Float?
+  isPumpFun     Boolean         @default(false)
+  pairCreatedAt DateTime?
   checkCount    Int             @default(0)
   lastCheckedAt DateTime        @default(now())
   createdAt     DateTime        @default(now())
