@@ -212,7 +212,7 @@ export class TradeService implements OnModuleInit {
                 initialTopHolderBalance = typeof bal === 'number' ? bal : 0;
             }
 
-            const trailingDistance = Number.parseFloat(this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '5.0'));
+            // const trailingDistance = Number.parseFloat(this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '5.0'));
             
             await this.prismaService.trade.create({
                 data: {
