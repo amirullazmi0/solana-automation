@@ -125,11 +125,12 @@ export class AnalyzerService {
                 return { safe: false, reason: 'no_volume_anomaly', metadata: baseMetadata };
             }
 
-            // 2. RPC CHECK (Security)
-            const isSafetyPassed = await this.checkTokenSecurityRPC(tokenMint);
+            // 2. RPC CHECK (Security) — With PumpFun tolerance
+            const isPumpFunToken = tokenMint.toLowerCase().endsWith('pump');
+            const isSafetyPassed = await this.checkTokenSecurityRPC(tokenMint, isPumpFunToken);
             if (!isSafetyPassed) {
                 this.logger.warn(`[${tokenMint}] 🛑 Safety RPC check FAILED (Freeze/Mint authority). Skip.`);
-                return { safe: false, reason: 'safety_rpc_failed', permanent: true, metadata: baseMetadata };
+                return { safe: false, reason: 'safety_rpc_failed', permanent: false, metadata: baseMetadata };
             }
 
             // 3. RUGCHECK (Advanced Safety Index & LP Burn)
@@ -180,17 +181,41 @@ export class AnalyzerService {
         }
     }
 
-    private async checkTokenSecurityRPC(tokenMint: string): Promise<boolean> {
+    private async checkTokenSecurityRPC(tokenMint: string, isPumpFun = false): Promise<boolean> {
         const mintPublicKey = new PublicKey(tokenMint);
-        try {
-            const mintInfo = await getMint(this.connection, mintPublicKey);
-            return mintInfo.mintAuthority === null && mintInfo.freezeAuthority === null;
-        } catch (e) {
-            if (e instanceof Error) {
-                this.logger.error(`[${tokenMint}] Mint authority check failed: ${e.message}`);
+        const maxRetries = 3;
+
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const mintInfo = await getMint(this.connection, mintPublicKey);
+
+                // Mint authority HARUS null (tidak boleh cetak token baru)
+                if (mintInfo.mintAuthority !== null) {
+                    this.logger.warn(`[${tokenMint}] Mint authority still active. Reject.`);
+                    return false;
+                }
+
+                // Freeze authority: PumpFun tokens sering punya freeze auth sementara post-migration
+                if (mintInfo.freezeAuthority !== null) {
+                    if (isPumpFun) {
+                        this.logger.debug(`[${tokenMint}] ⚠️ Freeze authority active but PumpFun token — TOLERATED.`);
+                        return true; // PumpFun tolerance
+                    }
+                    this.logger.warn(`[${tokenMint}] Freeze authority active (non-PumpFun). Reject.`);
+                    return false;
+                }
+
+                return true; // Both null = safe
+            } catch (e) {
+                if (e instanceof Error) {
+                    this.logger.error(`[${tokenMint}] Mint authority check failed (attempt ${attempt}/${maxRetries}): ${e.message}`);
+                }
+                if (attempt < maxRetries) {
+                    await new Promise(res => setTimeout(res, 1000 * attempt));
+                }
             }
-            return false;
         }
+        return false; // All retries failed
     }
 
     private async checkMarketTraction(tokenMint: string): Promise<{ 
@@ -392,11 +417,16 @@ export class AnalyzerService {
                 return { passed: false, reason: 'high_concentration', safetyIndex };
             }
 
-            // 🔥 MANDATORY: Liquidity Burned Check
+            // 🔥 LP Safety Check: Accept burned OR locked (PumpFun uses locked mechanism)
             const markets = (response.data.markets as RugCheckMarket[]) || [];
-            const lpBurned = markets.some((m: RugCheckMarket) => m.lpType === 'burned' || m.lpStatus === 'burned');
-            if (!lpBurned) {
-                this.logger.warn(`[${tokenMint}] 🛑 LP NOT BURNED. Skip.`);
+            const isPumpFunToken = tokenMint.toLowerCase().endsWith('pump');
+            const lpSafe = markets.some((m: RugCheckMarket) => 
+                m.lpType === 'burned' || m.lpStatus === 'burned' || 
+                m.lpType === 'locked' || m.lpStatus === 'locked'
+            );
+            // PumpFun tokens tanpa market data di RugCheck = normal (LP di bonding curve)
+            if (!lpSafe && markets.length > 0 && !isPumpFunToken) {
+                this.logger.warn(`[${tokenMint}] 🛑 LP NOT BURNED/LOCKED. Skip.`);
                 return { passed: false, reason: 'lp_not_burned', safetyIndex };
             }
 
