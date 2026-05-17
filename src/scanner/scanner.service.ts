@@ -210,9 +210,14 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         setInterval(async () => {
             try {
                 const pending = await this.prismaService.watchlist.findMany({
-                    where: { status: 'PENDING' },
-                    orderBy: { createdAt: 'desc' },
-                    take: 20 // Ambil 20 koin terbaru biar gak bottleneck
+                    where: { 
+                        status: 'PENDING',
+                        // Hindari re-check koin yang baru dicek 15 detik lalu
+                        lastCheckedAt: { lt: new Date(Date.now() - 15000) }
+                    },
+                    orderBy: { lastCheckedAt: 'asc' }, // Fair round-robin
+                    take: 20, // Ambil 20 koin biar gak bottleneck
+                    select: { tokenMint: true } // Optimasi memory leak
                 });
 
                 for (const item of pending) {

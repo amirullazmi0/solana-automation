@@ -412,7 +412,7 @@ export class AnalyzerService {
             const top10Sum = topHolders.slice(0, 10).reduce((sum: number, h: RugCheckHolder) => sum + (h.amount || 0), 0);
             const safetyIndex = 1 - (top10Sum / totalSupply);
 
-            if (safetyIndex < 0.7) { // Berarti Top 10 pegang > 30%
+            if (safetyIndex < 0.8) { // Berarti Top 10 pegang > 20%
                 this.logger.warn(`[${tokenMint}] 🛑 High Concentration: Top 10 pegang ${(1 - safetyIndex) * 100}%. Skip.`);
                 return { passed: false, reason: 'high_concentration', safetyIndex };
             }
@@ -459,7 +459,7 @@ export class AnalyzerService {
             if (creator) {
                 const creatorHolder = topHolders.find(h => h.address === creator);
                 const creatorPct = creatorHolder ? (creatorHolder.amount / totalSupply) * 100 : 0;
-                if (creatorPct > 5) {
+                if (creatorPct > 3) {
                     this.logger.warn(`[${tokenMint}] 🛑 Creator holds too much (${creatorPct.toFixed(2)}%). Skip.`);
                     return { passed: false, reason: 'creator_holds_too_much', safetyIndex };
                 }

@@ -25,6 +25,7 @@ export class TradeService implements OnModuleInit {
     private readonly positionSizeUSD: number;
     private readonly slippageBps: number;
     private readonly jupiterApiKey: string;
+    private readonly isDryRun: boolean;
 
     // Cache for resolved IPs
     private ipCache: Record<string, string> = {
@@ -52,6 +53,7 @@ export class TradeService implements OnModuleInit {
         this.positionSizeUSD = Number.parseFloat(this.configService.get<string>('POSITION_SIZE_USD', '3'));
 
         this.slippageBps = Number.parseInt(this.configService.get<string>('SLIPPAGE_BPS', '100'), 10);
+        this.isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
     }
 
     private get reportingService(): ReportingService {
@@ -263,11 +265,19 @@ export class TradeService implements OnModuleInit {
         this.sellingTrades.add(tradeId);
 
         try {
-            // 1. DAPETIN SALDO ASLI
-            const actualBalance = await this.getTokenBalance(this.wallet.publicKey.toBase58(), trade.tokenMint);
-            if (actualBalance === null) {
-                this.logger.error(`[Slot ${trade.slotNumber}] ❌ Failed to fetch balance from RPC. Aborting sell to prevent errors.`);
-                return false;
+            // 1. DAPETIN SALDO ASLI ATAU SIMULASI
+            let actualBalance = 0;
+            if (this.isDryRun) {
+                const solPrice = await this.getSolPrice();
+                actualBalance = (trade.amountInSol * solPrice) / trade.entryPrice;
+                this.logger.debug(`[Slot ${trade.slotNumber}] 🤖 DRY RUN: Simulated token balance: ${actualBalance}`);
+            } else {
+                const fetchedBalance = await this.getTokenBalance(this.wallet.publicKey.toBase58(), trade.tokenMint);
+                if (fetchedBalance === null) {
+                    this.logger.error(`[Slot ${trade.slotNumber}] ❌ Failed to fetch balance from RPC. Aborting sell to prevent errors.`);
+                    return false;
+                }
+                actualBalance = fetchedBalance;
             }
 
             const sellAmount = actualBalance * percentage;
@@ -428,6 +438,12 @@ export class TradeService implements OnModuleInit {
                         this.logger.error(`[Jupiter] ❌ Fallback price also failed. Using raw calculated price.`);
                     }
                 }
+            }
+
+            // 🤖 DRY RUN MODE: Skip actual swap execution, just return simulated success with quote price
+            if (this.isDryRun) {
+                this.logger.log(`[DRY RUN] 🤖 Simulated ${side} Quote obtained: $${price.toFixed(8)}. Skipping real transaction.`);
+                return { success: true, entryPrice: price || 0.00000001, txHash: `simulated_tx_${Date.now()}` };
             }
 
             // ⛽ DYNAMIC FEES: Naikin gas tiap kali gagal (Auto-Multiplier + Retry Bonus)

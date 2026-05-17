@@ -18,6 +18,7 @@ export class ReportingService implements OnModuleInit {
     private readonly chatId: string;
     private readonly connection: Connection;
     private readonly walletPublicKey: string;
+    private readonly isDryRun: boolean;
 
     constructor(
         private readonly configService: ConfigService,
@@ -26,6 +27,7 @@ export class ReportingService implements OnModuleInit {
     ) {
         const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
         this.chatId = this.configService.get<string>('TELEGRAM_CHAT_ID') || '';
+        this.isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
 
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
         if (rpcEndpoint) {
@@ -376,7 +378,8 @@ export class ReportingService implements OnModuleInit {
         socials?: TokenMetadata['socials']
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
-        const message = `🚀 *SOLANA BUY ALERT* 🚀\n` +
+        const prefix = this.isDryRun ? '🤖 [SIMULASI] ' : '🚀 ';
+        const message = `${prefix}*SOLANA BUY ALERT* 🚀\n` +
                         `━━━━━━━━━━━━━━━━━━\n` +
                         `💎 *Token:* ${displaySymbol}\n` +
                         `🆔 *Mint:* \`${tokenMint}\`\n` +
@@ -429,8 +432,9 @@ export class ReportingService implements OnModuleInit {
         const isSuccess = netProfitPercent >= 0;
         const emoji = isSuccess ? '💰' : '🛑';
         const profitEmoji = isSuccess ? '🟢' : '🔴';
+        const prefix = this.isDryRun ? '🤖 [SIMULASI] ' : '';
         
-        const message = `${emoji} *SOLANA SELL ALERT* ${emoji}\n` +
+        const message = `${prefix}${emoji} *SOLANA SELL ALERT* ${emoji}\n` +
                         `━━━━━━━━━━━━━━━━━━\n` +
                         `💎 *Token:* ${displaySymbol}\n` +
                         `🆔 *Mint:* \`${tokenMint}\`\n` +
