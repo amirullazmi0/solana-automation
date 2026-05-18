@@ -160,7 +160,10 @@ export class PriceMonitorService {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
         let devDumped = false;
 
-        this.logger.debug(`[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)}, Profit: ${profitPercent.toFixed(2)}%, SL: -${this.stopLossPercent}%, TSL: $${trade.trailingStopPrice.toFixed(8)}`);
+        const effectiveStopLossPercent = trade.targetStopLoss ?? this.stopLossPercent;
+        const effectiveTrailingDistancePercent = trade.targetTrailingDistance ?? this.trailingDistancePercent;
+
+        this.logger.debug(`[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)}, Profit: ${profitPercent.toFixed(2)}%, SL: -${effectiveStopLossPercent}%, TSL: $${trade.trailingStopPrice.toFixed(8)}`);
 
 
         // 1. ANALISIS HOLDER (Insting Intelijen)
@@ -198,7 +201,7 @@ export class PriceMonitorService {
         // 3. TRAILING STOP LOGIC (Update Peak & TSL)
         // 🚀 Hanya update peak kalau harga sudah naik minimal 2% (Safe Zone)
         if (currentPrice > trade.highestPrice && profitPercent >= 2) {
-            const calculatedStop = currentPrice * (1 - (this.trailingDistancePercent / 100));
+            const calculatedStop = currentPrice * (1 - (effectiveTrailingDistancePercent / 100));
             
             // 🛡️ ZERO-LOSS PROTECTION: Kalau untung >= 10%, jaring jual MINIMAL di harga beli + 1%
             let newTrailingStop = Math.max(calculatedStop, trade.entryPrice);
@@ -223,7 +226,7 @@ export class PriceMonitorService {
         }
 
         // 4. EXIT CONDITION: Take Profit or Trailing Stop
-        const baseTP = parseFloat(this.configService.get<string>('TAKE_PROFIT_PERCENT', '30.0'));
+        const baseTP = trade.targetTakeProfit ?? parseFloat(this.configService.get<string>('TAKE_PROFIT_PERCENT', '30.0'));
         
         // 🚀 DYNAMIC TP: Kalau volume lagi "Sakit" (Surge gede), targetin lebih tinggi
         // Kita butuh volumeSurge dari database (Watchlist) kalau ada, atau kita asumsikan dari momentum
@@ -259,7 +262,7 @@ export class PriceMonitorService {
         }
 
         // 5. EXIT CONDITION: Patience Protocol (10-Minute SL)
-        if (profitPercent <= -this.stopLossPercent) {
+        if (profitPercent <= -effectiveStopLossPercent) {
             // 🛡️ BUY PRESSURE CHECK: Jika masih ada buying pressure kuat, JANGAN JUAL (biarpun timer habis)
             const hasBuyPressure = await this.checkBuyPressure(trade.tokenMint);
             if (hasBuyPressure) {

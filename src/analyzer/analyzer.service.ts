@@ -19,17 +19,17 @@ export interface DexScreenerPair {
     liquidity?: { usd?: number };
     fdv?: number;
     pairCreatedAt?: number;
-    priceChange?: { h1?: number };
-    volume?: { m5?: number, h1?: number };
+    priceChange?: { m5?: number; h1?: number; h6?: number; h24?: number };
+    volume?: { m5?: number; h1?: number; h24?: number };
     txns?: { 
-        m5?: { buys?: number, sells?: number },
-        h1?: { buys?: number, sells?: number }
+        m5?: { buys?: number; sells?: number };
+        h1?: { buys?: number; sells?: number };
     };
     info?: {
         socials?: SocialLink[];
         websites?: Website[];
     };
-    baseToken?: { symbol?: string };
+    baseToken?: { address?: string; symbol?: string; name?: string };
 }
 
 export interface TokenMetadata {

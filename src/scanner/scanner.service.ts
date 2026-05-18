@@ -4,6 +4,7 @@ import { Connection } from '@solana/web3.js';
 import axios from 'axios';
 import * as WebSocket from 'ws';
 import { AnalyzerService } from '../analyzer/analyzer.service';
+import { EstablishedAnalyzerService } from '../analyzer/established-analyzer.service';
 import { TradeService } from '../trade/trade.service';
 import { ReportingService } from '../reporting/reporting.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -26,6 +27,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     constructor(
         private readonly configService: ConfigService,
         private readonly analyzerService: AnalyzerService,
+        private readonly establishedAnalyzerService: EstablishedAnalyzerService,
         private readonly prismaService: PrismaService,
         private readonly moduleRef: ModuleRef,
     ) {
@@ -322,9 +324,17 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     const currentItem = await this.prismaService.watchlist.findUnique({ where: { tokenMint } });
                     if (!currentItem || currentItem.status === 'FAILED' || currentItem.status === 'TRADED') return;
 
+                    // 🚀 ESTABLISHED REBOUND & CTO BOT SERVICE
+                    const isReboundExecuted = await this.establishedAnalyzerService.analyzeAndExecuteRebound(tokenMint);
+                    if (isReboundExecuted) {
+                        await this.prismaService.watchlist.update({
+                            where: { tokenMint },
+                            data: { status: 'TRADED' }
+                        });
+                        return;
+                    }
 
-
-            const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
+                    const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
 
                     // Update metadata di Watchlist
                     if (result.metadata) {

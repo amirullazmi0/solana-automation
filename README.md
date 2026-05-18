@@ -38,26 +38,34 @@ Notifikasi real-time yang informatif:
 - **Anti-Repeat Buy** — Cooldown 24 jam per token
 - **Anti-Honeypot** — Deteksi koin yang tidak bisa dijual
 
+### 6. 🔥 Established Rebound & CTO Bot
+Layanan kuantitatif khusus (`EstablishedAnalyzerService`) untuk mendeteksi anomali **"Dead Cat Bounce"** atau **"Community Take Over (CTO)"**:
+- **Target Koin Mapan**: Umur 1-3 hari (24-72 jam) dengan likuiditas >= $3,000.
+- **Deep Sell-off**: Telah mengalami koreksi mendalam dalam 24 jam ($\le -50\%$).
+- **Volume-Price Divergence**: Mendeteksi akumulasi masif ($V_{5m} > V_{1h} \times 0.25$) dengan pergerakan harga 5m yang stabil (-2% s/d +5%) membentuk lantai baru.
+- **Buyer Dominance**: Rasio beli vs jual $> 1.5\text{x}$ dengan minimal 5 transaksi beli.
+- **Strict Custom Exit**: Eksekusi instan dengan aturan keluar ketat mandiri (TP 18%, TSL 2.5%, Hard SL 20%).
+
 ---
 
 ## 🏗️ Arsitektur
 
 ```
-┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│ ScannerService  │─────▶│ AnalyzerService │─────▶│  TradeService   │
-│ (Discovery)     │      │ (12-Gate Filter)│      │ (Jupiter Swap)  │
-│                 │      │                 │      │                 │
-│ • PumpPortal WS │      │ • Liquidity     │      │ • Buy/Sell      │
-│ • DexScreener   │      │ • MCap Range    │      │ • Dynamic Fees  │
-│ • Watchlist DB  │      │ • VoL Score     │      │ • Retry + Slip  │
-│                 │      │ • Z-Score       │      │                 │
-└─────────────────┘      │ • Safety RPC    │      └────────┬────────┘
-                         │ • RugCheck      │               │
-                         └─────────────────┘               ▼
-┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│ ReportingService│◀─────│ PriceMonitor    │◀─────│ Prisma (DB)     │
-│ (Telegram Alert)│      │ (TP/SL/Trail)   │      │ (PostgreSQL)    │
-└─────────────────┘      └─────────────────┘      └─────────────────┘
+┌─────────────────┐      ┌──────────────────────────────┐      ┌─────────────────┐
+│ ScannerService  │─────▶│ EstablishedAnalyzerService   │─────▶│  TradeService   │
+│ (Discovery)     │      │ (Rebound & CTO Detector)     │      │ (Jupiter Swap)  │
+│                 │      └──────────────┬───────────────┘      │                 │
+│ • PumpPortal WS │                     │ Gagal Rebound        │ • Buy/Sell      │
+│ • DexScreener   │                     ▼                      │ • Dynamic Fees  │
+│ • Watchlist DB  │      ┌──────────────────────────────┐      │ • Retry + Slip  │
+│                 │─────▶│ AnalyzerService              │─────▶│                 │
+└─────────────────┘      │ (12-Gate Standard Filter)    │      └────────┬────────┘
+                         └──────────────────────────────┘               │
+                                                                        ▼
+┌─────────────────┐      ┌──────────────────────────────┐      ┌─────────────────┐
+│ ReportingService│◀─────│ PriceMonitor                 │◀─────│ Prisma (DB)     │
+│ (Telegram Alert)│      │ (TP/SL/Trail + Custom Exit)  │      │ (PostgreSQL)    │
+└─────────────────┘      └──────────────────────────────┘      └─────────────────┘
 ```
 
 ---
@@ -75,6 +83,17 @@ Salin `.env.example` ke `.env` dan isi value-nya. Semua parameter sudah diberi k
 | `MIN_BUY_CONFIDENCE` | `0.55` | Rasio buyer vs seller |
 | `MIN_LIQUIDITY_USD` | `3000` | Minimum liquidity di pool |
 | `MIN_BUY_COUNT` | `5` | Minimum buyer dalam 5 menit |
+
+### Established Rebound & CTO Thresholds
+| Parameter | Value | Keterangan |
+|-----------|-------|------------|
+| `ESTABLISHED_MIN_AGE_HOURS` | `24` | Umur minimum token (jam) |
+| `ESTABLISHED_MAX_AGE_HOURS` | `72` | Umur maksimum token (jam) |
+| `MIN_ESTABLISHED_LIQUIDITY` | `3000` | Minimum likuiditas (USD) |
+| `MAX_ESTABLISHED_MCAP` | `200000` | Maksimum kapitalisasi pasar (USD) |
+| `REBOUND_PRICE_DROP_PCT` | `-50` | Syarat penurunan harga dalam 24 jam |
+| `VOLUME_SPIKE_RATIO` | `0.25` | Syarat lonjakan volume $V_{5m}$ thd $V_{1h}$ |
+| `BUY_SELL_RATIO_THRESHOLD` | `1.5` | Rasio dominasi pembeli vs penjual |
 
 ---
 
@@ -275,6 +294,9 @@ PriceMonitorService mulai tracking:
 | Price turun ≥ `TRAILING_DISTANCE_PERCENT` dari peak | **SELL** (Trailing Stop) | Normal (5%) |
 | Price turun ≥ `STOP_LOSS_PERCENT` dari entry | **SELL** (Stop Loss) | Panic (15%) |
 | Dev dump terdeteksi (creator sell >50%) | **SELL** (Rugpull) | Panic (15%) |
+
+> **🔥 Catatan Khusus untuk Mode Established Rebound & CTO:**
+> Transaksi yang dibuka melalui jalur Rebound & CTO akan memiliki pengaturan keluar mandiri di database (`targetTakeProfit=18%`, `targetTrailingDistance=2.5%`, dan `targetStopLoss=20%`). `PriceMonitorService` secara otomatis menggunakan nilai kustom ini tanpa mengubah konfigurasi standar bot.
 
 ### 🔄 Watchlist Retry Mechanism
 

@@ -37,6 +37,10 @@ model Trade {
   createdAt               DateTime    @default(now())
   updatedAt               DateTime    @updatedAt
   slTriggeredAt           DateTime?
+  targetTakeProfit        Float?
+  targetStopLoss          Float?
+  targetTrailingDistance  Float?
+
 
   @@index([status])
   @@index([tokenMint, createdAt])

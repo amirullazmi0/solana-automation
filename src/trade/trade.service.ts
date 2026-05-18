@@ -146,7 +146,14 @@ export class TradeService implements OnModuleInit {
     async attemptBuy(
         tokenMint: string, 
         metadata?: TokenMetadata, 
-        customAmountUSD?: number
+        customAmountUSD?: number,
+        options?: {
+            customSlippageBps?: number;
+            priorityFeeSol?: number;
+            targetTakeProfit?: number;
+            targetStopLoss?: number;
+            targetTrailingDistance?: number;
+        }
     ): Promise<{ success: boolean; message: string }> {
         // 1. Cek apakah sudah punya koin ini (OPEN) atau sudah pernah trading dalam 24 jam terakhir (Cooldown)
         const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -188,6 +195,7 @@ export class TradeService implements OnModuleInit {
         const solPrice = await this.getSolPrice();
         const amountInSol = buyAmountUSD / solPrice; 
         const amountInLamports = Math.floor(amountInSol * 1_000_000_000);
+        const priorityFeeLamports = options?.priorityFeeSol ? Math.floor(options.priorityFeeSol * 1_000_000_000) : undefined;
 
         this.logger.log(`[Slot ${slotToUse}] Attempting to buy ${tokenMint} with $${buyAmountUSD} (${amountInSol.toFixed(4)} SOL)`);
 
@@ -197,6 +205,9 @@ export class TradeService implements OnModuleInit {
             amountInLamports,
             'BUY',
             buyAmountUSD,
+            0,
+            options?.customSlippageBps,
+            priorityFeeLamports,
         );
 
         if (success && entryPrice > 0) {
@@ -214,8 +225,6 @@ export class TradeService implements OnModuleInit {
                 initialTopHolderBalance = typeof bal === 'number' ? bal : 0;
             }
 
-            // const trailingDistance = Number.parseFloat(this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '5.0'));
-            
             await this.prismaService.trade.create({
                 data: {
                     tokenMint,
@@ -233,6 +242,9 @@ export class TradeService implements OnModuleInit {
                     topHolderAddress: metadata?.topHolder,
                     initialCreatorBalance,
                     initialTopHolderBalance,
+                    targetTakeProfit: options?.targetTakeProfit,
+                    targetStopLoss: options?.targetStopLoss,
+                    targetTrailingDistance: options?.targetTrailingDistance,
                 },
             });
             this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
@@ -369,7 +381,8 @@ export class TradeService implements OnModuleInit {
         side: 'BUY' | 'SELL',
         buyAmountUSD?: number,
         retryCount = 0,
-        customSlippageBps?: number
+        customSlippageBps?: number,
+        priorityFeeLamports?: number
     ): Promise<{ success: boolean; entryPrice: number; error?: string; txHash?: string }> {
         const maxRetries = 3;
         try {
@@ -449,6 +462,7 @@ export class TradeService implements OnModuleInit {
             // ⛽ DYNAMIC FEES: Naikin gas tiap kali gagal (Auto-Multiplier + Retry Bonus)
             const baseMultiplier = Number.parseInt(this.configService.get<string>('TRADE_PRIORITY_MULTIPLIER', '2'), 10);
             const multiplier = baseMultiplier + (retryCount * 2);
+            const feeConfig = priorityFeeLamports && priorityFeeLamports > 0 ? priorityFeeLamports : { autoMultiplier: multiplier };
 
             const swapResponse = await axios.post(
                 `${baseUrl}/swap/v1/swap`,
@@ -457,9 +471,7 @@ export class TradeService implements OnModuleInit {
                     userPublicKey: this.wallet.publicKey.toString(),
                     wrapAndUnwrapSol: true,
                     dynamicComputeUnitLimit: true,
-                    prioritizationFeeLamports: {
-                        autoMultiplier: multiplier
-                    },
+                    prioritizationFeeLamports: feeConfig,
                 },
                 config,
             );
@@ -494,7 +506,7 @@ export class TradeService implements OnModuleInit {
                 const waitTime = 1000 * (retryCount + 1);
                 this.logger.log(`[Jupiter] Retrying in ${waitTime}ms...`);
                 await new Promise(res => setTimeout(res, waitTime));
-                return this.executeJupiterSwap(inputMint, outputMint, amount, side, buyAmountUSD, retryCount + 1, customSlippageBps);
+                return this.executeJupiterSwap(inputMint, outputMint, amount, side, buyAmountUSD, retryCount + 1, customSlippageBps, priorityFeeLamports);
             }
             return { success: false, entryPrice: 0, error: message, txHash: undefined };
         }
