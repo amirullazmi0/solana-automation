@@ -248,7 +248,8 @@ export class TradeService implements OnModuleInit {
                 },
             });
             this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
-            await this.reportingService.sendBuyAlert(tokenMint, entryPrice, slotToUse, symbol, metadata?.socials);
+            const strategyName = options?.targetTakeProfit ? '🔥 Established Rebound & CTO (TP 18%, TSL 2.5%, Hard SL 20%)' : 'Standard Second-Wave';
+            await this.reportingService.sendBuyAlert(tokenMint, entryPrice, slotToUse, symbol, metadata?.socials, strategyName);
             
             // 🚀 MONITORING: PriceMonitorService otomatis akan mendeteksi trade baru dari DB
             return { success: true, message: `Successfully bought ${symbol} at slot ${slotToUse}` };

@@ -298,8 +298,9 @@ export class ReportingService implements OnModuleInit {
             const profitDisplay = currentPrice ? `${profit >= 0 ? '+' : ''}${profit.toFixed(2)}%` : '(N/A)';
             const emoji = profit >= 0 ? '📈' : '📉';
             const displaySymbol = trade.symbol && trade.symbol !== 'UNKNOWN' ? trade.symbol : 'UNKNOWN';
+            const modeBadge = trade.targetTakeProfit ? ' 🔥 `[REBOUND & CTO]`' : '';
 
-            statusMsg += `Slot ${trade.slotNumber}: *${displaySymbol}*\n`;
+            statusMsg += `Slot ${trade.slotNumber}: *${displaySymbol}*${modeBadge}\n`;
             statusMsg += `Mint: \`${trade.tokenMint}\`\n`;
             statusMsg += `Entry: \`$${trade.entryPrice.toFixed(8)}\` | Current: \`${priceDisplay}\` ${emoji}\n`;
             statusMsg += `Profit/Loss: *${profitDisplay}*\n`;
@@ -375,10 +376,12 @@ export class ReportingService implements OnModuleInit {
         price: number, 
         slotUsed: number, 
         symbol?: string, 
-        socials?: TokenMetadata['socials']
+        socials?: TokenMetadata['socials'],
+        strategy?: string
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
         const prefix = this.isDryRun ? '🤖 [SIMULASI] ' : '🚀 ';
+        const strategyDisplay = strategy ? `\n⚡ *Strategy:* \`${strategy}\`` : '';
         const message = `${prefix}*SOLANA BUY ALERT* 🚀\n` +
                         `━━━━━━━━━━━━━━━━━━\n` +
                         `💎 *Token:* ${displaySymbol}\n` +
@@ -386,7 +389,7 @@ export class ReportingService implements OnModuleInit {
                         `💰 *Price:* \`$${price.toFixed(8)}\`\n` +
                         `🧱 *Slot:* #${slotUsed}\n` +
                         `━━━━━━━ 📊 ━━━━━━━\n` +
-                        `📈 *Action:* BUY EXECUTION`;
+                        `📈 *Action:* BUY EXECUTION${strategyDisplay}`;
         
         const row1: TelegramBot.InlineKeyboardButton[] = [];
         if (socials?.twitter) row1.push({ text: '🐦 Twitter', url: socials.twitter });

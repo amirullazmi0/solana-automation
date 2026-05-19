@@ -261,8 +261,11 @@ FAIL: high_concentration | lp_not_burned | high_risk_score | honeypot_detected |
 ### 🎯 Decision Flow (Summary)
 
 ```
-Token ditemukan
+Token ditemukan (via Polling atau WS)
     │
+    ▼
+[Garda Depan: Rebound & CTO Check] ──PASS──▶ 🚀 EXECUTE BUY (Rebound Custom Exit)
+    │ FAIL
     ▼
 [Gate 1-8: Market Traction] ──FAIL──▶ Temporary? → Simpan di Watchlist (retry)
     │                                  Permanent? → FAILED (blacklist 2 jam)
@@ -277,13 +280,13 @@ Token ditemukan
 [Gate 12: RugCheck] ──FAIL──▶ FAILED
     │ PASS
     ▼
-🚀 EXECUTE BUY via Jupiter Swap
+🚀 EXECUTE BUY via Jupiter Swap (Standard Exit)
     │
     ▼
 PriceMonitorService mulai tracking:
-  • Take Profit (30%) → Trailing Stop aktif
-  • Stop Loss (25%) → Auto-sell dengan slippage 15%
-  • Trailing Stop (5%) → Kunci profit, sell jika turun 5% dari peak
+  • Take Profit standar (30%) / CTO (18%) → Trailing Stop aktif
+  • Stop Loss standar (25%) / CTO (20%) → Auto-sell dengan slippage 15%
+  • Trailing Stop standar (5%) / CTO (2.5%) → Kunci profit, sell jika turun dari peak
 ```
 
 ### 📈 Exit Strategy (PriceMonitorService)
@@ -331,14 +334,16 @@ caprover deploy --default
 
 ---
 
-## 📊 Bot Modes
+## 📊 Bot Modes & Simulation
 
-| Mode | Discovery | Target | Keterangan |
-|------|-----------|--------|------------|
-| `whale` | DexScreener only | $50K-$300K MCap | Second Whale — koin yang sudah established |
-| `micin` | PumpPortal WS + DexScreener | $5K-$300K MCap | Micin Sniper — koin baru migrate dari PumpFun |
+| Mode / Parameter | Discovery & Behavior | Keterangan |
+|------------------|----------------------|------------|
+| `BOT_MODE=whale` | DexScreener only | Polling koin mapan ($50K-$300K MCap) tanpa WebSocket |
+| `BOT_MODE=micin` | PumpPortal WS + DexScreener | Menangkap koin baru migrate dari Pump.fun secara instan via WebSocket |
+| `DRY_RUN=true` | Mainnet Quotes + Database Simulation | Menjalankan seluruh filter live, namun mencegat eksekusi asli tepat sebelum penandatanganan dompet. Aman untuk uji coba tanpa risiko kehilangan modal. Di Telegram ditandai dengan `🤖 [SIMULASI]`. |
+| `DRY_RUN=false` | Live Wallet Execution | Transaksi nyata di blockchain Solana menggunakan saldo asli. |
 
-Set via `BOT_MODE=micin` di `.env`.
+Set via `.env`.
 
 ---
 
