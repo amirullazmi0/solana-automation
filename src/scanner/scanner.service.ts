@@ -214,11 +214,14 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 const pending = await this.prismaService.watchlist.findMany({
                     where: { 
                         status: 'PENDING',
-                        // Hindari re-check koin yang baru dicek 15 detik lalu
-                        lastCheckedAt: { lt: new Date(Date.now() - 15000) }
+                        // Hindari re-check koin yang baru dicek kurang dari 3 menit lalu (mencegah loop koin tertua)
+                        lastCheckedAt: { lt: new Date(Date.now() - 3 * 60 * 1000) }
                     },
-                    orderBy: { lastCheckedAt: 'asc' }, // Fair round-robin
-                    take: 20, // Ambil 20 koin biar gak bottleneck
+                    orderBy: [
+                        { pairCreatedAt: 'asc' },
+                        { createdAt: 'asc' }
+                    ],
+                    take: 20, // Ambil hingga 50 koin
                     select: { tokenMint: true } // Optimasi memory leak
                 });
 
@@ -228,7 +231,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     
                     this.activeMonitoring++;
                     this.processNewToken(item.tokenMint);
-                    await new Promise(res => setTimeout(res, 500)); // Lebih cepat re-check-nya
+                    await new Promise(res => setTimeout(res, 100)); // Stagger 100ms agar aman dari rate limit
                 }
                 
                 // Cleanup Watchlist: Hapus koin yang sudah > 24 jam dan gagal/pending
