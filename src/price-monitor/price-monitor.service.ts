@@ -83,6 +83,29 @@ export class PriceMonitorService {
         }
     }
 
+    private getHttpsAgent() {
+        return new https.Agent({
+            family: 4,
+            keepAlive: true,
+            lookup: async (hostname, options, cb) => {
+                try {
+                    const ip = await this.resolveDns(hostname);
+                    if (ip) {
+                        cb(null, ip, 4);
+                    } else {
+                        import('dns').then(({ lookup }) => {
+                            lookup(hostname, options, cb);
+                        }).catch((err) => {
+                            cb(err, '', 4);
+                        });
+                    }
+                } catch (e) {
+                    cb(e as Error, '', 4);
+                }
+            }
+        });
+    }
+
     private async getBatchPrices(mints: string[]): Promise<Record<string, number>> {
         const result: Record<string, number> = {};
         if (mints.length === 0) return result;
@@ -93,7 +116,7 @@ export class PriceMonitorService {
             const response = await axios.get(`https://${hostname}/price/v2?ids=${ids}`, {
                 timeout: 3000,
                 headers: { 'x-api-key': this.jupiterApiKey },
-                httpsAgent: new https.Agent({ family: 4 })
+                httpsAgent: this.getHttpsAgent()
             });
 
             const data = response.data?.data || {};
@@ -114,7 +137,7 @@ export class PriceMonitorService {
         try {
             const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, { 
                 timeout: 5000,
-                httpsAgent: new https.Agent({ family: 4 })
+                httpsAgent: this.getHttpsAgent()
             });
             return response.data.pairs?.[0]?.liquidity?.usd || 0;
         } catch {
@@ -301,7 +324,7 @@ export class PriceMonitorService {
         try {
             const url = `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`;
             const response = await axios.get(url, {
-                httpsAgent: new https.Agent({ family: 4 }),
+                httpsAgent: this.getHttpsAgent(),
                 timeout: 5000,
             });
 

@@ -180,7 +180,8 @@ export class AnalyzerService {
         try {
             const response = await axios.get(`https://api.jup.ag/price/v2?ids=${tokenMint}`, {
                 timeout: 3000,
-                headers: { 'x-api-key': this.jupiterApiKey }
+                headers: { 'x-api-key': this.jupiterApiKey },
+                httpsAgent: this.getHttpsAgent()
             });
             return parseFloat(response.data?.data?.[tokenMint]?.price) || null;
         } catch {
@@ -253,7 +254,10 @@ export class AnalyzerService {
 
             const response = await axios.get<{ pairs: DexScreenerPair[] }>(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
-                { timeout: 5000 },
+                { 
+                    timeout: 5000,
+                    httpsAgent: this.getHttpsAgent()
+                },
             );
 
             const pair = response.data.pairs?.[0];
@@ -394,6 +398,22 @@ export class AnalyzerService {
         return new https.Agent({
             family: 4,
             keepAlive: true,
+            lookup: async (hostname, options, cb) => {
+                try {
+                    const ip = await this.resolveDns(hostname);
+                    if (ip) {
+                        cb(null, ip, 4);
+                    } else {
+                        import('dns').then(({ lookup }) => {
+                            lookup(hostname, options, cb);
+                        }).catch((err) => {
+                            cb(err, '', 4);
+                        });
+                    }
+                } catch (e) {
+                    cb(e as Error, '', 4);
+                }
+            }
         });
     }
 

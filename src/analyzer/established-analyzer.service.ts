@@ -19,6 +19,18 @@ interface RugCheckMarket {
     lpStatus: string;
 }
 
+interface RugCheckHolder {
+    address: string;
+    amount: number;
+    pct: number;
+    owner: string;
+}
+
+interface RugCheckKnownAccount {
+    name: string;
+    type: string;
+}
+
 @Injectable()
 export class EstablishedAnalyzerService {
     private readonly logger = new Logger(EstablishedAnalyzerService.name);
@@ -44,6 +56,22 @@ export class EstablishedAnalyzerService {
         return new https.Agent({
             family: 4,
             keepAlive: true,
+            lookup: async (hostname, options, cb) => {
+                try {
+                    const ip = await this.resolveDns(hostname);
+                    if (ip) {
+                        cb(null, ip, 4);
+                    } else {
+                        import('dns').then(({ lookup }) => {
+                            lookup(hostname, options, cb);
+                        }).catch((err) => {
+                            cb(err, '', 4);
+                        });
+                    }
+                } catch (e) {
+                    cb(e as Error, '', 4);
+                }
+            }
         });
     }
 
@@ -113,7 +141,7 @@ export class EstablishedAnalyzerService {
     }
 
     /**
-     * Memeriksa status Liquidity Pool (LP) via RugCheck API
+     * Memeriksa status keamanan token via RugCheck API secara menyeluruh
      */
     private async checkRugCheckLP(tokenMint: string, isPumpFun: boolean): Promise<{ passed: boolean; creator?: string; topHolder?: string; reason?: string }> {
         try {
@@ -123,6 +151,26 @@ export class EstablishedAnalyzerService {
             });
 
             if (!response.data) return { passed: false, reason: 'no_rugcheck_data' };
+
+            const topHolders = (response.data.topHolders as RugCheckHolder[]) || [];
+            const knownAccounts = (response.data.knownAccounts as Record<string, RugCheckKnownAccount | undefined>) || {};
+
+            // 🛡️ SAFETY & HOLDER INDEX (Anti-Rug)
+            const filteredHolders = topHolders.filter(h => {
+                const known = knownAccounts[h.address] || knownAccounts[h.owner];
+                const isExcludedType = known && (known.type === 'AMM' || known.type === 'LOCKER');
+                const isSystemAccount = h.owner === '1111111111111111111111111111111';
+                return !isExcludedType && !isSystemAccount;
+            });
+
+            const top10SumPct = filteredHolders.slice(0, 10).reduce((sum: number, h: RugCheckHolder) => sum + (h.pct || 0), 0);
+            const safetyIndex = 1 - (top10SumPct / 100);
+
+            const minSafetyIndex = Number.parseFloat(this.configService.get<string>('RUGCHECK_MIN_SAFETY_INDEX', '0.65'));
+            if (safetyIndex < minSafetyIndex) {
+                this.logger.warn(`[${tokenMint}] 🛑 Established High Concentration: Top 10 holds ${(1 - safetyIndex) * 100}%. Reject.`);
+                return { passed: false, reason: 'established_high_concentration' };
+            }
 
             const markets = (response.data.markets as RugCheckMarket[]) || [];
             const lpSafe = markets.some((m: RugCheckMarket) => 
@@ -135,7 +183,40 @@ export class EstablishedAnalyzerService {
                 return { passed: false, reason: 'lp_not_burned_or_locked' };
             }
 
-            const topHolders = response.data.topHolders || [];
+            const score = response.data.score || 0;
+            if (score > 2000) {
+                this.logger.warn(`[${tokenMint}] 🛑 Established High Risk Score: ${score}. Reject.`);
+                return { passed: false, reason: 'established_high_risk_score' };
+            }
+
+            const risks = (response.data.risks as Array<{ name: string; level: string }> ) || [];
+            const hasHoneypotRisk = risks.some(r => 
+                r.name.toLowerCase().includes('honeypot') || 
+                r.name.toLowerCase().includes('freeze') ||
+                r.name.toLowerCase().includes('mint authority')
+            );
+
+            if (hasHoneypotRisk) {
+                this.logger.warn(`[${tokenMint}] 🛑 Established HONEYPOT/FREEZE/MINT RISK detected. Reject.`);
+                return { passed: false, reason: 'established_honeypot_detected' };
+            }
+
+            const highRisks = risks.filter((risk) => risk.level === 'danger');
+            if (highRisks.length > 0) {
+                this.logger.warn(`[${tokenMint}] 🛑 Established Danger Risks detected. Reject.`);
+                return { passed: false, reason: 'established_danger_risks_detected' };
+            }
+
+            const creator = response.data.creator;
+            if (creator) {
+                const creatorHolder = topHolders.find(h => h.address === creator || h.owner === creator);
+                const creatorPct = creatorHolder ? creatorHolder.pct : 0;
+                if (creatorPct > 3) {
+                    this.logger.warn(`[${tokenMint}] 🛑 Established Creator holds too much (${creatorPct.toFixed(2)}%). Reject.`);
+                    return { passed: false, reason: 'established_creator_holds_too_much' };
+                }
+            }
+
             return {
                 passed: true,
                 creator: response.data.creator,
