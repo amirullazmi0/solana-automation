@@ -55,6 +55,13 @@ export interface TokenMetadata {
 interface RugCheckHolder {
     address: string;
     amount: number;
+    pct: number;
+    owner: string;
+}
+
+interface RugCheckKnownAccount {
+    name: string;
+    type: string;
 }
 
 interface RugCheckMarket {
@@ -405,12 +412,20 @@ export class AnalyzerService {
 
             if (!response.data) return { passed: false, reason: 'rugcheck_no_data' };
 
-            // 🛡️ SAFETY & HOLDER INDEX (Anti-Rug)
-            // Rumus: Safety Index = 1 - (Total Supply Top 10 / Total Supply)
             const topHolders = (response.data.topHolders as RugCheckHolder[]) || [];
-            const totalSupply = response.data.totalSupply || 1;
-            const top10Sum = topHolders.slice(0, 10).reduce((sum: number, h: RugCheckHolder) => sum + (h.amount || 0), 0);
-            const safetyIndex = 1 - (top10Sum / totalSupply);
+            const knownAccounts = (response.data.knownAccounts as Record<string, RugCheckKnownAccount | undefined>) || {};
+
+            // 🛡️ SAFETY & HOLDER INDEX (Anti-Rug) - Saring dompet AMM, lockers, dan alamat sistem
+            const filteredHolders = topHolders.filter(h => {
+                const known = knownAccounts[h.address] || knownAccounts[h.owner];
+                const isExcludedType = known && (known.type === 'AMM' || known.type === 'LOCKER');
+                const isSystemAccount = h.owner === '11111111111111111111111111111111';
+                return !isExcludedType && !isSystemAccount;
+            });
+
+            // Hitung safetyIndex menggunakan persentase (pct) langsung dari API
+            const top10SumPct = filteredHolders.slice(0, 10).reduce((sum: number, h: RugCheckHolder) => sum + (h.pct || 0), 0);
+            const safetyIndex = 1 - (top10SumPct / 100);
 
             if (safetyIndex < 0.8) { // Berarti Top 10 pegang > 20%
                 this.logger.warn(`[${tokenMint}] 🛑 High Concentration: Top 10 pegang ${(1 - safetyIndex) * 100}%. Skip.`);
@@ -457,8 +472,8 @@ export class AnalyzerService {
             // 🧑‍💻 CREATOR BALANCE CHECK (Anti-Dump)
             const creator = response.data.creator;
             if (creator) {
-                const creatorHolder = topHolders.find(h => h.address === creator);
-                const creatorPct = creatorHolder ? (creatorHolder.amount / totalSupply) * 100 : 0;
+                const creatorHolder = topHolders.find(h => h.address === creator || h.owner === creator);
+                const creatorPct = creatorHolder ? creatorHolder.pct : 0;
                 if (creatorPct > 3) {
                     this.logger.warn(`[${tokenMint}] 🛑 Creator holds too much (${creatorPct.toFixed(2)}%). Skip.`);
                     return { passed: false, reason: 'creator_holds_too_much', safetyIndex };
