@@ -10,6 +10,7 @@ import { TradeService } from '../trade/trade.service';
 import { ReportingService } from '../reporting/reporting.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ModuleRef } from '@nestjs/core';
+import { DexLimiter } from '../common/dex-limiter';
 
 @Injectable()
 export class ScannerService implements OnModuleInit, OnModuleDestroy {
@@ -179,29 +180,29 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         // Poll setiap 15 detik ke 2 sumber berbeda
         setInterval(async () => {
             try {
-                // Sumber 1: Token Boosts (koin dengan marketing budget)
-                const boostRes = await axios.get(
+                 // Sumber 1: Token Boosts (koin dengan marketing budget)
+                const boostRes = await DexLimiter.get<Array<{ chainId: string; tokenAddress: string }>>(
                     'https://api.dexscreener.com/token-boosts/latest/v1',
                     { 
                         timeout: 10000,
                         httpsAgent: this.httpsAgent,
                     },
                 );
-                const boostTokens = (boostRes.data as Array<{ chainId: string; tokenAddress: string }>)
+                const boostTokens = boostRes.data
                     .filter((t) => t.chainId === 'solana')
                     .map((t) => t.tokenAddress);
 
                 // Sumber 2: Trending Pairs (koin yang sedang ramai organik)
                 let trendingTokens: string[] = [];
                 try {
-                    const trendRes = await axios.get(
+                    const trendRes = await DexLimiter.get<Array<{ chainId: string; tokenAddress: string }>>(
                         'https://api.dexscreener.com/token-profiles/latest/v1',
                         { 
                             timeout: 10000,
                             httpsAgent: this.httpsAgent,
                         },
                     );
-                    trendingTokens = (trendRes.data as Array<{ chainId: string; tokenAddress: string }>)
+                    trendingTokens = trendRes.data
                         .filter((t) => t.chainId === 'solana')
                         .map((t) => t.tokenAddress);
                 } catch {

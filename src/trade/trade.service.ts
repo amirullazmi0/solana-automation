@@ -8,6 +8,7 @@ import * as https from 'https';
 import { TokenMetadata } from '../analyzer/analyzer.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
+import { DexLimiter } from '../common/dex-limiter';
 
 export const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -557,7 +558,7 @@ export class TradeService implements OnModuleInit {
     private async fetchTokenSymbol(tokenMint: string): Promise<string> {
         try {
             // Try DexScreener first
-            const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
+            const response = await DexLimiter.get<{ pairs: Array<{ baseToken?: { symbol?: string } }> }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
                 timeout: 3000,
                 httpsAgent: this.httpsAgent,
             });

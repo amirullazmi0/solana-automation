@@ -8,6 +8,7 @@ import { DexScreenerPair, TokenMetadata } from './analyzer.service';
 import { TradeService } from '../trade/trade.service';
 import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
+import { DexLimiter } from '../common/dex-limiter';
 
 export interface ReboundResult {
     isEstablished: boolean;
@@ -278,7 +279,7 @@ export class EstablishedAnalyzerService {
     public async analyzeAndExecuteRebound(tokenMint: string): Promise<ReboundResult> {
         try {
             // 1. Fetch data dari DexScreener
-            const response = await axios.get<{ pairs: DexScreenerPair[] }>(
+            const response = await DexLimiter.get<{ pairs: DexScreenerPair[] }>(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
                 { timeout: 5000, httpsAgent: this.getHttpsAgent() }
             );

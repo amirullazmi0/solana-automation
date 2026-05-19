@@ -11,6 +11,7 @@ import { TokenMetadata } from '../analyzer/analyzer.service';
 import { ModuleRef } from '@nestjs/core';
 import { TradeService } from '../trade/trade.service';
 import { ScannerService } from '../scanner/scanner.service';
+import { DexLimiter } from '../common/dex-limiter';
 
 @Injectable()
 export class ReportingService implements OnModuleInit {
@@ -292,7 +293,7 @@ export class ReportingService implements OnModuleInit {
 
     private async fetchTokenSymbolFromDex(tokenMint: string): Promise<string> {
         try {
-            const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
+            const response = await DexLimiter.get<{ pairs: Array<{ baseToken?: { symbol?: string } }> }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
                 timeout: 5000,
                 httpsAgent: this.httpsAgent,
             });
@@ -377,7 +378,7 @@ export class ReportingService implements OnModuleInit {
                 }
             }
 
-            const dexResponse = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
+            const dexResponse = await DexLimiter.get<{ pairs: Array<{ priceUsd?: string }> }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
                 timeout: 5000,
                 httpsAgent: this.httpsAgent,
             }).catch(() => null);

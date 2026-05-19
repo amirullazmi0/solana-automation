@@ -5,6 +5,7 @@ import { getMint } from '@solana/spl-token';
 import axios from 'axios';
 import * as https from 'https';
 import { PrismaService } from '../prisma/prisma.service';
+import { DexLimiter } from '../common/dex-limiter';
 
 export interface SocialLink {
     type: string;
@@ -267,7 +268,7 @@ export class AnalyzerService {
             const minAge = Number.parseFloat(this.configService.get<string>('MIN_AGE_HOURS', '1'));
             const minConfidence = Number.parseFloat(this.configService.get<string>('MIN_BUY_CONFIDENCE', '0.7'));
 
-            const response = await axios.get<{ pairs: DexScreenerPair[] }>(
+            const response = await DexLimiter.get<{ pairs: DexScreenerPair[] }>(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
                 { 
                     timeout: 5000,

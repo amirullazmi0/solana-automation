@@ -7,6 +7,7 @@ import * as https from 'https';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
 import { TradeService } from '../trade/trade.service';
+import { DexLimiter } from '../common/dex-limiter';
 
 @Injectable()
 export class PriceMonitorService {
@@ -138,7 +139,7 @@ export class PriceMonitorService {
 
     private async getLiquidityOnly(tokenMint: string): Promise<number | null> {
         try {
-            const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, { 
+            const response = await DexLimiter.get<{ pairs: Array<{ liquidity?: { usd?: number } }> }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, { 
                 timeout: 5000,
                 httpsAgent: this.getHttpsAgent()
             });
@@ -328,7 +329,15 @@ export class PriceMonitorService {
     private async checkBuyPressure(tokenMint: string): Promise<boolean> {
         try {
             const url = `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`;
-            const response = await axios.get(url, {
+            interface DexPair {
+                txns?: {
+                    m5?: {
+                        buys?: number;
+                        sells?: number;
+                    };
+                };
+            }
+            const response = await DexLimiter.get<{ pairs: DexPair[] }>(url, {
                 httpsAgent: this.getHttpsAgent(),
                 timeout: 5000,
             });
