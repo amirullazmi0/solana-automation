@@ -144,7 +144,7 @@ export class AnalyzerService {
             const rugResult = await this.checkRugCheckAPI(tokenMint);
             if (!rugResult.passed) {
                 this.logger.warn(`[${tokenMint}] 🛑 RugCheck FAILED: ${rugResult.reason}. Skip.`);
-                return { safe: false, reason: rugResult.reason || 'rugcheck_failed', metadata: baseMetadata };
+                return { safe: false, reason: rugResult.reason || 'rugcheck_failed', permanent: rugResult.permanent, metadata: baseMetadata };
             }
 
             this.logger.log(`[${tokenMint}] ✅ Passed Advanced Filters (VoL: ${traction.volScore?.toFixed(3)}, Z: ${traction.zScore?.toFixed(1)}, Safety: ${rugResult.safetyIndex?.toFixed(2)}). Ready!`);
@@ -403,6 +403,7 @@ export class AnalyzerService {
         topHolder?: string; 
         reason?: string;
         safetyIndex?: number;
+        permanent?: boolean;
     }> {
         try {
             const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
@@ -410,7 +411,7 @@ export class AnalyzerService {
                 httpsAgent: this.getHttpsAgent()
             });
 
-            if (!response.data) return { passed: false, reason: 'rugcheck_no_data' };
+            if (!response.data) return { passed: false, reason: 'rugcheck_no_data', permanent: false };
 
             const topHolders = (response.data.topHolders as RugCheckHolder[]) || [];
             const knownAccounts = (response.data.knownAccounts as Record<string, RugCheckKnownAccount | undefined>) || {};
@@ -419,7 +420,7 @@ export class AnalyzerService {
             const filteredHolders = topHolders.filter(h => {
                 const known = knownAccounts[h.address] || knownAccounts[h.owner];
                 const isExcludedType = known && (known.type === 'AMM' || known.type === 'LOCKER');
-                const isSystemAccount = h.owner === '11111111111111111111111111111111';
+                const isSystemAccount = h.owner === '1111111111111111111111111111111';
                 return !isExcludedType && !isSystemAccount;
             });
 
@@ -427,9 +428,10 @@ export class AnalyzerService {
             const top10SumPct = filteredHolders.slice(0, 10).reduce((sum: number, h: RugCheckHolder) => sum + (h.pct || 0), 0);
             const safetyIndex = 1 - (top10SumPct / 100);
 
-            if (safetyIndex < 0.8) { // Berarti Top 10 pegang > 20%
+            const minSafetyIndex = Number.parseFloat(this.configService.get<string>('RUGCHECK_MIN_SAFETY_INDEX', '0.65'));
+            if (safetyIndex < minSafetyIndex) {
                 this.logger.warn(`[${tokenMint}] 🛑 High Concentration: Top 10 pegang ${(1 - safetyIndex) * 100}%. Skip.`);
-                return { passed: false, reason: 'high_concentration', safetyIndex };
+                return { passed: false, reason: 'high_concentration', safetyIndex, permanent: true };
             }
 
             // 🔥 LP Safety Check: Accept burned OR locked (PumpFun uses locked mechanism)
@@ -442,13 +444,13 @@ export class AnalyzerService {
             // PumpFun tokens tanpa market data di RugCheck = normal (LP di bonding curve)
             if (!lpSafe && markets.length > 0 && !isPumpFunToken) {
                 this.logger.warn(`[${tokenMint}] 🛑 LP NOT BURNED/LOCKED. Skip.`);
-                return { passed: false, reason: 'lp_not_burned', safetyIndex };
+                return { passed: false, reason: 'lp_not_burned', safetyIndex, permanent: true };
             }
 
             const score = response.data.score || 0;
             if (score > 2000) { // Lebih ketat dari sebelumnya (3000)
                 this.logger.warn(`[${tokenMint}] 🛑 High Risk Score: ${score}. Skip.`);
-                return { passed: false, reason: 'high_risk_score', safetyIndex };
+                return { passed: false, reason: 'high_risk_score', safetyIndex, permanent: true };
             }
 
             // ⛔ HONEYPOT & PERMISSIONS CHECK
@@ -461,12 +463,12 @@ export class AnalyzerService {
 
             if (hasHoneypotRisk) {
                 this.logger.warn(`[${tokenMint}] 🛑 HONEYPOT/FREEZE RISK detected. Skip.`);
-                return { passed: false, reason: 'honeypot_detected', safetyIndex };
+                return { passed: false, reason: 'honeypot_detected', safetyIndex, permanent: true };
             }
 
             const highRisks = risks.filter((risk) => risk.level === 'danger');
             if (highRisks.length > 0) {
-                return { passed: false, reason: 'danger_risks_detected', safetyIndex };
+                return { passed: false, reason: 'danger_risks_detected', safetyIndex, permanent: true };
             }
 
             // 🧑‍💻 CREATOR BALANCE CHECK (Anti-Dump)
@@ -476,7 +478,7 @@ export class AnalyzerService {
                 const creatorPct = creatorHolder ? creatorHolder.pct : 0;
                 if (creatorPct > 3) {
                     this.logger.warn(`[${tokenMint}] 🛑 Creator holds too much (${creatorPct.toFixed(2)}%). Skip.`);
-                    return { passed: false, reason: 'creator_holds_too_much', safetyIndex };
+                    return { passed: false, reason: 'creator_holds_too_much', safetyIndex, permanent: true };
                 }
             }
 
@@ -489,7 +491,9 @@ export class AnalyzerService {
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`RugCheck API Error: ${msg}`);
-            return { passed: false, reason: 'rugcheck_error' };
+            return { passed: false, reason: 'rugcheck_error', permanent: false };
         }
     }
 }
+
+

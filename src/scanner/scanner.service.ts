@@ -120,7 +120,6 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
         // TTL 30 menit untuk koin dari WS (Lebih agresif dibanding polling)
         this.seenTokens.set(mint, now + 30 * 60 * 1000);
-        this.activeMonitoring++;
         this.processNewToken(mint);
     }
 
@@ -189,7 +188,6 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     this.seenTokens.set(mint, now + 6 * 60 * 60 * 1000);
                     this.logger.log(`🔍 [Discovery] Potential Second-Wave Candidate: ${mint}`);
 
-                    this.activeMonitoring++;
                     this.processNewToken(mint);
                 }
             } catch (error) {
@@ -229,7 +227,6 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     // Jika koin sudah di-scan secara live, skip biar nggak double
                     if (this.activeMonitoring >= this.MAX_CONCURRENT) continue;
                     
-                    this.activeMonitoring++;
                     this.processNewToken(item.tokenMint);
                     await new Promise(res => setTimeout(res, 100)); // Stagger 100ms agar aman dari rate limit
                 }
@@ -263,9 +260,15 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
     private async processNewToken(tokenMint: string) {
         if (this.processingTokens.has(tokenMint)) return;
-        this.processingTokens.add(tokenMint);
         
+        let incremented = false;
         try {
+            if (this.activeMonitoring >= this.MAX_CONCURRENT) {
+                return;
+            }
+            this.processingTokens.add(tokenMint);
+            this.activeMonitoring++;
+            incremented = true;
             // 🛡️ Tembok Pelindung: Cek dulu status di DB. Kalau sudah FAILED/TRADED, jangan diproses lagi.
             const existing = await this.prismaService.watchlist.findUnique({
                 where: { tokenMint }
@@ -452,7 +455,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             });
             this.seenTokens.delete(tokenMint);
         } finally {
-            this.activeMonitoring--;
+            if (incremented) {
+                this.activeMonitoring--;
+            }
             this.processingTokens.delete(tokenMint);
         }
     }
