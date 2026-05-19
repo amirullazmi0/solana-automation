@@ -6,6 +6,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { Connection, PublicKey, Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
 import axios from 'axios';
+import * as https from 'https';
 import { TokenMetadata } from '../analyzer/analyzer.service';
 import { ModuleRef } from '@nestjs/core';
 import { TradeService } from '../trade/trade.service';
@@ -19,6 +20,15 @@ export class ReportingService implements OnModuleInit {
     private readonly connection: Connection;
     private readonly walletPublicKey: string;
     private readonly isDryRun: boolean;
+    private readonly httpsAgent: https.Agent;
+
+    // Cache for resolved IPs
+    private ipCache: Record<string, string> = {
+        'api.jup.ag': '18.239.105.107',        // Jupiter Main
+        'api.dexscreener.com': '104.26.13.233',  // DexScreener API
+        '1.1.1.1': '1.1.1.1',
+        '8.8.8.8': '8.8.8.8',
+    };
 
     constructor(
         private readonly configService: ConfigService,
@@ -53,6 +63,28 @@ export class ReportingService implements OnModuleInit {
                 'Telegram bot token not provided. Alerts will be logged to console only.',
             );
         }
+
+        // Inisialisasi DNS Hardening HTTPS Agent dengan keepAlive
+        this.httpsAgent = new https.Agent({
+            family: 4,
+            keepAlive: true,
+            lookup: async (hostname, options, cb) => {
+                try {
+                    const ip = await this.resolveDns(hostname);
+                    if (ip) {
+                        cb(null, ip, 4);
+                    } else {
+                        import('dns').then(({ lookup: dnsLookup }) => {
+                            dnsLookup(hostname, options, cb);
+                        }).catch((err) => {
+                            cb(err, '', 4);
+                        });
+                    }
+                } catch (e) {
+                    cb(e as Error, '', 4);
+                }
+            }
+        });
     }
 
     onModuleInit() {
@@ -262,6 +294,7 @@ export class ReportingService implements OnModuleInit {
         try {
             const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
                 timeout: 5000,
+                httpsAgent: this.httpsAgent,
             });
             return response.data?.pairs?.[0]?.baseToken?.symbol || 'UNKNOWN';
         } catch {
@@ -332,7 +365,8 @@ export class ReportingService implements OnModuleInit {
             const apiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
             const response = await axios.get(`https://api.jup.ag/price/v3?ids=${tokenMint}`, {
                 timeout: 5000,
-                headers: { 'x-api-key': apiKey }
+                headers: { 'x-api-key': apiKey },
+                httpsAgent: this.httpsAgent,
             }).catch(() => null);
 
             if (response?.data) {
@@ -344,7 +378,8 @@ export class ReportingService implements OnModuleInit {
             }
 
             const dexResponse = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
-                timeout: 5000
+                timeout: 5000,
+                httpsAgent: this.httpsAgent,
             }).catch(() => null);
 
             if (dexResponse?.data?.pairs?.[0]?.priceUsd) {
@@ -574,5 +609,45 @@ export class ReportingService implements OnModuleInit {
         return Object.entries(reasons)
             .map(([reason, count]) => `⚡ ${reason.replace(/_/g, ' ')}: \`${count}\``)
             .join('\n');
+    }
+
+    /**
+     * Helper to resolve DNS using Cloudflare/Google DNS-over-HTTPS if standard lookup fails
+     */
+    private async resolveDns(hostname: string): Promise<string | null> {
+        if (this.ipCache[hostname]) return this.ipCache[hostname];
+
+        try {
+            this.logger.log(`[DNS] Resolving ${hostname} via Cloudflare/Google DoH...`);
+            // Try Cloudflare first
+            let response = await axios
+                .get(`https://1.1.1.1/dns-query?name=${hostname}&type=A`, {
+                    headers: { accept: 'application/dns-json' },
+                    timeout: 5000,
+                    httpsAgent: new https.Agent({ family: 4 }),
+                })
+                .catch(() => null);
+
+            // If Cloudflare fails, try Google
+            if (!response) {
+                response = await axios
+                    .get(`https://8.8.8.8/resolve?name=${hostname}&type=A`, {
+                        timeout: 5000,
+                        httpsAgent: new https.Agent({ family: 4 }),
+                    })
+                    .catch(() => null);
+            }
+
+            const ip = response?.data?.Answer?.[0]?.data;
+            if (ip && /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) {
+                this.logger.log(`[DNS] Resolved ${hostname} to ${ip}`);
+                this.ipCache[hostname] = ip;
+                return ip;
+            }
+        } catch {
+            // Silence DNS errors
+        }
+
+        return null;
     }
 }
