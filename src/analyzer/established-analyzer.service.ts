@@ -131,7 +131,9 @@ export class EstablishedAnalyzerService {
                 }
 
                 return true;
-            } catch {
+            } catch (e) {
+                const errName = e instanceof Error ? (e.name || e.message) : String(e);
+                this.logger.warn(`[${tokenMint}] Mint authority check failed (attempt ${attempt}/${maxRetries}): ${errName}`);
                 if (attempt < maxRetries) {
                     await new Promise(res => setTimeout(res, 1000 * attempt));
                 }

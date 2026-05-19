@@ -330,13 +330,17 @@ export class ReportingService implements OnModuleInit {
     async fetchCurrentPrice(tokenMint: string): Promise<number | null> {
         try {
             const apiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
-            const response = await axios.get(`https://api.jup.ag/price/v2?ids=${tokenMint}`, {
+            const response = await axios.get(`https://api.jup.ag/price/v3?ids=${tokenMint}`, {
                 timeout: 5000,
                 headers: { 'x-api-key': apiKey }
             }).catch(() => null);
 
-            if (response?.data?.data?.[tokenMint]?.price) {
-                return parseFloat(response.data.data[tokenMint].price);
+            if (response?.data) {
+                const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
+                const price = data?.[tokenMint]?.usdPrice;
+                if (price && !isNaN(price)) {
+                    return price;
+                }
             }
 
             const dexResponse = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {

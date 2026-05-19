@@ -178,12 +178,13 @@ export class AnalyzerService {
 
     private async getJupiterPrice(tokenMint: string): Promise<number | null> {
         try {
-            const response = await axios.get(`https://api.jup.ag/price/v2?ids=${tokenMint}`, {
+            const response = await axios.get(`https://api.jup.ag/price/v3?ids=${tokenMint}`, {
                 timeout: 3000,
                 headers: { 'x-api-key': this.jupiterApiKey },
                 httpsAgent: this.getHttpsAgent()
             });
-            return parseFloat(response.data?.data?.[tokenMint]?.price) || null;
+            const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
+            return data?.[tokenMint]?.usdPrice || null;
         } catch {
             return null;
         }
@@ -215,9 +216,8 @@ export class AnalyzerService {
 
                 return true; // Both null = safe
             } catch (e) {
-                if (e instanceof Error) {
-                    this.logger.error(`[${tokenMint}] Mint authority check failed (attempt ${attempt}/${maxRetries}): ${e.message}`);
-                }
+                const errName = e instanceof Error ? (e.name || e.message) : String(e);
+                this.logger.warn(`[${tokenMint}] Mint authority check failed (attempt ${attempt}/${maxRetries}): ${errName}`);
                 if (attempt < maxRetries) {
                     await new Promise(res => setTimeout(res, 1000 * attempt));
                 }

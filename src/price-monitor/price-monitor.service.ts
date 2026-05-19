@@ -113,16 +113,19 @@ export class PriceMonitorService {
         try {
             const hostname = 'api.jup.ag';
             const ids = mints.join(',');
-            const response = await axios.get(`https://${hostname}/price/v2?ids=${ids}`, {
+            const response = await axios.get(`https://${hostname}/price/v3?ids=${ids}`, {
                 timeout: 3000,
                 headers: { 'x-api-key': this.jupiterApiKey },
                 httpsAgent: this.getHttpsAgent()
             });
 
-            const data = response.data?.data || {};
-            for (const mint of mints) {
-                if (data[mint]?.price) {
-                    result[mint] = parseFloat(data[mint].price);
+            const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
+            if (data) {
+                for (const mint of mints) {
+                    const tokenData = data[mint];
+                    if (tokenData && typeof tokenData.usdPrice === 'number') {
+                        result[mint] = tokenData.usdPrice;
+                    }
                 }
             }
         } catch (error) {

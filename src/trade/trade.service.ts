@@ -552,11 +552,12 @@ export class TradeService implements OnModuleInit {
      */
     private async getSellPriceFallback(tokenMint: string): Promise<number | null> {
         try {
-            const response = await axios.get(`https://api.jup.ag/price/v2?ids=${tokenMint}`, {
+            const response = await axios.get(`https://api.jup.ag/price/v3?ids=${tokenMint}`, {
                 timeout: 5000,
                 headers: { 'x-api-key': this.jupiterApiKey }
             });
-            const price = parseFloat(response.data?.data?.[tokenMint]?.price);
+            const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
+            const price = data?.[tokenMint]?.usdPrice;
             return price && !isNaN(price) ? price : null;
         } catch {
             return null;
@@ -583,11 +584,12 @@ export class TradeService implements OnModuleInit {
 
     async getSolPrice(): Promise<number> {
         try {
-            const response = await axios.get(`https://api.jup.ag/price/v2?ids=${WRAPPED_SOL_MINT}`, {
+            const response = await axios.get(`https://api.jup.ag/price/v3?ids=${WRAPPED_SOL_MINT}`, {
                 timeout: 3000,
                 headers: { 'x-api-key': this.jupiterApiKey }
             });
-            return parseFloat(response.data?.data?.[WRAPPED_SOL_MINT]?.price) || 150;
+            const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
+            return data?.[WRAPPED_SOL_MINT]?.usdPrice || 150;
         } catch {
             return 150; // Fallback jika API Jupiter down
         }
