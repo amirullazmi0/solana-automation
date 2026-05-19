@@ -7,6 +7,7 @@ import * as https from 'https';
 import { DexScreenerPair, TokenMetadata } from './analyzer.service';
 import { TradeService } from '../trade/trade.service';
 import { ModuleRef } from '@nestjs/core';
+import { PrismaService } from '../prisma/prisma.service';
 
 export interface ReboundResult {
     isEstablished: boolean;
@@ -43,6 +44,7 @@ export class EstablishedAnalyzerService {
     constructor(
         private readonly configService: ConfigService,
         private readonly moduleRef: ModuleRef,
+        private readonly prismaService: PrismaService,
     ) {
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
         this.connection = new Connection(rpcEndpoint, 'confirmed');
@@ -331,6 +333,17 @@ export class EstablishedAnalyzerService {
             const rugResult = await this.checkRugCheckLP(tokenMint, isPumpFunToken);
             if (!rugResult.passed) {
                 return { isEstablished: true, executed: false, reason: `established_rugcheck_failed_${rugResult.reason}` };
+            }
+
+            // 🧑‍💻 DEV BLACKLIST CHECK (Anti-Rug)
+            if (rugResult.creator) {
+                const isBlacklisted = await this.prismaService.developerBlacklist.findUnique({
+                    where: { address: rugResult.creator }
+                });
+                if (isBlacklisted) {
+                    this.logger.warn(`[${tokenMint}] 🛑 Established Creator ${rugResult.creator} is blacklisted (Previous dump/rug). Skip.`);
+                    return { isEstablished: true, executed: false, reason: 'established_creator_blacklisted' };
+                }
             }
 
             // 🚀 SEMUA FILTER LOLOS - SIAP EKSEKUSI

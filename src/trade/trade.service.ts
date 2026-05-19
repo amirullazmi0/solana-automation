@@ -379,6 +379,24 @@ export class TradeService implements OnModuleInit {
                         }
                     });
                 }
+
+                // 🧑‍💻 AUTO BLACKLIST ON DEV_DUMP/RUGPULL
+                if (['DEV_DUMP', 'RUGPULL'].includes(exitReason) && trade.creatorAddress) {
+                    try {
+                        await this.prismaService.developerBlacklist.upsert({
+                            where: { address: trade.creatorAddress },
+                            update: { reason: exitReason },
+                            create: {
+                                address: trade.creatorAddress,
+                                reason: exitReason,
+                            },
+                        });
+                        this.logger.warn(`[Blacklist] Automatically blacklisted creator ${trade.creatorAddress} for: ${exitReason}`);
+                    } catch (dbErr) {
+                        const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
+                        this.logger.error(`[Blacklist] Failed to blacklist creator ${trade.creatorAddress}: ${msg}`);
+                    }
+                }
                 
                 await this.reportingService.sendSellAlert(
                     trade.tokenMint,

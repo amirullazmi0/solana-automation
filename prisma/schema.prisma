@@ -70,3 +70,11 @@ model Watchlist {
   status        WatchlistStatus @default(PENDING)
   reason        String?
 }
+
+model DeveloperBlacklist {
+  id        Int      @id @default(autoincrement())
+  address   String   @unique
+  reason    String
+  createdAt DateTime @default(now())
+}
+

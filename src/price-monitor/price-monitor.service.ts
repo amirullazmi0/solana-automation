@@ -287,29 +287,31 @@ export class PriceMonitorService {
             return;
         }
 
-        // 5. EXIT CONDITION: Patience Protocol (10-Minute SL)
+        // 5. EXIT CONDITION: Patience Protocol (10-Minute SL with 20-Minute Hard Cap)
         if (profitPercent <= -effectiveStopLossPercent) {
-            // 🛡️ BUY PRESSURE CHECK: Jika masih ada buying pressure kuat, JANGAN JUAL (biarpun timer habis)
-            const hasBuyPressure = await this.checkBuyPressure(trade.tokenMint);
-            if (hasBuyPressure) {
-                this.logger.log(`[Slot ${trade.slotNumber}] 🟢 Buy pressure detected in SL zone! DIAMOND HANDS — Delaying exit...`);
-                return;
-            }
-
             if (!trade.slTriggeredAt) {
-                this.logger.warn(`[Slot ${trade.slotNumber}] 🛑 Stop Loss zone. Starting 10-minute patience timer...`);
+                this.logger.warn(`[Slot ${trade.slotNumber}] 🛑 Stop Loss zone. Starting 10-minute patience timer (Hard Cap 20-min)...`);
                 await this.prismaService.trade.update({
                     where: { id: trade.id },
                     data: { slTriggeredAt: new Date() }
                 });
-            } else {
-                const elapsedMin = (Date.now() - new Date(trade.slTriggeredAt).getTime()) / (1000 * 60);
-                if (elapsedMin >= 10) {
-                    this.logger.warn(`[Slot ${trade.slotNumber}] 🕒 10 minutes passed with no buy pressure. Executing FINAL STOP LOSS.`);
-                    await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
-                } else {
-                    this.logger.log(`[Slot ${trade.slotNumber}] 🕒 In SL zone. Waiting... (${(10 - elapsedMin).toFixed(1)} min left)`);
+                return; // Tunggu di iterasi ini
+            }
+
+            const elapsedMin = (Date.now() - new Date(trade.slTriggeredAt).getTime()) / (1000 * 60);
+
+            if (elapsedMin >= 10) {
+                // Check buy pressure untuk melonggarkan waktu jual (Diamond Hands)
+                const hasBuyPressure = await this.checkBuyPressure(trade.tokenMint);
+                if (hasBuyPressure && elapsedMin < 20) {
+                    this.logger.log(`[Slot ${trade.slotNumber}] 🟢 Buy pressure detected in SL zone! DIAMOND HANDS — Delaying exit... (${(20 - elapsedMin).toFixed(1)} min left to Hard Cap)`);
+                    return;
                 }
+
+                this.logger.warn(`[Slot ${trade.slotNumber}] 🕒 ${elapsedMin >= 20 ? '20 minutes Hard Cap reached' : '10 minutes passed with no buy pressure'}. Executing FINAL STOP LOSS.`);
+                await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
+            } else {
+                this.logger.log(`[Slot ${trade.slotNumber}] 🕒 In SL zone. Waiting... (${(10 - elapsedMin).toFixed(1)} min left of initial timer)`);
             }
         } else {
             // ✅ RECOVERY: Reset SL timer if price recovers

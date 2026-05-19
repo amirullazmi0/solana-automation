@@ -4,6 +4,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { getMint } from '@solana/spl-token';
 import axios from 'axios';
 import * as https from 'https';
+import { PrismaService } from '../prisma/prisma.service';
 
 export interface SocialLink {
     type: string;
@@ -80,7 +81,10 @@ export class AnalyzerService {
         'api.dexscreener.com': '104.26.8.188',
     };
 
-    constructor(private readonly configService: ConfigService) {
+    constructor(
+        private readonly configService: ConfigService,
+        private readonly prismaService: PrismaService,
+    ) {
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
         this.connection = new Connection(rpcEndpoint, 'confirmed');
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
@@ -145,6 +149,17 @@ export class AnalyzerService {
             if (!rugResult.passed) {
                 this.logger.warn(`[${tokenMint}] 🛑 RugCheck FAILED: ${rugResult.reason}. Skip.`);
                 return { safe: false, reason: rugResult.reason || 'rugcheck_failed', permanent: rugResult.permanent, metadata: baseMetadata };
+            }
+
+            // 🧑‍💻 DEV BLACKLIST CHECK (Anti-Rug)
+            if (rugResult.creator) {
+                const isBlacklisted = await this.prismaService.developerBlacklist.findUnique({
+                    where: { address: rugResult.creator }
+                });
+                if (isBlacklisted) {
+                    this.logger.warn(`[${tokenMint}] 🛑 Creator ${rugResult.creator} is blacklisted (Previous dump/rug). Skip.`);
+                    return { safe: false, reason: 'creator_blacklisted', permanent: true, metadata: baseMetadata };
+                }
             }
 
             this.logger.log(`[${tokenMint}] ✅ Passed Advanced Filters (VoL: ${traction.volScore?.toFixed(3)}, Z: ${traction.zScore?.toFixed(1)}, Safety: ${rugResult.safetyIndex?.toFixed(2)}). Ready!`);
