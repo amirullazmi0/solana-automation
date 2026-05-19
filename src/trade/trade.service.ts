@@ -1,14 +1,13 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { ModuleRef } from '@nestjs/core';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+import axios from 'axios';
 import bs58 from 'bs58';
+import * as https from 'https';
+import { TokenMetadata } from '../analyzer/analyzer.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
-import { ModuleRef } from '@nestjs/core';
-import { TokenMetadata } from '../analyzer/analyzer.service';
-import axios from 'axios';
-import * as https from 'https';
-import { lookup } from 'dns';
 
 export const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -26,6 +25,7 @@ export class TradeService implements OnModuleInit {
     private readonly slippageBps: number;
     private readonly jupiterApiKey: string;
     private readonly isDryRun: boolean;
+    private readonly httpsAgent: https.Agent;
 
     // Cache for resolved IPs
     private ipCache: Record<string, string> = {
@@ -54,6 +54,28 @@ export class TradeService implements OnModuleInit {
 
         this.slippageBps = Number.parseInt(this.configService.get<string>('SLIPPAGE_BPS', '100'), 10);
         this.isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
+
+        // Inisialisasi DNS Hardening HTTPS Agent dengan keepAlive
+        this.httpsAgent = new https.Agent({
+            family: 4,
+            keepAlive: true,
+            lookup: async (hostname, options, cb) => {
+                try {
+                    const ip = await this.resolveDns(hostname);
+                    if (ip) {
+                        cb(null, ip, 4);
+                    } else {
+                        import('dns').then(({ lookup: dnsLookup }) => {
+                            dnsLookup(hostname, options, cb);
+                        }).catch((err) => {
+                            cb(err, '', 4);
+                        });
+                    }
+                } catch (e) {
+                    cb(e as Error, '', 4);
+                }
+            }
+        });
     }
 
     private get reportingService(): ReportingService {
@@ -314,6 +336,9 @@ export class TradeService implements OnModuleInit {
             const isUrgent = ['STOP_LOSS', 'DEV_DUMP', 'RUGPULL'].includes(exitReason);
             const sellSlippage = isUrgent ? 1500 : this.slippageBps;
             
+            // 🚀 Panic Gas Accel: Hajar priority fee tinggi (0.0005 SOL = 500,000 lamports) biar instan masuk block pertama
+            const sellPriorityFee = isUrgent ? 500_000 : undefined;
+            
             const { success, entryPrice: exitPriceResult, error, txHash } = await this.executeJupiterSwap(
                 trade.tokenMint,
                 'So11111111111111111111111111111111111111112',
@@ -321,7 +346,8 @@ export class TradeService implements OnModuleInit {
                 'SELL',
                 undefined,
                 0,
-                sellSlippage
+                sellSlippage,
+                sellPriorityFee
             );
 
             if (success) {
@@ -400,21 +426,7 @@ export class TradeService implements OnModuleInit {
                     'Accept-Encoding': 'gzip, deflate, br',
                     'x-api-key': this.jupiterApiKey
                 },
-                httpsAgent: new https.Agent({
-                    family: 4,
-                    lookup: async (h, o, cb) => {
-                        try {
-                            const ip = await this.resolveDns(h);
-                            if (ip) {
-                                cb(null, ip, 4);
-                            } else {
-                                lookup(h, o, cb);
-                            }
-                        } catch (e) {
-                            cb(e as Error, '', 4);
-                        }
-                    }
-                }),
+                httpsAgent: this.httpsAgent,
             };
 
             // 🛠 DYNAMIC SLIPPAGE: Naikin slippage tiap kali gagal
@@ -463,7 +475,9 @@ export class TradeService implements OnModuleInit {
             // ⛽ DYNAMIC FEES: Naikin gas tiap kali gagal (Auto-Multiplier + Retry Bonus)
             const baseMultiplier = Number.parseInt(this.configService.get<string>('TRADE_PRIORITY_MULTIPLIER', '2'), 10);
             const multiplier = baseMultiplier + (retryCount * 2);
-            const feeConfig = priorityFeeLamports && priorityFeeLamports > 0 ? priorityFeeLamports : { autoMultiplier: multiplier };
+            const feeConfig = priorityFeeLamports && priorityFeeLamports > 0 
+                ? { customFeeLamports: priorityFeeLamports } 
+                : { autoMultiplier: multiplier };
 
             const swapResponse = await axios.post(
                 `${baseUrl}/swap/v1/swap`,
@@ -517,6 +531,7 @@ export class TradeService implements OnModuleInit {
             // Try DexScreener first
             const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
                 timeout: 3000,
+                httpsAgent: this.httpsAgent,
             });
             const dexSymbol = response.data?.pairs?.[0]?.baseToken?.symbol;
             if (dexSymbol) return `$${dexSymbol}`;
@@ -554,7 +569,8 @@ export class TradeService implements OnModuleInit {
         try {
             const response = await axios.get(`https://api.jup.ag/price/v3?ids=${tokenMint}`, {
                 timeout: 5000,
-                headers: { 'x-api-key': this.jupiterApiKey }
+                headers: { 'x-api-key': this.jupiterApiKey },
+                httpsAgent: this.httpsAgent,
             });
             const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
             const price = data?.[tokenMint]?.usdPrice;
@@ -586,7 +602,8 @@ export class TradeService implements OnModuleInit {
         try {
             const response = await axios.get(`https://api.jup.ag/price/v3?ids=${WRAPPED_SOL_MINT}`, {
                 timeout: 3000,
-                headers: { 'x-api-key': this.jupiterApiKey }
+                headers: { 'x-api-key': this.jupiterApiKey },
+                httpsAgent: this.httpsAgent,
             });
             const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
             return data?.[WRAPPED_SOL_MINT]?.usdPrice || 150;
