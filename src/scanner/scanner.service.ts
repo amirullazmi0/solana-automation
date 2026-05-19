@@ -273,6 +273,17 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 return;
             }
 
+            // 🚀 PROTEKSI STAGNANT: Hentikan loop retry jika koin sudah di-check >= 50 kali
+            if (existing && existing.checkCount >= 50 && existing.status === 'PENDING') {
+                this.logger.log(`[${tokenMint}] ⏳ Stagnant timeout reached (${existing.checkCount} checks). Marking as FAILED.`);
+                await this.prismaService.watchlist.update({
+                    where: { tokenMint },
+                    data: { status: 'FAILED', reason: 'stagnant_timeout' }
+                });
+                this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); // Cooldown 6 jam
+                return;
+            }
+
             // 🛡️ ANTI-REPEAT BUY: Cek apakah token ini sudah pernah di-trade dalam 24 jam terakhir
             const recentTrade = await this.prismaService.trade.findFirst({
                 where: {
