@@ -6,6 +6,7 @@ import axios from 'axios';
 import * as https from 'https';
 import { DexScreenerPair, TokenMetadata } from './analyzer.service';
 import { TradeService } from '../trade/trade.service';
+import { ModuleRef } from '@nestjs/core';
 
 interface RugCheckMarket {
     lpType: string;
@@ -23,10 +24,14 @@ export class EstablishedAnalyzerService {
 
     constructor(
         private readonly configService: ConfigService,
-        private readonly tradeService: TradeService,
+        private readonly moduleRef: ModuleRef,
     ) {
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
         this.connection = new Connection(rpcEndpoint, 'confirmed');
+    }
+
+    private get tradeService(): TradeService {
+        return this.moduleRef.get(TradeService, { strict: false });
     }
 
     private getHttpsAgent() {
