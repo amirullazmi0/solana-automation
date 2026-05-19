@@ -271,7 +271,7 @@ export class PriceMonitorService {
         }
 
         // 🛡️ Trailing Stop Trigger
-        if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice && currentPrice > trade.entryPrice) {
+        if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice) {
             // 🧠 DIAMOND HAND PASS: Kalau Dev masih hold, kasih nafas 3% lagi
             if (!devDumped && trade.creatorAddress) {
                 const leniencyPrice = trade.trailingStopPrice * 0.97;

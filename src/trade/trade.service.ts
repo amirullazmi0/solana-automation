@@ -458,6 +458,16 @@ export class TradeService implements OnModuleInit {
             const quoteResponse = await axios.get(quoteUrl, config);
             const quoteData = quoteResponse.data;
 
+            // 🛡️ PRICE IMPACT GUARD
+            if (side === 'BUY' && quoteData.priceImpactPct) {
+                const priceImpact = parseFloat(quoteData.priceImpactPct);
+                const maxPriceImpact = parseFloat(this.configService.get<string>('MAX_PRICE_IMPACT_PCT', '15.0'));
+                if (priceImpact > maxPriceImpact) {
+                    this.logger.warn(`[Jupiter] 🛑 BUY rejected due to high price impact: ${priceImpact}% (Max allowed: ${maxPriceImpact}%)`);
+                    return { success: false, entryPrice: 0, error: `high_price_impact: ${priceImpact}%` };
+                }
+            }
+
             let price = 0;
             const decimals = await this.getTokenDecimals(side === 'BUY' ? outputMint : inputMint);
             if (side === 'BUY') {
@@ -494,7 +504,7 @@ export class TradeService implements OnModuleInit {
             const baseMultiplier = Number.parseInt(this.configService.get<string>('TRADE_PRIORITY_MULTIPLIER', '2'), 10);
             const multiplier = baseMultiplier + (retryCount * 2);
             const feeConfig = priorityFeeLamports && priorityFeeLamports > 0 
-                ? { customFeeLamports: priorityFeeLamports } 
+                ? priorityFeeLamports 
                 : { autoMultiplier: multiplier };
 
             const swapResponse = await axios.post(

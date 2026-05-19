@@ -374,6 +374,15 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
             while (Date.now() - startTime < maxWaitTime) {
                 try {
+                    // Update checkCount & lastCheckedAt in DB at the start of each iteration
+                    await this.prismaService.watchlist.update({
+                        where: { tokenMint },
+                        data: {
+                            lastCheckedAt: new Date(),
+                            checkCount: { increment: 1 }
+                        }
+                    });
+
                     // 🛡️ RE-FETCH LATEST DATA
                     const currentItem = await this.prismaService.watchlist.findUnique({ where: { tokenMint } });
                     if (!currentItem || currentItem.status === 'FAILED' || currentItem.status === 'TRADED') return;
@@ -386,16 +395,19 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                 where: { tokenMint },
                                 data: { status: 'TRADED' }
                             });
-                        } else {
-                            if (reboundResult.reason) {
-                                await this.prismaService.watchlist.update({
-                                    where: { tokenMint },
-                                    data: { reason: reboundResult.reason }
-                                });
-                            }
-                            this.logger.debug(`[${tokenMint}] ⏳ Established rebound check. Status remains PENDING (Reason: ${reboundResult.reason || 'not_triggered'}).`);
+                            return; // Selesai jika sudah ditransaksikan
                         }
-                        return; // 🛡️ Jangan bocor ke Lapis 2
+                        if (reboundResult.reason) {
+                            await this.prismaService.watchlist.update({
+                                where: { tokenMint },
+                                data: { reason: reboundResult.reason }
+                            });
+                        }
+                        this.logger.debug(`[${tokenMint}] ⏳ Established rebound check. Status remains PENDING (Reason: ${reboundResult.reason || 'not_triggered'}). Retrying...`);
+                        
+                        // Tunggu sebelum polling berikutnya
+                        await new Promise((res) => setTimeout(res, Number.parseInt(this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'), 10)));
+                        continue; // Lanjut loop pemantauan aktif
                     }
 
                     const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
@@ -463,10 +475,13 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
                     // 🧠 SMART RETRY: Jika kegagalan bersifat sementara (tidak permanen),
                     // biarkan status tetap PENDING agar dicek kembali oleh background radar nanti,
-                    // dan keluarlah dari monitor aktif untuk membebaskan slot concurrency.
+                    // dan teruskan pemantauan aktif di loop ini.
                     if (!result.permanent && result.reason) {
-                        this.logger.debug(`[${tokenMint}] ⏳ Temporary fail (${result.reason}). Keeping in Watchlist for re-check.`);
-                        return;
+                        this.logger.debug(`[${tokenMint}] ⏳ Temporary fail (${result.reason}). Retrying in next poll.`);
+                        
+                        // Tunggu sebelum polling berikutnya
+                        await new Promise((res) => setTimeout(res, Number.parseInt(this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'), 10)));
+                        continue; // Lanjut loop pemantauan aktif
                     }
 
                     if (result.reason) {
