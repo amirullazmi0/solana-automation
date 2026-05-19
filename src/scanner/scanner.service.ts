@@ -338,14 +338,24 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     const currentItem = await this.prismaService.watchlist.findUnique({ where: { tokenMint } });
                     if (!currentItem || currentItem.status === 'FAILED' || currentItem.status === 'TRADED') return;
 
-                    // 🚀 ESTABLISHED REBOUND & CTO BOT SERVICE
-                    const isReboundExecuted = await this.establishedAnalyzerService.analyzeAndExecuteRebound(tokenMint);
-                    if (isReboundExecuted) {
-                        await this.prismaService.watchlist.update({
-                            where: { tokenMint },
-                            data: { status: 'TRADED' }
-                        });
-                        return;
+                    // 🚀 ESTABLISHED REBOUND & CTO BOT SERVICE (Lapis 1)
+                    const reboundResult = await this.establishedAnalyzerService.analyzeAndExecuteRebound(tokenMint);
+                    if (reboundResult.isEstablished) {
+                        if (reboundResult.executed) {
+                            await this.prismaService.watchlist.update({
+                                where: { tokenMint },
+                                data: { status: 'TRADED' }
+                            });
+                        } else {
+                            if (reboundResult.reason) {
+                                await this.prismaService.watchlist.update({
+                                    where: { tokenMint },
+                                    data: { reason: reboundResult.reason }
+                                });
+                            }
+                            this.logger.debug(`[${tokenMint}] ⏳ Established rebound check. Status remains PENDING (Reason: ${reboundResult.reason || 'not_triggered'}).`);
+                        }
+                        return; // 🛡️ Jangan bocor ke Lapis 2
                     }
 
                     const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
@@ -411,19 +421,12 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         return;
                     }
 
-                    // 🧠 SMART RETRY: Kalau cuma "muda", "MCap kecil", "Volume sepi", atau "RPC lemot", jangan jadikan FAILED.
-                    // Biarkan tetap PENDING supaya di-recheck sama background radar nanti.
-                    if (result.reason === 'too_young' || 
-                        result.reason === 'mcap_too_low' || 
-                        result.reason === 'low_surge' || 
-                        result.reason === 'safety_rpc_failed' ||
-                        result.reason === 'bearish_trend' ||
-                        result.reason === 'low_buy_confidence'
-                    ) {
+                    // 🧠 SMART RETRY: Jika kegagalan bersifat sementara (tidak permanen),
+                    // biarkan status tetap PENDING agar dicek kembali oleh background radar nanti,
+                    // dan keluarlah dari monitor aktif untuk membebaskan slot concurrency.
+                    if (!result.permanent && result.reason) {
                         this.logger.debug(`[${tokenMint}] ⏳ Temporary fail (${result.reason}). Keeping in Watchlist for re-check.`);
-                        
-                        // Stagnant timeout sudah dihandle di atas (checkCount >= 50)
-                        return; 
+                        return;
                     }
 
                     if (result.reason) {

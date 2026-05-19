@@ -8,6 +8,12 @@ import { DexScreenerPair, TokenMetadata } from './analyzer.service';
 import { TradeService } from '../trade/trade.service';
 import { ModuleRef } from '@nestjs/core';
 
+export interface ReboundResult {
+    isEstablished: boolean;
+    executed: boolean;
+    reason?: string;
+}
+
 interface RugCheckMarket {
     lpType: string;
     lpStatus: string;
@@ -109,14 +115,14 @@ export class EstablishedAnalyzerService {
     /**
      * Memeriksa status Liquidity Pool (LP) via RugCheck API
      */
-    private async checkRugCheckLP(tokenMint: string, isPumpFun: boolean): Promise<{ passed: boolean; creator?: string; topHolder?: string }> {
+    private async checkRugCheckLP(tokenMint: string, isPumpFun: boolean): Promise<{ passed: boolean; creator?: string; topHolder?: string; reason?: string }> {
         try {
             const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
                 timeout: 5000,
                 httpsAgent: this.getHttpsAgent(),
             });
 
-            if (!response.data) return { passed: false };
+            if (!response.data) return { passed: false, reason: 'no_rugcheck_data' };
 
             const markets = (response.data.markets as RugCheckMarket[]) || [];
             const lpSafe = markets.some((m: RugCheckMarket) => 
@@ -126,7 +132,7 @@ export class EstablishedAnalyzerService {
 
             if (!lpSafe && markets.length > 0 && !isPumpFun) {
                 this.logger.warn(`[${tokenMint}] 🛑 LP is NOT burned or locked. Reject.`);
-                return { passed: false };
+                return { passed: false, reason: 'lp_not_burned_or_locked' };
             }
 
             const topHolders = response.data.topHolders || [];
@@ -138,7 +144,7 @@ export class EstablishedAnalyzerService {
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`[${tokenMint}] RugCheck API Error: ${msg}`);
-            return { passed: false };
+            return { passed: false, reason: `rugcheck_api_error: ${msg}` };
         }
     }
 
@@ -184,7 +190,7 @@ export class EstablishedAnalyzerService {
     /**
      * Endpoint Analisis Utama untuk Token Kandidat
      */
-    public async analyzeAndExecuteRebound(tokenMint: string): Promise<boolean> {
+    public async analyzeAndExecuteRebound(tokenMint: string): Promise<ReboundResult> {
         try {
             // 1. Fetch data dari DexScreener
             const response = await axios.get<{ pairs: DexScreenerPair[] }>(
@@ -193,7 +199,9 @@ export class EstablishedAnalyzerService {
             );
 
             const pair = response.data?.pairs?.[0];
-            if (!pair) return false;
+            if (!pair) {
+                return { isEstablished: false, executed: false, reason: 'no_dex_pair' };
+            }
 
             const minAgeHours = Number.parseFloat(this.configService.get<string>('ESTABLISHED_MIN_AGE_HOURS') ?? this.configService.get<string>('MIN_AGE_HOURS', '24'));
             const maxAgeHours = Number.parseFloat(this.configService.get<string>('ESTABLISHED_MAX_AGE_HOURS') ?? this.configService.get<string>('MAX_AGE_HOURS', '72'));
@@ -206,24 +214,41 @@ export class EstablishedAnalyzerService {
             const symbol = pair.baseToken?.symbol || 'UNKNOWN';
 
             // Filter Umur & Likuiditas Mapan
-            if (ageHours < minAgeHours || ageHours > maxAgeHours) return false;
-            if (liquidity < minLiqUsd) return false;
-            if (marketCap > maxMcapUsd) return false;
+            if (ageHours < minAgeHours) {
+                return { isEstablished: false, executed: false, reason: 'too_young_for_rebound' };
+            }
+            if (ageHours > maxAgeHours) {
+                return { isEstablished: true, executed: false, reason: 'too_old_for_rebound' };
+            }
+            if (liquidity < minLiqUsd) {
+                return { isEstablished: true, executed: false, reason: 'low_established_liquidity' };
+            }
+            if (marketCap > maxMcapUsd) {
+                return { isEstablished: true, executed: false, reason: 'mcap_too_high_for_established' };
+            }
 
             // 2. Periksa Rumus Divergensi Volume-Harga
-            if (!this.checkVolumePriceDivergence(pair)) return false;
+            if (!this.checkVolumePriceDivergence(pair)) {
+                return { isEstablished: true, executed: false, reason: 'rebound_not_triggered' };
+            }
 
             // 3. Periksa Dominasi Pembeli
-            if (!this.checkBuyerDominance(pair)) return false;
+            if (!this.checkBuyerDominance(pair)) {
+                return { isEstablished: true, executed: false, reason: 'low_buyer_dominance' };
+            }
 
             // 4. Periksa Keamanan On-Chain (Authority)
             const isPumpFunToken = tokenMint.toLowerCase().endsWith('pump') || pair.info?.websites?.some(w => w.url.includes('pump.fun')) || false;
             const isAuthoritySafe = await this.checkOnChainAuthority(tokenMint, isPumpFunToken);
-            if (!isAuthoritySafe) return false;
+            if (!isAuthoritySafe) {
+                return { isEstablished: true, executed: false, reason: 'established_security_authority_failed' };
+            }
 
             // 5. Periksa Status LP RugCheck
             const rugResult = await this.checkRugCheckLP(tokenMint, isPumpFunToken);
-            if (!rugResult.passed) return false;
+            if (!rugResult.passed) {
+                return { isEstablished: true, executed: false, reason: `established_rugcheck_failed_${rugResult.reason}` };
+            }
 
             // 🚀 SEMUA FILTER LOLOS - SIAP EKSEKUSI
             this.logger.log(`📈 CONFIRMED REBOUND SIGNALS for $${symbol} (${tokenMint})! Ready to strike.`);
@@ -245,7 +270,7 @@ export class EstablishedAnalyzerService {
             };
 
             // Eksekusi Swap Jupiter V6 dengan Pengaturan Keluar Ketat
-            await this.tradeService.attemptBuy(tokenMint, metadata, undefined, {
+            const buyResult = await this.tradeService.attemptBuy(tokenMint, metadata, undefined, {
                 customSlippageBps: 300, // Slippage 3%
                 priorityFeeSol: 0.0001, // 0.0001 SOL Jito tip / Priority fee
                 targetTakeProfit: 18.0, // TP 18% (antara 15% - 20%)
@@ -253,11 +278,11 @@ export class EstablishedAnalyzerService {
                 targetStopLoss: 20.0, // Hard stop loss 20%
             });
 
-            return true;
+            return { isEstablished: true, executed: buyResult.success, reason: buyResult.success ? undefined : buyResult.message };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`[${tokenMint}] Rebound analysis failed: ${msg}`);
-            return false;
+            return { isEstablished: true, executed: false, reason: `rebound_analysis_error: ${msg}` };
         }
     }
 }

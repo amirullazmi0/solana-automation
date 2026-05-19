@@ -3,15 +3,11 @@ import { PrismaClient } from '@prisma/client';
 async function main() {
     const prisma = new PrismaClient();
     try {
-        const failed = await prisma.watchlist.findMany({
-            where: { status: 'FAILED' },
-            take: 30,
-            orderBy: { lastCheckedAt: 'desc' }
+        const trades = await prisma.trade.findMany({
+            orderBy: { createdAt: 'desc' }
         });
-        console.log('--- RECENT FAILED WATCHLIST ITEMS ---');
-        failed.forEach(f => {
-            console.log(`Mint: ${f.tokenMint}, Reason: ${f.reason}, Status: ${f.status}, checks: ${f.checkCount}`);
-        });
+        console.log('--- ALL TRADES ---');
+        console.log(JSON.stringify(trades, null, 4));
     } catch (e) {
         console.error(e);
     } finally {
