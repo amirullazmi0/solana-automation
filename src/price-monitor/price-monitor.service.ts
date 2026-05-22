@@ -230,9 +230,9 @@ export class PriceMonitorService {
         if (currentPrice > trade.highestPrice && profitPercent >= 2) {
             const calculatedStop = currentPrice * (1 - (effectiveTrailingDistancePercent / 100));
             
-            // 🛡️ ZERO-LOSS PROTECTION: Kalau untung >= 10%, jaring jual MINIMAL di harga beli + 1%
+            // 🛡️ ZERO-LOSS PROTECTION: Kalau untung >= 5%, jaring jual MINIMAL di harga beli + 1%
             let newTrailingStop = Math.max(calculatedStop, trade.entryPrice);
-            if (profitPercent >= 10) {
+            if (profitPercent >= 5) {
                 const breakEvenPlus = trade.entryPrice * 1.01;
                 newTrailingStop = Math.max(newTrailingStop, breakEvenPlus);
             }
@@ -259,9 +259,9 @@ export class PriceMonitorService {
         // Kita butuh volumeSurge dari database (Watchlist) kalau ada, atau kita asumsikan dari momentum
         // Untuk sekarang kita pake multiplier kalau highestPrice naik kenceng
         let dynamicTP = baseTP;
-        if (profitPercent >= baseTP && trade.highestPrice > trade.entryPrice * 1.5) {
-            this.logger.log(`[Slot ${trade.slotNumber}] 🔥 HIGH MOMENTUM DETECTED! Increasing TP target to 60%...`);
-            dynamicTP = 60.0; // Serakah dikit karena koin lagi kenceng
+        if (profitPercent >= baseTP && trade.highestPrice > trade.entryPrice * 1.35) {
+            this.logger.log(`[Slot ${trade.slotNumber}] 🔥 HIGH MOMENTUM DETECTED! Increasing TP target to 50%...`);
+            dynamicTP = 50.0; // Target lebih realistis untuk microcap
         }
 
         // Trigger TP if price hits target
@@ -288,10 +288,10 @@ export class PriceMonitorService {
             return;
         }
 
-        // 5. EXIT CONDITION: Patience Protocol (10-Minute SL with 20-Minute Hard Cap)
+        // 5. EXIT CONDITION: Patience Protocol (5-Minute SL with 10-Minute Hard Cap)
         if (profitPercent <= -effectiveStopLossPercent) {
             if (!trade.slTriggeredAt) {
-                this.logger.warn(`[Slot ${trade.slotNumber}] 🛑 Stop Loss zone. Starting 10-minute patience timer (Hard Cap 20-min)...`);
+                this.logger.warn(`[Slot ${trade.slotNumber}] 🛑 Stop Loss zone. Starting 5-minute patience timer (Hard Cap 10-min)...`);
                 await this.prismaService.trade.update({
                     where: { id: trade.id },
                     data: { slTriggeredAt: new Date() }
@@ -301,18 +301,18 @@ export class PriceMonitorService {
 
             const elapsedMin = (Date.now() - new Date(trade.slTriggeredAt).getTime()) / (1000 * 60);
 
-            if (elapsedMin >= 10) {
+            if (elapsedMin >= 5) {
                 // Check buy pressure untuk melonggarkan waktu jual (Diamond Hands)
                 const hasBuyPressure = await this.checkBuyPressure(trade.tokenMint);
-                if (hasBuyPressure && elapsedMin < 20) {
-                    this.logger.log(`[Slot ${trade.slotNumber}] 🟢 Buy pressure detected in SL zone! DIAMOND HANDS — Delaying exit... (${(20 - elapsedMin).toFixed(1)} min left to Hard Cap)`);
+                if (hasBuyPressure && elapsedMin < 10) {
+                    this.logger.log(`[Slot ${trade.slotNumber}] 🟢 Buy pressure detected in SL zone! DIAMOND HANDS — Delaying exit... (${(10 - elapsedMin).toFixed(1)} min left to Hard Cap)`);
                     return;
                 }
 
-                this.logger.warn(`[Slot ${trade.slotNumber}] 🕒 ${elapsedMin >= 20 ? '20 minutes Hard Cap reached' : '10 minutes passed with no buy pressure'}. Executing FINAL STOP LOSS.`);
+                this.logger.warn(`[Slot ${trade.slotNumber}] 🕒 ${elapsedMin >= 10 ? '10 minutes Hard Cap reached' : '5 minutes passed with no buy pressure'}. Executing FINAL STOP LOSS.`);
                 await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
             } else {
-                this.logger.log(`[Slot ${trade.slotNumber}] 🕒 In SL zone. Waiting... (${(10 - elapsedMin).toFixed(1)} min left of initial timer)`);
+                this.logger.log(`[Slot ${trade.slotNumber}] 🕒 In SL zone. Waiting... (${(5 - elapsedMin).toFixed(1)} min left of initial timer)`);
             }
         } else {
             // ✅ RECOVERY: Reset SL timer if price recovers

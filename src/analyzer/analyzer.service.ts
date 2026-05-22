@@ -139,10 +139,10 @@ export class AnalyzerService {
 
             // 2. RPC CHECK (Security) — With PumpFun tolerance
             const isPumpFunToken = tokenMint.toLowerCase().endsWith('pump');
-            const isSafetyPassed = await this.checkTokenSecurityRPC(tokenMint, isPumpFunToken);
-            if (!isSafetyPassed) {
+            const safetyRpc = await this.checkTokenSecurityRPC(tokenMint, isPumpFunToken);
+            if (!safetyRpc.passed) {
                 this.logger.warn(`[${tokenMint}] 🛑 Safety RPC check FAILED (Freeze/Mint authority). Skip.`);
-                return { safe: false, reason: 'safety_rpc_failed', permanent: false, metadata: baseMetadata };
+                return { safe: false, reason: 'safety_rpc_failed', permanent: safetyRpc.permanent, metadata: baseMetadata };
             }
 
             // 3. RUGCHECK (Advanced Safety Index & LP Burn)
@@ -206,7 +206,7 @@ export class AnalyzerService {
         }
     }
 
-    private async checkTokenSecurityRPC(tokenMint: string, isPumpFun = false): Promise<boolean> {
+    private async checkTokenSecurityRPC(tokenMint: string, isPumpFun = false): Promise<{ passed: boolean; permanent: boolean }> {
         const mintPublicKey = new PublicKey(tokenMint);
         const maxRetries = 3;
 
@@ -217,20 +217,20 @@ export class AnalyzerService {
                 // Mint authority HARUS null (tidak boleh cetak token baru)
                 if (mintInfo.mintAuthority !== null) {
                     this.logger.warn(`[${tokenMint}] Mint authority still active. Reject.`);
-                    return false;
+                    return { passed: false, permanent: true };
                 }
 
                 // Freeze authority: PumpFun tokens sering punya freeze auth sementara post-migration
                 if (mintInfo.freezeAuthority !== null) {
                     if (isPumpFun) {
                         this.logger.debug(`[${tokenMint}] ⚠️ Freeze authority active but PumpFun token — TOLERATED.`);
-                        return true; // PumpFun tolerance
+                        return { passed: true, permanent: false }; // PumpFun tolerance
                     }
                     this.logger.warn(`[${tokenMint}] Freeze authority active (non-PumpFun). Reject.`);
-                    return false;
+                    return { passed: false, permanent: true };
                 }
 
-                return true; // Both null = safe
+                return { passed: true, permanent: false }; // Both null = safe
             } catch (e) {
                 const errName = e instanceof Error ? (e.name || e.message) : String(e);
                 this.logger.warn(`[${tokenMint}] Mint authority check failed (attempt ${attempt}/${maxRetries}): ${errName}`);
@@ -239,7 +239,7 @@ export class AnalyzerService {
                 }
             }
         }
-        return false; // All retries failed
+        return { passed: false, permanent: false }; // All retries failed (probably temporary RPC error)
     }
 
     private async checkMarketTraction(tokenMint: string): Promise<{ 
@@ -305,6 +305,17 @@ export class AnalyzerService {
                 };
             }
 
+            // 🚀 EARLY REJECT: Cek filter murah dulu sebelum kalkulasi mahal
+            if (liquidity < minLiq) {
+                return { passed: false, reason: 'low_metrics', liquidity, marketCap, symbol, pairCreatedAt, socials };
+            }
+            if (volume5m < minVol) {
+                return { passed: false, reason: 'low_metrics', liquidity, marketCap, symbol, pairCreatedAt, socials };
+            }
+            if (buys5m < minBuys) {
+                return { passed: false, reason: 'low_metrics', liquidity, marketCap, symbol, pairCreatedAt, socials };
+            }
+
             // 1. VoL (Velocity of Liquidity)
             // Rumus: (Volume 5m / Liquidity) * Confidence Score
             const confidenceScore = (buys5m / (buys5m + sells5m || 1));
@@ -317,7 +328,7 @@ export class AnalyzerService {
 
             // 🚫 HONEYPOT DETECTION
             if (buys5m >= 10 && sells5m === 0) {
-                return { passed: false, reason: 'honeypot', liquidity, marketCap, symbol, pairCreatedAt, socials, volScore, zScore, priceChange1h: pair.priceChange?.h1 || 0, isPumpFun: pair.info?.websites?.some(w => w.url.includes('pump.fun')) || false };
+                return { passed: false, reason: 'honeypot', permanent: true, liquidity, marketCap, symbol, pairCreatedAt, socials, volScore, zScore, priceChange1h: pair.priceChange?.h1 || 0, isPumpFun: pair.info?.websites?.some(w => w.url.includes('pump.fun')) || false };
             }
             
             const velocity = volume5m / (marketCap || 1);
@@ -333,11 +344,10 @@ export class AnalyzerService {
             const maxAge = Number.parseFloat(this.configService.get<string>('MAX_AGE_HOURS', '24.0'));
             
             if (ageHours < minAge || ageHours > maxAge) {
-                const isTooOld = ageHours > maxAge;
                 return { 
                     passed: false, 
-                    reason: isTooOld ? 'too_old' : 'too_young', 
-                    permanent: isTooOld, 
+                    reason: ageHours > maxAge ? 'too_old' : 'too_young', 
+                    permanent: false, // Non-permanent: background radar bisa re-check nanti
                     marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun
                 };
             }
@@ -348,16 +358,12 @@ export class AnalyzerService {
                 return { passed: false, reason: 'low_surge', volumeSurge, marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
             }
             if (priceChange1h < -15) {
-                return { passed: false, reason: 'bearish_trend', marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
+                return { passed: false, reason: 'bearish_trend', permanent: true, marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
             }
 
             // 📊 BUY VS SELL RATIO (Confidence Score)
             if (confidenceScore < minConfidence) {
                 return { passed: false, reason: 'low_buy_confidence', marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
-            }
-
-            if (liquidity < minLiq || volume5m < minVol || buys5m < minBuys) {
-                return { passed: false, reason: 'low_metrics', marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun };
             }
 
             if (velocity < minVelocity) {
@@ -503,7 +509,8 @@ export class AnalyzerService {
             }
 
             const highRisks = risks.filter((risk) => risk.level === 'danger');
-            if (highRisks.length > 0) {
+            if (highRisks.length >= 2) {
+                this.logger.warn(`[${tokenMint}] 🛑 Multiple danger risks detected (${highRisks.length}). Skip.`);
                 return { passed: false, reason: 'danger_risks_detected', safetyIndex, permanent: true };
             }
 
@@ -512,7 +519,7 @@ export class AnalyzerService {
             if (creator) {
                 const creatorHolder = topHolders.find(h => h.address === creator || h.owner === creator);
                 const creatorPct = creatorHolder ? creatorHolder.pct : 0;
-                if (creatorPct > 3) {
+                if (creatorPct > 5) {
                     this.logger.warn(`[${tokenMint}] 🛑 Creator holds too much (${creatorPct.toFixed(2)}%). Skip.`);
                     return { passed: false, reason: 'creator_holds_too_much', safetyIndex, permanent: true };
                 }

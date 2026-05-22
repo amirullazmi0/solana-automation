@@ -207,8 +207,8 @@ export class EstablishedAnalyzerService {
             }
 
             const highRisks = risks.filter((risk) => risk.level === 'danger');
-            if (highRisks.length > 0) {
-                this.logger.warn(`[${tokenMint}] 🛑 Established Danger Risks detected. Reject.`);
+            if (highRisks.length >= 2) {
+                this.logger.warn(`[${tokenMint}] 🛑 Established Multiple Danger Risks detected (${highRisks.length}). Reject.`);
                 return { passed: false, reason: 'established_danger_risks_detected' };
             }
 
@@ -216,7 +216,7 @@ export class EstablishedAnalyzerService {
             if (creator) {
                 const creatorHolder = topHolders.find(h => h.address === creator || h.owner === creator);
                 const creatorPct = creatorHolder ? creatorHolder.pct : 0;
-                if (creatorPct > 3) {
+                if (creatorPct > 5) {
                     this.logger.warn(`[${tokenMint}] 🛑 Established Creator holds too much (${creatorPct.toFixed(2)}%). Reject.`);
                     return { passed: false, reason: 'established_creator_holds_too_much' };
                 }

@@ -388,27 +388,60 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     const currentItem = await this.prismaService.watchlist.findUnique({ where: { tokenMint } });
                     if (!currentItem || currentItem.status === 'FAILED' || currentItem.status === 'TRADED') return;
 
+                    // 🚀 STAGNANT TIMEOUT CHECK INSIDE LOOP
+                    if (currentItem.checkCount >= 50) {
+                        this.logger.log(`[${tokenMint}] ⏳ Stagnant timeout reached in active loop (${currentItem.checkCount} checks). Marking as FAILED.`);
+                        await this.prismaService.watchlist.update({
+                            where: { tokenMint },
+                            data: { status: 'FAILED', reason: 'stagnant_timeout' }
+                        });
+                        this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); // Cooldown 6 jam
+                        return;
+                    }
+
                     // 🚀 ESTABLISHED REBOUND & CTO BOT SERVICE (Lapis 1)
                     const reboundResult = await this.establishedAnalyzerService.analyzeAndExecuteRebound(tokenMint);
-                    if (reboundResult.isEstablished) {
-                        if (reboundResult.executed) {
-                            await this.prismaService.watchlist.update({
-                                where: { tokenMint },
-                                data: { status: 'TRADED' }
-                            });
-                            return; // Selesai jika sudah ditransaksikan
+                    if (reboundResult.isEstablished && reboundResult.executed) {
+                        await this.prismaService.watchlist.update({
+                            where: { tokenMint },
+                            data: { status: 'TRADED' }
+                        });
+                        return; // Selesai jika sudah ditransaksikan via rebound
+                    }
+
+                    // 🔄 ESTABLISHED FALL-THROUGH: Jika rebound gagal karena safety/security,
+                    // retry di loop. Jika gagal karena market metrics, FALL-THROUGH ke standard analyzer.
+                    if (reboundResult.isEstablished && !reboundResult.executed) {
+                        const securityFailReasons = [
+                            'established_security_authority_failed',
+                            'established_rugcheck_failed',
+                            'established_creator_blacklisted',
+                            'established_honeypot_detected',
+                            'established_high_concentration',
+                            'established_danger_risks_detected',
+                            'established_high_risk_score',
+                            'established_creator_holds_too_much',
+                            'rugcheck_api_error',
+                            'rebound_analysis_error',
+                        ];
+                        const isSafetyFail = securityFailReasons.some(r => reboundResult.reason?.includes(r));
+
+                        if (isSafetyFail) {
+                            // Security/safety issue → update reason & retry di loop
+                            if (reboundResult.reason) {
+                                await this.prismaService.watchlist.update({
+                                    where: { tokenMint },
+                                    data: { reason: reboundResult.reason }
+                                });
+                            }
+                            this.logger.debug(`[${tokenMint}] ⏳ Established safety fail (${reboundResult.reason}). Retrying rebound path...`);
+                            await new Promise((res) => setTimeout(res, Number.parseInt(this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'), 10)));
+                            continue;
                         }
-                        if (reboundResult.reason) {
-                            await this.prismaService.watchlist.update({
-                                where: { tokenMint },
-                                data: { reason: reboundResult.reason }
-                            });
-                        }
-                        this.logger.debug(`[${tokenMint}] ⏳ Established rebound check. Status remains PENDING (Reason: ${reboundResult.reason || 'not_triggered'}). Retrying...`);
-                        
-                        // Tunggu sebelum polling berikutnya
-                        await new Promise((res) => setTimeout(res, Number.parseInt(this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'), 10)));
-                        continue; // Lanjut loop pemantauan aktif
+
+                        // Market metrics fail (rebound_not_triggered, low_buyer_dominance, etc.)
+                        // → FALL-THROUGH ke standard isTokenSafeToBuy di bawah! 🎯
+                        this.logger.debug(`[${tokenMint}] 🔄 Established rebound not triggered (${reboundResult.reason}). Falling through to standard analyzer...`);
                     }
 
                     const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
@@ -469,20 +502,29 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             where: { tokenMint },
                             data: { status: 'FAILED', reason: result.reason }
                         });
-                        // Cooldown 2 jam biar nggak masuk discovery lagi
-                        this.seenTokens.set(tokenMint, Date.now() + 2 * 60 * 60 * 1000); 
+                        // Cooldown 6 jam biar nggak masuk discovery lagi
+                        this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); 
                         return;
                     }
 
                     // 🧠 SMART RETRY: Jika kegagalan bersifat sementara (tidak permanen),
                     // biarkan status tetap PENDING agar dicek kembali oleh background radar nanti,
-                    // dan teruskan pemantauan aktif di loop ini.
+                    // dan teruskan pemantauan aktif di loop ini hanya jika itu adalah error API/Network.
                     if (!result.permanent && result.reason) {
-                        this.logger.debug(`[${tokenMint}] ⏳ Temporary fail (${result.reason}). Retrying in next poll.`);
-                        
-                        // Tunggu sebelum polling berikutnya
-                        await new Promise((res) => setTimeout(res, Number.parseInt(this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'), 10)));
-                        continue; // Lanjut loop pemantauan aktif
+                        const isApiOrNetworkError = [
+                            'rugcheck_error',
+                            'rebound_analysis_error',
+                            'error'
+                        ].includes(result.reason);
+
+                        if (isApiOrNetworkError) {
+                            this.logger.debug(`[${tokenMint}] ⏳ API/Network temporary fail (${result.reason}). Retrying actively.`);
+                            await new Promise((res) => setTimeout(res, Number.parseInt(this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'), 10)));
+                            continue; // Lanjut loop pemantauan aktif
+                        } else {
+                            this.logger.debug(`[${tokenMint}] ⏳ Market metric temporary fail (${result.reason}). Exiting active monitor to let background radar handle it.`);
+                            return; // Keluar dari monitor aktif, biarkan status tetap PENDING
+                        }
                     }
 
                     if (result.reason) {
