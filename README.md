@@ -163,10 +163,10 @@ FAIL: mcap_too_low (temporary) | mcap_too_high (permanent)
 
 #### Gate 3: Token Age
 ```
-PASS jika: MIN_AGE_HOURS (0.02h/~1min) <= age <= MAX_AGE_HOURS (24h)
-FAIL: too_young (temporary) | too_old (permanent)
+PASS jika: MIN_AGE_HOURS (0.02h/~1min) <= age <= MAX_AGE_HOURS (72h)
+FAIL: too_young (temporary) | too_old (temporary)
 ```
-> Koin < 1 menit terlalu berisiko (bisa scam). Koin > 24 jam sudah kehilangan momentum.
+> Koin < 1 menit terlalu berisiko (bisa scam). Koin > 72 jam disaring ke mode Established Rebound.
 
 #### Gate 4: Volume Surge
 ```
@@ -252,7 +252,7 @@ Sub-checks (harus SEMUA pass):
   2. LP Status = 'burned' ATAU 'locked' (PumpFun skip jika no market data)
   3. Risk Score <= 2000
   4. Tidak ada risk: 'honeypot', 'freeze', 'mint authority'
-  5. Tidak ada 'danger' level risks
+  5. Danger level risks < 2 (toleransi 1 danger risk untuk menghindari false positive)
   6. Creator balance <= 5% dari total supply
 
 FAIL: high_concentration | lp_not_burned | high_risk_score | honeypot_detected | creator_holds_too_much
@@ -284,22 +284,27 @@ Token ditemukan (via Polling atau WS)
     │
     ▼
 PriceMonitorService mulai tracking:
-  • Take Profit standar (30%) / CTO (18%) → Trailing Stop aktif
-  • Stop Loss standar (25%) / CTO (20%) → Auto-sell dengan slippage 15%
-  • Trailing Stop standar (5%) / CTO (2.5%) → Kunci profit, sell jika turun dari peak
+  • Take Profit standar (40%) / CTO (18%) → Trailing Stop aktif
+  • Stop Loss standar (35%) / CTO (20%) → Auto-sell dengan slippage 15%
+  • Trailing Stop standar (4%) / CTO (2.5%) → Kunci profit, sell jika turun dari peak
 ```
 
-### 📈 Exit Strategy (PriceMonitorService)
+### 📈 Exit Strategy & Profit Optimizations (PriceMonitorService)
 
 | Kondisi | Aksi | Slippage |
 |---------|------|----------|
-| Price naik ≥ `TAKE_PROFIT_PERCENT` | Trailing Stop **aktif** | Normal (5%) |
-| Price turun ≥ `TRAILING_DISTANCE_PERCENT` dari peak | **SELL** (Trailing Stop) | Normal (5%) |
-| Price turun ≥ `STOP_LOSS_PERCENT` dari entry | **SELL** (Stop Loss) | Panic (15%) |
+| Price naik ≥ `TAKE_PROFIT_PERCENT` (Standard: 40% / CTO: 18%) | Trailing Stop **aktif** | Normal (5%) |
+| Price turun ≥ `TRAILING_DISTANCE_PERCENT` (Standard: 4% / CTO: 2.5%) dari peak | **SELL** (Trailing Stop) | Normal (5%) |
+| Price turun ≥ `STOP_LOSS_PERCENT` (Standard: 35% / CTO: 20%) dari entry | **SELL** (Stop Loss) | Panic (15%) |
 | Dev dump terdeteksi (creator sell >50%) | **SELL** (Rugpull) | Panic (15%) |
 
+#### ⚡ Optimasi Profitabilitas Tambahan:
+- **Dynamic Take Profit**: Jika koin sangat kencang dan highest price mencapai **1.35x dari harga beli**, target TP secara dinamis disesuaikan menjadi **50%** (dari standard 40%) untuk membiarkan profit berlari namun tetap realistis (menghindari keserakahan).
+- **Early Zero-Loss Protection**: Ketika profit menyentuh **5%** (sebelumnya 10%), stop loss otomatis dinaikkan ke minimal `harga_beli + 1%` untuk mengamankan modal dari pembalikan arah instan.
+- **Patience Protocol (SL Delay)**: Ketika harga menyentuh zona stop loss, bot menunggu **5 menit** (sebelumnya 10m) untuk melihat volume/tekanan beli pemulihan, dengan batas keras (*hard cap*) **10 menit** (sebelumnya 20m) untuk meminimalkan kerugian lebih dalam.
+
 > **🔥 Catatan Khusus untuk Mode Established Rebound & CTO:**
-> Transaksi yang dibuka melalui jalur Rebound & CTO akan memiliki pengaturan keluar mandiri di database (`targetTakeProfit=18%`, `targetTrailingDistance=2.5%`, dan `targetStopLoss=20%`). `PriceMonitorService` secara otomatis menggunakan nilai kustom ini tanpa mengubah konfigurasi standar bot.
+> Transaksi yang dibuka melalui jalur Rebound & CTO memiliki exit rules kustom mandiri (`targetTakeProfit=18%`, `targetTrailingDistance=2.5%`, dan `targetStopLoss=20%`). `PriceMonitorService` secara otomatis menggunakan nilai kustom ini tanpa dipengaruhi konfigurasi standar bot.
 
 ### 🔄 Watchlist Retry Mechanism
 
@@ -313,8 +318,8 @@ Token yang gagal karena alasan **temporary** tidak langsung dibuang:
 | `safety_rpc_failed` | ✅ | Retry 3x, lalu watchlist |
 | `bearish_trend` | ✅ | Tunggu reversal |
 | `low_buy_confidence` | ✅ | Tunggu lebih banyak buyer |
+| `too_old` | ✅ | Temporary — jika umur di bawah `ESTABLISHED_MAX_AGE_HOURS` (72 jam) |
 | `mcap_too_high` | ❌ | Permanent — sudah terlalu besar |
-| `too_old` | ❌ | Permanent — sudah terlalu tua |
 | `honeypot` | ❌ | Permanent — scam |
 
 Background Radar re-check setiap **10 detik** untuk 20 token PENDING terbaru.
@@ -347,5 +352,5 @@ Set via `.env`.
 
 ---
 
-*Last updated: Mei 2026 — Strategi: Lean Filter Sniper (PumpFun Tolerance)*
+*Last updated: Mei 2026 — Strategi: Lean Filter Sniper (PumpFun Tolerance) + Profitability Tuning*
 *Created with ❤️ by Antigravity for Amirull Azmi.*
