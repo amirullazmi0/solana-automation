@@ -494,18 +494,19 @@ export class ReportingService implements OnModuleInit {
         });
     }
 
-    async sendWatchlistNotification(tokenMint: string, mcap: number, ageHours: number, symbol?: string, surge?: number) {
+    async sendWatchlistNotification(tokenMint: string, mcap: number, ageHours: number, symbol?: string, surge?: number, isCTO?: boolean) {
         const displaySymbol = symbol || 'UNKNOWN';
         const surgeDisplay = surge ? `🌊 *Surge:* \`${surge.toFixed(2)}x\`` : '🌊 *Surge:* `N/A`';
+        const title = isCTO ? `🕵️‍♂️ *CTO CANDIDATE DETECTED* 🕵️‍♂️` : `🔍 *SECOND-WAVE RADAR* 🔍`;
         
-        const message = `🔍 *SECOND-WAVE RADAR* 🔍\n` +
+        const message = `${title}\n` +
                         `━━━━━━━━━━━━━━━━━━\n` +
                         `💎 *Token:* ${displaySymbol}\n` +
                         `🆔 *Mint:* \`${tokenMint}\`\n` +
                         `━━━━━━━ 📈 ━━━━━━━\n` +
                         `💹 *MCap:* \`$${mcap.toLocaleString()}\`\n` +
                         `${surgeDisplay}\n` +
-                        `⏳ *Age:* \`${ageHours.toFixed(1)}h\`\n` +
+                        `⏳ *Age:* \`${ageHours.toFixed(2)}h\`\n` +
                         `━━━━━━━ 🛡️ ━━━━━━━\n` +
                         `✅ *Status:* MONITORING...`;
         

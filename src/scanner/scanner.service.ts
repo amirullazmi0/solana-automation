@@ -531,12 +531,17 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         ? (Date.now() - result.metadata.pairCreatedAt) / (1000 * 60 * 60)
                         : 0;
 
+                    const isCTO = result.metadata?.isCTO || false;
+                    const botMode = this.configService.get<string>('BOT_MODE', 'micin');
+                    const minAgeForNotif = botMode === 'micin' ? 0.05 : 1.5;
+                    const minMcapForNotif = botMode === 'micin' ? 5000 : 20000;
+
                     if (
                         !localNotified &&
                         !this.notifiedTokens.has(tokenMint) &&
                         result.metadata &&
-                        mcap >= 20000 &&
-                        ageHours >= 1.5 &&
+                        mcap >= minMcapForNotif &&
+                        ageHours >= minAgeForNotif &&
                         surge >= 1.5
                     ) {
                         await this.reportingService.sendWatchlistNotification(
@@ -545,10 +550,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             ageHours,
                             result.metadata.symbol,
                             surge,
+                            isCTO,
                         );
                         localNotified = true;
                         this.notifiedTokens.set(tokenMint, Date.now());
-                        this.logger.log(`[${tokenMint}] 🔔 Telegram Alert sent!`);
+                        this.logger.log(`[${tokenMint}] 🔔 Telegram Alert sent! (isCTO: ${isCTO})`);
                     }
 
                     if (result.safe) {
@@ -590,6 +596,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             'rugcheck_error',
                             'rebound_analysis_error',
                             'error',
+                            'no_dex_pair',
                         ].includes(result.reason);
 
                         if (isApiOrNetworkError) {

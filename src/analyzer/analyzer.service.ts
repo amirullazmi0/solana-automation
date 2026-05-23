@@ -45,6 +45,7 @@ export interface TokenMetadata {
     zScore?: number;
     priceChange1h?: number;
     isPumpFun?: boolean;
+    isCTO?: boolean;
     socials?: {
         twitter?: string;
         telegram?: string;
@@ -159,13 +160,14 @@ export class AnalyzerService {
                 }
             }
 
-            this.logger.log(`[${tokenMint}] ✅ Passed Advanced Filters (VoL: ${traction.volScore?.toFixed(3)}, Z: ${traction.zScore?.toFixed(1)}, Safety: ${rugResult.safetyIndex?.toFixed(2)}). Ready!`);
+            this.logger.log(`[${tokenMint}] ✅ Passed Advanced Filters (VoL: ${traction.volScore?.toFixed(3)}, Z: ${traction.zScore?.toFixed(1)}, Safety: ${rugResult.safetyIndex?.toFixed(2)}, isCTO: ${rugResult.isCTO}). Ready!`);
             return { 
                 safe: true, 
                 metadata: { 
                     ...baseMetadata,
                     creator: rugResult.creator,
-                    topHolder: rugResult.topHolder
+                    topHolder: rugResult.topHolder,
+                    isCTO: rugResult.isCTO
                 } 
             };
         } catch (error) {
@@ -277,7 +279,7 @@ export class AnalyzerService {
             );
 
             const pair = response.data.pairs?.[0];
-            if (!pair) return { passed: false };
+            if (!pair) return { passed: false, reason: 'no_dex_pair', permanent: false };
 
             const liquidity = pair.liquidity?.usd || 0;
             const volume5m = pair.volume?.m5 || 0;
@@ -453,6 +455,7 @@ export class AnalyzerService {
         reason?: string;
         safetyIndex?: number;
         permanent?: boolean;
+        isCTO?: boolean;
     }> {
         try {
             const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
@@ -473,14 +476,24 @@ export class AnalyzerService {
                 return !isExcludedType && !isSystemAccount;
             });
 
+            // 🧑‍💻 CREATOR BALANCE CHECK (Anti-Dump)
+            const creator = response.data.creator;
+            let creatorPct = 0;
+            if (creator) {
+                const creatorHolder = topHolders.find(h => h.address === creator || h.owner === creator);
+                creatorPct = creatorHolder ? creatorHolder.pct : 0;
+            }
+            const isCTO = creator ? (creatorPct < 0.1) : false;
+
             // Hitung safetyIndex menggunakan persentase (pct) langsung dari API
             const top10SumPct = filteredHolders.slice(0, 10).reduce((sum: number, h: RugCheckHolder) => sum + (h.pct || 0), 0);
             const safetyIndex = 1 - (top10SumPct / 100);
 
-            const minSafetyIndex = Number.parseFloat(this.configService.get<string>('RUGCHECK_MIN_SAFETY_INDEX', '0.65'));
+            const defaultSafetyIndex = isCTO ? '0.20' : '0.65';
+            const minSafetyIndex = Number.parseFloat(this.configService.get<string>('RUGCHECK_MIN_SAFETY_INDEX', defaultSafetyIndex));
             if (safetyIndex < minSafetyIndex) {
-                this.logger.warn(`[${tokenMint}] 🛑 High Concentration: Top 10 pegang ${(1 - safetyIndex) * 100}%. Skip.`);
-                return { passed: false, reason: 'high_concentration', safetyIndex, permanent: true };
+                this.logger.warn(`[${tokenMint}] 🛑 High Concentration: Top 10 pegang ${(1 - safetyIndex) * 100}%. Skip. (isCTO: ${isCTO})`);
+                return { passed: false, reason: 'high_concentration', safetyIndex, permanent: true, isCTO };
             }
 
             // 🔥 LP Safety Check: Accept burned OR locked (PumpFun uses locked mechanism)
@@ -493,13 +506,13 @@ export class AnalyzerService {
             // PumpFun tokens tanpa market data di RugCheck = normal (LP di bonding curve)
             if (!lpSafe && markets.length > 0 && !isPumpFunToken) {
                 this.logger.warn(`[${tokenMint}] 🛑 LP NOT BURNED/LOCKED. Skip.`);
-                return { passed: false, reason: 'lp_not_burned', safetyIndex, permanent: true };
+                return { passed: false, reason: 'lp_not_burned', safetyIndex, permanent: true, isCTO };
             }
 
             const score = response.data.score || 0;
             if (score > 2000) { // Lebih ketat dari sebelumnya (3000)
                 this.logger.warn(`[${tokenMint}] 🛑 High Risk Score: ${score}. Skip.`);
-                return { passed: false, reason: 'high_risk_score', safetyIndex, permanent: true };
+                return { passed: false, reason: 'high_risk_score', safetyIndex, permanent: true, isCTO };
             }
 
             // ⛔ HONEYPOT & PERMISSIONS CHECK
@@ -512,23 +525,19 @@ export class AnalyzerService {
 
             if (hasHoneypotRisk) {
                 this.logger.warn(`[${tokenMint}] 🛑 HONEYPOT/FREEZE RISK detected. Skip.`);
-                return { passed: false, reason: 'honeypot_detected', safetyIndex, permanent: true };
+                return { passed: false, reason: 'honeypot_detected', safetyIndex, permanent: true, isCTO };
             }
 
             const highRisks = risks.filter((risk) => risk.level === 'danger');
             if (highRisks.length >= 2) {
                 this.logger.warn(`[${tokenMint}] 🛑 Multiple danger risks detected (${highRisks.length}). Skip.`);
-                return { passed: false, reason: 'danger_risks_detected', safetyIndex, permanent: true };
+                return { passed: false, reason: 'danger_risks_detected', safetyIndex, permanent: true, isCTO };
             }
 
-            // 🧑‍💻 CREATOR BALANCE CHECK (Anti-Dump)
-            const creator = response.data.creator;
-            if (creator) {
-                const creatorHolder = topHolders.find(h => h.address === creator || h.owner === creator);
-                const creatorPct = creatorHolder ? creatorHolder.pct : 0;
+            if (creator && !isCTO) {
                 if (creatorPct > 5) {
                     this.logger.warn(`[${tokenMint}] 🛑 Creator holds too much (${creatorPct.toFixed(2)}%). Skip.`);
-                    return { passed: false, reason: 'creator_holds_too_much', safetyIndex, permanent: true };
+                    return { passed: false, reason: 'creator_holds_too_much', safetyIndex, permanent: true, isCTO };
                 }
             }
 
@@ -536,7 +545,8 @@ export class AnalyzerService {
                 passed: true, 
                 creator: response.data.creator, 
                 topHolder: response.data.topHolders?.[0]?.address,
-                safetyIndex
+                safetyIndex,
+                isCTO
             };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);

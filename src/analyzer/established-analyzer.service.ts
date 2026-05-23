@@ -149,7 +149,7 @@ export class EstablishedAnalyzerService {
     /**
      * Memeriksa status keamanan token via RugCheck API secara menyeluruh
      */
-    private async checkRugCheckLP(tokenMint: string, isPumpFun: boolean): Promise<{ passed: boolean; creator?: string; topHolder?: string; reason?: string }> {
+    private async checkRugCheckLP(tokenMint: string, isPumpFun: boolean): Promise<{ passed: boolean; creator?: string; topHolder?: string; reason?: string; isCTO?: boolean }> {
         try {
             const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
                 timeout: 5000,
@@ -169,13 +169,23 @@ export class EstablishedAnalyzerService {
                 return !isExcludedType && !isSystemAccount;
             });
 
+            // 🧑‍💻 CREATOR BALANCE CHECK (Anti-Dump)
+            const creator = response.data.creator;
+            let creatorPct = 0;
+            if (creator) {
+                const creatorHolder = topHolders.find(h => h.address === creator || h.owner === creator);
+                creatorPct = creatorHolder ? creatorHolder.pct : 0;
+            }
+            const isCTO = creator ? (creatorPct < 0.1) : false;
+
             const top10SumPct = filteredHolders.slice(0, 10).reduce((sum: number, h: RugCheckHolder) => sum + (h.pct || 0), 0);
             const safetyIndex = 1 - (top10SumPct / 100);
 
-            const minSafetyIndex = Number.parseFloat(this.configService.get<string>('RUGCHECK_MIN_SAFETY_INDEX', '0.65'));
+            const defaultSafetyIndex = isCTO ? '0.20' : '0.65';
+            const minSafetyIndex = Number.parseFloat(this.configService.get<string>('RUGCHECK_MIN_SAFETY_INDEX', defaultSafetyIndex));
             if (safetyIndex < minSafetyIndex) {
-                this.logger.warn(`[${tokenMint}] 🛑 Established High Concentration: Top 10 holds ${(1 - safetyIndex) * 100}%. Reject.`);
-                return { passed: false, reason: 'established_high_concentration' };
+                this.logger.warn(`[${tokenMint}] 🛑 Established High Concentration: Top 10 holds ${(1 - safetyIndex) * 100}%. Reject. (isCTO: ${isCTO})`);
+                return { passed: false, reason: 'established_high_concentration', isCTO };
             }
 
             const markets = (response.data.markets as RugCheckMarket[]) || [];
@@ -186,13 +196,13 @@ export class EstablishedAnalyzerService {
 
             if (!lpSafe && markets.length > 0 && !isPumpFun) {
                 this.logger.warn(`[${tokenMint}] 🛑 LP is NOT burned or locked. Reject.`);
-                return { passed: false, reason: 'lp_not_burned_or_locked' };
+                return { passed: false, reason: 'lp_not_burned_or_locked', isCTO };
             }
 
             const score = response.data.score || 0;
             if (score > 2000) {
                 this.logger.warn(`[${tokenMint}] 🛑 Established High Risk Score: ${score}. Reject.`);
-                return { passed: false, reason: 'established_high_risk_score' };
+                return { passed: false, reason: 'established_high_risk_score', isCTO };
             }
 
             const risks = (response.data.risks as Array<{ name: string; level: string }> ) || [];
@@ -204,22 +214,19 @@ export class EstablishedAnalyzerService {
 
             if (hasHoneypotRisk) {
                 this.logger.warn(`[${tokenMint}] 🛑 Established HONEYPOT/FREEZE/MINT RISK detected. Reject.`);
-                return { passed: false, reason: 'established_honeypot_detected' };
+                return { passed: false, reason: 'established_honeypot_detected', isCTO };
             }
 
             const highRisks = risks.filter((risk) => risk.level === 'danger');
             if (highRisks.length >= 2) {
                 this.logger.warn(`[${tokenMint}] 🛑 Established Multiple Danger Risks detected (${highRisks.length}). Reject.`);
-                return { passed: false, reason: 'established_danger_risks_detected' };
+                return { passed: false, reason: 'established_danger_risks_detected', isCTO };
             }
 
-            const creator = response.data.creator;
-            if (creator) {
-                const creatorHolder = topHolders.find(h => h.address === creator || h.owner === creator);
-                const creatorPct = creatorHolder ? creatorHolder.pct : 0;
+            if (creator && !isCTO) {
                 if (creatorPct > 5) {
                     this.logger.warn(`[${tokenMint}] 🛑 Established Creator holds too much (${creatorPct.toFixed(2)}%). Reject.`);
-                    return { passed: false, reason: 'established_creator_holds_too_much' };
+                    return { passed: false, reason: 'established_creator_holds_too_much', isCTO };
                 }
             }
 
@@ -227,6 +234,7 @@ export class EstablishedAnalyzerService {
                 passed: true,
                 creator: response.data.creator,
                 topHolder: topHolders[0]?.address,
+                isCTO,
             };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -349,7 +357,7 @@ export class EstablishedAnalyzerService {
             }
 
             // 🚀 SEMUA FILTER LOLOS - SIAP EKSEKUSI
-            this.logger.log(`📈 CONFIRMED REBOUND SIGNALS for $${symbol} (${tokenMint})! Ready to strike.`);
+            this.logger.log(`📈 CONFIRMED REBOUND SIGNALS for $${symbol} (${tokenMint})! Ready to strike. (isCTO: ${rugResult.isCTO})`);
 
             const metadata: TokenMetadata = {
                 liquidity,
@@ -365,6 +373,7 @@ export class EstablishedAnalyzerService {
                 creator: rugResult.creator,
                 topHolder: rugResult.topHolder,
                 isPumpFun: isPumpFunToken,
+                isCTO: rugResult.isCTO,
             };
 
             // Eksekusi Swap Jupiter V6 dengan Pengaturan Keluar Ketat
