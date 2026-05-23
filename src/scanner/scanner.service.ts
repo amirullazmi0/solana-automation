@@ -82,7 +82,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     onModuleInit() {
         const wssEndpoint = this.configService.get<string>('WSS_ENDPOINT');
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
-        const botMode = this.configService.get<string>('BOT_MODE', 'whale');
+        const botMode = this.configService.get<string>('BOT_MODE', 'micin');
 
         if (!wssEndpoint || !rpcEndpoint) {
             this.logger.error('RPC or WSS endpoints not configured. Scanner will not start.');

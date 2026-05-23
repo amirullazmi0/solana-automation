@@ -268,7 +268,7 @@ export class EstablishedAnalyzerService {
      */
     public checkBuyerDominance(pairData: DexScreenerPair): boolean {
         const buySellRatioThreshold = Number.parseFloat(this.configService.get<string>('BUY_SELL_RATIO_THRESHOLD', '1.5'));
-        const minBuys = Number.parseInt(this.configService.get<string>('ESTABLISHED_MIN_BUYS', '25'), 10);
+        const minBuys = Number.parseInt(this.configService.get<string>('ESTABLISHED_MIN_BUYS', '5'), 10);
 
         const buys = pairData.txns?.m5?.buys || 0;
         const sells = pairData.txns?.m5?.sells || 0;

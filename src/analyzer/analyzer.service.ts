@@ -263,14 +263,14 @@ export class AnalyzerService {
         isPumpFun?: boolean;
     }> {
         try {
-            const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '30000'));
-            const minVol = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '1000'));
-            const minBuys = Number.parseInt(this.configService.get<string>('MIN_BUY_COUNT', '20'));
-            const minVelocity = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_MCAP_RATIO', '0.05'));
-            const minMCap = Number.parseFloat(this.configService.get<string>('MIN_MCAP', '20000'));
+            const minLiq = Number.parseFloat(this.configService.get<string>('MIN_LIQUIDITY_USD', '3000'));
+            const minVol = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_USD', '200'));
+            const minBuys = Number.parseInt(this.configService.get<string>('MIN_BUY_COUNT', '3'));
+            const minVelocity = Number.parseFloat(this.configService.get<string>('MIN_VOLUME_MCAP_RATIO', '0.02'));
+            const minMCap = Number.parseFloat(this.configService.get<string>('MIN_MCAP', '5000'));
             const maxMCap = Number.parseFloat(this.configService.get<string>('MAX_MCAP', '300000'));
-            const minAge = Number.parseFloat(this.configService.get<string>('MIN_AGE_HOURS', '1'));
-            const minConfidence = Number.parseFloat(this.configService.get<string>('MIN_BUY_CONFIDENCE', '0.7'));
+            const minAge = Number.parseFloat(this.configService.get<string>('MIN_AGE_HOURS', '0.02'));
+            const minConfidence = Number.parseFloat(this.configService.get<string>('MIN_BUY_CONFIDENCE', '0.50'));
 
             const response = await DexLimiter.get<{ pairs: DexScreenerPair[] }>(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,

@@ -9,6 +9,7 @@ import { AnalyzerModule } from './analyzer/analyzer.module';
 import { ScannerModule } from './scanner/scanner.module';
 import { TradeModule } from './trade/trade.module';
 import { PriceMonitorModule } from './price-monitor/price-monitor.module';
+import { AIModule } from './ai/ai.module';
 
 @Module({
     imports: [
@@ -23,6 +24,7 @@ import { PriceMonitorModule } from './price-monitor/price-monitor.module';
         ScannerModule,
         TradeModule,
         PriceMonitorModule,
+        AIModule,
     ],
     controllers: [AppController],
     providers: [AppService],
