@@ -185,7 +185,6 @@ export class PriceMonitorService {
 
     private async evaluateTrade(trade: Trade, currentPrice: number) {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
-        let devDumped = false;
 
         const effectiveStopLossPercent = trade.targetStopLoss ?? this.stopLossPercent;
         const effectiveTrailingDistancePercent = trade.targetTrailingDistance ?? this.trailingDistancePercent;
@@ -200,11 +199,10 @@ export class PriceMonitorService {
                 if (typeof currentCreatorBalance === 'number' && trade.initialCreatorBalance) {
                     if (currentCreatorBalance < trade.initialCreatorBalance * 0.8) { // Dev dump > 20% (Lebih sensitif buat modal kecil)
                         this.logger.warn(`[Slot ${trade.slotNumber}] 🔥 EMERGENCY: Developer is dumping! PANIC SELL.`);
-                        devDumped = true;
-                await this.tradeService.executeSell(trade.id, currentPrice, 'DEV_DUMP');
-                return;
-            }
-        }
+                        await this.tradeService.executeSell(trade.id, currentPrice, 'DEV_DUMP');
+                        return;
+                    }
+                }
             }
             // Top Whale Check (Leniency 15%)
             if (trade.topHolderAddress) {
@@ -226,14 +224,14 @@ export class PriceMonitorService {
         }
 
         // 3. TRAILING STOP LOGIC (Update Peak & TSL)
-        // 🚀 Hanya update peak kalau harga sudah naik minimal 2% (Safe Zone)
-        if (currentPrice > trade.highestPrice && profitPercent >= 2) {
+        // 🚀 Hanya update peak kalau harga sudah naik minimal 5% (Safe Zone)
+        if (currentPrice > trade.highestPrice && profitPercent >= 5) {
             const calculatedStop = currentPrice * (1 - (effectiveTrailingDistancePercent / 100));
             
-            // 🛡️ ZERO-LOSS PROTECTION: Kalau untung >= 5%, jaring jual MINIMAL di harga beli + 1%
+            // 🛡️ ZERO-LOSS PROTECTION: Kalau untung >= 8%, jaring jual MINIMAL di harga beli + 3% (menutup fee)
             let newTrailingStop = Math.max(calculatedStop, trade.entryPrice);
-            if (profitPercent >= 5) {
-                const breakEvenPlus = trade.entryPrice * 1.01;
+            if (profitPercent >= 8) {
+                const breakEvenPlus = trade.entryPrice * 1.03;
                 newTrailingStop = Math.max(newTrailingStop, breakEvenPlus);
             }
             
@@ -273,15 +271,6 @@ export class PriceMonitorService {
 
         // 🛡️ Trailing Stop Trigger
         if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice) {
-            // 🧠 DIAMOND HAND PASS: Kalau Dev masih hold, kasih nafas 3% lagi
-            if (!devDumped && trade.creatorAddress) {
-                const leniencyPrice = trade.trailingStopPrice * 0.97;
-                if (currentPrice > leniencyPrice) {
-                    this.logger.log(`[Slot ${trade.slotNumber}] 💎 Dev is holding. Applying Diamond Hand Pass (Waiting for $${leniencyPrice.toFixed(8)})`);
-                    return;
-                }
-            }
-
             const reason = 'TRAILING_STOP';
             this.logger.log(`[Slot ${trade.slotNumber}] 💸 ${reason} at $${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`);
             await this.tradeService.executeSell(trade.id, currentPrice, reason);
