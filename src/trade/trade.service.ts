@@ -581,7 +581,9 @@ export class TradeService implements OnModuleInit {
             const { PublicKey } = await import('@solana/web3.js');
             const { getMint } = await import('@solana/spl-token');
             const mintPublicKey = new PublicKey(tokenMint);
-            const mintInfo = await getMint(this.connection, mintPublicKey);
+            const accountInfo = await this.connection.getAccountInfo(mintPublicKey);
+            const programId = accountInfo ? accountInfo.owner : undefined;
+            const mintInfo = await getMint(this.connection, mintPublicKey, undefined, programId);
             return mintInfo.decimals;
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);

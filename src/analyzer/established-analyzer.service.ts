@@ -115,7 +115,11 @@ export class EstablishedAnalyzerService {
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                const mintInfo = await getMint(this.connection, mintPublicKey);
+                const accountInfo = await this.connection.getAccountInfo(mintPublicKey);
+                if (!accountInfo) {
+                    throw new Error('Mint account not found on-chain');
+                }
+                const mintInfo = await getMint(this.connection, mintPublicKey, undefined, accountInfo.owner);
 
                 // mintAuthority HARUS null (Renounced / Kunci dibuang)
                 if (mintInfo.mintAuthority !== null) {

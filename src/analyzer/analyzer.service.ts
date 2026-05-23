@@ -212,7 +212,11 @@ export class AnalyzerService {
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                const mintInfo = await getMint(this.connection, mintPublicKey);
+                const accountInfo = await this.connection.getAccountInfo(mintPublicKey);
+                if (!accountInfo) {
+                    throw new Error('Mint account not found on-chain');
+                }
+                const mintInfo = await getMint(this.connection, mintPublicKey, undefined, accountInfo.owner);
 
                 // Mint authority HARUS null (tidak boleh cetak token baru)
                 if (mintInfo.mintAuthority !== null) {
@@ -342,12 +346,16 @@ export class AnalyzerService {
 
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
             const maxAge = Number.parseFloat(this.configService.get<string>('MAX_AGE_HOURS', '24.0'));
+            const establishedMaxAge = Number.parseFloat(this.configService.get<string>('ESTABLISHED_MAX_AGE_HOURS', '72.0'));
+            const absoluteMaxAge = Math.max(maxAge, establishedMaxAge);
             
             if (ageHours < minAge || ageHours > maxAge) {
+                const isTooOld = ageHours > maxAge;
+                const isPerm = isTooOld && (ageHours > absoluteMaxAge);
                 return { 
                     passed: false, 
-                    reason: ageHours > maxAge ? 'too_old' : 'too_young', 
-                    permanent: false, // Non-permanent: background radar bisa re-check nanti
+                    reason: isTooOld ? 'too_old' : 'too_young', 
+                    permanent: isPerm, 
                     marketCap, symbol, pairCreatedAt, socials, liquidity, volScore, zScore, priceChange1h, isPumpFun
                 };
             }

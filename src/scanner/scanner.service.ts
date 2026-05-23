@@ -29,7 +29,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
     // Cache for resolved IPs
     private ipCache: Record<string, string> = {
-        'api.dexscreener.com': '104.26.13.233',  // DexScreener API
+        'api.dexscreener.com': '104.26.13.233', // DexScreener API
         '1.1.1.1': '1.1.1.1',
         '8.8.8.8': '8.8.8.8',
     };
@@ -41,7 +41,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         private readonly prismaService: PrismaService,
         private readonly moduleRef: ModuleRef,
     ) {
-        this.MAX_CONCURRENT = Number.parseInt(this.configService.get<string>('SCANNER_MAX_CONCURRENT', '100'), 10);
+        this.MAX_CONCURRENT = Number.parseInt(
+            this.configService.get<string>('SCANNER_MAX_CONCURRENT', '100'),
+            10,
+        );
 
         // Inisialisasi DNS Hardening HTTPS Agent dengan keepAlive
         this.httpsAgent = new https.Agent({
@@ -53,16 +56,18 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     if (ip) {
                         cb(null, ip, 4);
                     } else {
-                        import('dns').then(({ lookup: dnsLookup }) => {
-                            dnsLookup(hostname, options, cb);
-                        }).catch((err) => {
-                            cb(err, '', 4);
-                        });
+                        import('dns')
+                            .then(({ lookup: dnsLookup }) => {
+                                dnsLookup(hostname, options, cb);
+                            })
+                            .catch((err) => {
+                                cb(err, '', 4);
+                            });
                     }
                 } catch (e) {
                     cb(e as Error, '', 4);
                 }
-            }
+            },
         });
     }
 
@@ -113,7 +118,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             this.pumpPortalWs.on('open', () => {
                 this.logger.log('🔌 Connected to PumpPortal WebSocket');
                 // Subscribe to migrations to Raydium
-                this.pumpPortalWs?.send(JSON.stringify({ method: "subscribeRaydiumLiquidity" }));
+                this.pumpPortalWs?.send(JSON.stringify({ method: 'subscribeRaydiumLiquidity' }));
             });
 
             this.pumpPortalWs.on('message', (data) => {
@@ -165,123 +170,139 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         this.logger.log('Scanner stopped');
     }
 
-
     private startDiscoveryPolling() {
         this.logger.log('Starting Trend Discovery Polling (Boosted & Trending)...');
 
         // Bersihkan seenTokens yang sudah expired setiap 10 menit
-        setInterval(() => {
-            const now = Date.now();
-            for (const [mint, expiredAt] of this.seenTokens.entries()) {
-                if (now > expiredAt) this.seenTokens.delete(mint);
-            }
-        }, 10 * 60 * 1000);
+        setInterval(
+            () => {
+                const now = Date.now();
+                for (const [mint, expiredAt] of this.seenTokens.entries()) {
+                    if (now > expiredAt) this.seenTokens.delete(mint);
+                }
+            },
+            10 * 60 * 1000,
+        );
 
         // Poll setiap 15 detik ke 2 sumber berbeda
-        setInterval(async () => {
-            try {
-                 // Sumber 1: Token Boosts (koin dengan marketing budget)
-                const boostRes = await DexLimiter.get<Array<{ chainId: string; tokenAddress: string }>>(
-                    'https://api.dexscreener.com/token-boosts/latest/v1',
-                    { 
+        setInterval(
+            async () => {
+                try {
+                    // Sumber 1: Token Boosts (koin dengan marketing budget)
+                    const boostRes = await DexLimiter.get<
+                        Array<{ chainId: string; tokenAddress: string }>
+                    >('https://api.dexscreener.com/token-boosts/latest/v1', {
                         timeout: 10000,
                         httpsAgent: this.httpsAgent,
-                    },
-                );
-                const boostTokens = boostRes.data
-                    .filter((t) => t.chainId === 'solana')
-                    .map((t) => t.tokenAddress);
-
-                // Sumber 2: Trending Pairs (koin yang sedang ramai organik)
-                let trendingTokens: string[] = [];
-                try {
-                    const trendRes = await DexLimiter.get<Array<{ chainId: string; tokenAddress: string }>>(
-                        'https://api.dexscreener.com/token-profiles/latest/v1',
-                        { 
-                            timeout: 10000,
-                            httpsAgent: this.httpsAgent,
-                        },
-                    );
-                    trendingTokens = trendRes.data
+                    });
+                    const boostTokens = boostRes.data
                         .filter((t) => t.chainId === 'solana')
                         .map((t) => t.tokenAddress);
-                } catch {
-                    // Sumber kedua opsional, gagal tidak masalah
-                }
 
-                // Gabungkan & deduplicate
-                const allCandidates = [...new Set([...boostTokens, ...trendingTokens])];
-                const now = Date.now();
-
-                for (const mint of allCandidates) {
-                    const expiredAt = this.seenTokens.get(mint);
-                    if (expiredAt && now < expiredAt) continue; // Masih dalam cooldown
-
-                    if (this.activeMonitoring >= this.MAX_CONCURRENT) {
-                        this.logger.debug(`[Discovery] Max concurrent (${this.MAX_CONCURRENT}) reached. Skipping ${mint}.`);
-                        continue;
+                    // Sumber 2: Trending Pairs (koin yang sedang ramai organik)
+                    let trendingTokens: string[] = [];
+                    try {
+                        const trendRes = await DexLimiter.get<
+                            Array<{ chainId: string; tokenAddress: string }>
+                        >('https://api.dexscreener.com/token-profiles/latest/v1', {
+                            timeout: 10000,
+                            httpsAgent: this.httpsAgent,
+                        });
+                        trendingTokens = trendRes.data
+                            .filter((t) => t.chainId === 'solana')
+                            .map((t) => t.tokenAddress);
+                    } catch {
+                        // Sumber kedua opsional, gagal tidak masalah
                     }
 
-                    // TTL 6 jam untuk koin yang baru masuk (Anti-Spam — mencegah re-discovery loop)
-                    this.seenTokens.set(mint, now + 6 * 60 * 60 * 1000);
-                    this.logger.log(`🔍 [Discovery] Potential Second-Wave Candidate: ${mint}`);
+                    // Gabungkan & deduplicate
+                    const allCandidates = [...new Set([...boostTokens, ...trendingTokens])];
+                    const now = Date.now();
 
-                    this.processNewToken(mint);
+                    for (const mint of allCandidates) {
+                        const expiredAt = this.seenTokens.get(mint);
+                        if (expiredAt && now < expiredAt) continue; // Masih dalam cooldown
+
+                        if (this.activeMonitoring >= this.MAX_CONCURRENT) {
+                            this.logger.debug(
+                                `[Discovery] Max concurrent (${this.MAX_CONCURRENT}) reached. Skipping ${mint}.`,
+                            );
+                            continue;
+                        }
+
+                        // TTL 6 jam untuk koin yang baru masuk (Anti-Spam — mencegah re-discovery loop)
+                        this.seenTokens.set(mint, now + 6 * 60 * 60 * 1000);
+                        this.logger.log(`🔍 [Discovery] Potential Second-Wave Candidate: ${mint}`);
+
+                        this.processNewToken(mint);
+                    }
+                } catch (error) {
+                    if (error instanceof Error) {
+                        this.logger.debug(`Discovery Polling error: ${error.message}`);
+                    }
                 }
-            } catch (error) {
-                if (error instanceof Error) {
-                    this.logger.debug(`Discovery Polling error: ${error.message}`);
-                }
-            }
-        }, Number.parseInt(this.configService.get<string>('SCANNER_POLLING_INTERVAL', '15000'), 10));
+            },
+            Number.parseInt(
+                this.configService.get<string>('SCANNER_POLLING_INTERVAL', '15000'),
+                10,
+            ),
+        );
 
         // Heartbeat Log: Biar Amirull tahu bot masih hidup & nyari koin
-        setInterval(() => {
-            this.logger.debug(`💓 [Heartbeat] Scanner Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT} | Seen: ${this.seenTokens.size} tokens`);
-        }, Number.parseInt(this.configService.get<string>('SCANNER_HEARTBEAT_INTERVAL', '30000'), 10));
+        setInterval(
+            () => {
+                this.logger.debug(
+                    `💓 [Heartbeat] Scanner Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT} | Seen: ${this.seenTokens.size} tokens`,
+                );
+            },
+            Number.parseInt(
+                this.configService.get<string>('SCANNER_HEARTBEAT_INTERVAL', '30000'),
+                10,
+            ),
+        );
     }
 
     private startWatchlistMonitoring() {
         this.logger.log('Starting Persistent Watchlist Radar...');
 
         // Re-check PENDING koin dari DB setiap 60 detik
-        setInterval(async () => {
-            try {
-                const pending = await this.prismaService.watchlist.findMany({
-                    where: { 
-                        status: 'PENDING',
-                        // Hindari re-check koin yang baru dicek kurang dari 3 menit lalu (mencegah loop koin tertua)
-                        lastCheckedAt: { lt: new Date(Date.now() - 3 * 60 * 1000) }
-                    },
-                    orderBy: [
-                        { pairCreatedAt: 'asc' },
-                        { createdAt: 'asc' }
-                    ],
-                    take: 20, // Ambil hingga 50 koin
-                    select: { tokenMint: true } // Optimasi memory leak
-                });
+        setInterval(
+            async () => {
+                try {
+                    const pending = await this.prismaService.watchlist.findMany({
+                        where: {
+                            status: 'PENDING',
+                            // Hindari re-check koin yang baru dicek kurang dari 3 menit lalu (mencegah loop koin tertua)
+                            lastCheckedAt: { lt: new Date(Date.now() - 3 * 60 * 1000) },
+                        },
+                        orderBy: [{ pairCreatedAt: 'asc' }, { createdAt: 'asc' }],
+                        take: 20, // Ambil hingga 50 koin
+                        select: { tokenMint: true }, // Optimasi memory leak
+                    });
 
-                for (const item of pending) {
-                    // Jika koin sudah di-scan secara live, skip biar nggak double
-                    if (this.activeMonitoring >= this.MAX_CONCURRENT) continue;
-                    
-                    this.processNewToken(item.tokenMint);
-                    await new Promise(res => setTimeout(res, 100)); // Stagger 100ms agar aman dari rate limit
-                }
-                
-                // Cleanup Watchlist: Hapus koin yang sudah > 24 jam dan gagal/pending
-                const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-                await this.prismaService.watchlist.deleteMany({
-                    where: { 
-                        createdAt: { lt: dayAgo },
-                        status: { in: ['FAILED', 'PENDING'] }
+                    for (const item of pending) {
+                        // Jika koin sudah di-scan secara live, skip biar nggak double
+                        if (this.activeMonitoring >= this.MAX_CONCURRENT) continue;
+
+                        this.processNewToken(item.tokenMint);
+                        await new Promise((res) => setTimeout(res, 100)); // Stagger 100ms agar aman dari rate limit
                     }
-                });
-            } catch (error) {
-                const msg = error instanceof Error ? error.message : String(error);
-                this.logger.error(`Watchlist Monitoring error: ${msg}`);
-            }
-        }, Number.parseInt(this.configService.get<string>('SCANNER_RADAR_INTERVAL', '20000'), 10));
+
+                    // Cleanup Watchlist: Hapus koin yang sudah > 24 jam dan gagal/pending
+                    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+                    await this.prismaService.watchlist.deleteMany({
+                        where: {
+                            createdAt: { lt: dayAgo },
+                            status: { in: ['FAILED', 'PENDING'] },
+                        },
+                    });
+                } catch (error) {
+                    const msg = error instanceof Error ? error.message : String(error);
+                    this.logger.error(`Watchlist Monitoring error: ${msg}`);
+                }
+            },
+            Number.parseInt(this.configService.get<string>('SCANNER_RADAR_INTERVAL', '20000'), 10),
+        );
     }
 
     // Map<tokenMint, notifiedAt> — koin nggak bakal di-notif lagi selama 6 jam biarpun masuk monitor lagi
@@ -292,13 +313,13 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             active: this.activeMonitoring,
             max: this.MAX_CONCURRENT,
             seen: this.seenTokens.size,
-            notified: this.notifiedTokens.size
+            notified: this.notifiedTokens.size,
         };
     }
 
     private async processNewToken(tokenMint: string) {
         if (this.processingTokens.has(tokenMint)) return;
-        
+
         let incremented = false;
         try {
             if (this.activeMonitoring >= this.MAX_CONCURRENT) {
@@ -309,7 +330,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             incremented = true;
             // 🛡️ Tembok Pelindung: Cek dulu status di DB. Kalau sudah FAILED/TRADED, jangan diproses lagi.
             const existing = await this.prismaService.watchlist.findUnique({
-                where: { tokenMint }
+                where: { tokenMint },
             });
 
             if (existing && (existing.status === 'FAILED' || existing.status === 'TRADED')) {
@@ -319,10 +340,12 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
             // 🚀 PROTEKSI STAGNANT: Hentikan loop retry jika koin sudah di-check >= 50 kali
             if (existing && existing.checkCount >= 50 && existing.status === 'PENDING') {
-                this.logger.log(`[${tokenMint}] ⏳ Stagnant timeout reached (${existing.checkCount} checks). Marking as FAILED.`);
+                this.logger.log(
+                    `[${tokenMint}] ⏳ Stagnant timeout reached (${existing.checkCount} checks). Marking as FAILED.`,
+                );
                 await this.prismaService.watchlist.update({
                     where: { tokenMint },
-                    data: { status: 'FAILED', reason: 'stagnant_timeout' }
+                    data: { status: 'FAILED', reason: 'stagnant_timeout' },
                 });
                 this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); // Cooldown 6 jam
                 return;
@@ -332,24 +355,31 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             const recentTrade = await this.prismaService.trade.findFirst({
                 where: {
                     tokenMint,
-                    createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
-                }
+                    createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+                },
             });
             if (recentTrade) {
-                this.logger.debug(`[${tokenMint}] ⛔ Already traded in last 24h (Trade #${recentTrade.id}). Skip.`);
+                this.logger.debug(
+                    `[${tokenMint}] ⛔ Already traded in last 24h (Trade #${recentTrade.id}). Skip.`,
+                );
                 await this.prismaService.watchlist.upsert({
                     where: { tokenMint },
                     update: { status: 'FAILED', reason: 'already_traded_24h' },
-                    create: { tokenMint, status: 'FAILED', reason: 'already_traded_24h' }
+                    create: { tokenMint, status: 'FAILED', reason: 'already_traded_24h' },
                 });
                 this.seenTokens.set(tokenMint, Date.now() + 24 * 60 * 60 * 1000); // Cooldown 24 jam
                 return;
             }
 
-            this.logger.log(`[${tokenMint}] Monitoring for traction... [Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT}]`);
+            this.logger.log(
+                `[${tokenMint}] Monitoring for traction... [Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT}]`,
+            );
 
             const startTime = Date.now();
-            const maxWaitMin = Number.parseInt(this.configService.get<string>('ANALYZER_MAX_SCAN_DURATION_MIN', '10'), 10);
+            const maxWaitMin = Number.parseInt(
+                this.configService.get<string>('ANALYZER_MAX_SCAN_DURATION_MIN', '10'),
+                10,
+            );
             const maxWaitTime = maxWaitMin * 60 * 1000;
             let localNotified = false;
 
@@ -362,15 +392,15 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             // Upsert ke Watchlist sebagai PENDING di awal & increment checkCount
             await this.prismaService.watchlist.upsert({
                 where: { tokenMint },
-                update: { 
+                update: {
                     lastCheckedAt: new Date(),
-                    checkCount: { increment: 1 } 
+                    checkCount: { increment: 1 },
                 },
-                create: { 
-                    tokenMint, 
+                create: {
+                    tokenMint,
                     status: 'PENDING',
-                    checkCount: 1
-                }
+                    checkCount: 1,
+                },
             });
 
             while (Date.now() - startTime < maxWaitTime) {
@@ -380,31 +410,41 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         where: { tokenMint },
                         data: {
                             lastCheckedAt: new Date(),
-                            checkCount: { increment: 1 }
-                        }
+                            checkCount: { increment: 1 },
+                        },
                     });
 
                     // 🛡️ RE-FETCH LATEST DATA
-                    const currentItem = await this.prismaService.watchlist.findUnique({ where: { tokenMint } });
-                    if (!currentItem || currentItem.status === 'FAILED' || currentItem.status === 'TRADED') return;
+                    const currentItem = await this.prismaService.watchlist.findUnique({
+                        where: { tokenMint },
+                    });
+                    if (
+                        !currentItem ||
+                        currentItem.status === 'FAILED' ||
+                        currentItem.status === 'TRADED'
+                    )
+                        return;
 
                     // 🚀 STAGNANT TIMEOUT CHECK INSIDE LOOP
                     if (currentItem.checkCount >= 50) {
-                        this.logger.log(`[${tokenMint}] ⏳ Stagnant timeout reached in active loop (${currentItem.checkCount} checks). Marking as FAILED.`);
+                        this.logger.log(
+                            `[${tokenMint}] ⏳ Stagnant timeout reached in active loop (${currentItem.checkCount} checks). Marking as FAILED.`,
+                        );
                         await this.prismaService.watchlist.update({
                             where: { tokenMint },
-                            data: { status: 'FAILED', reason: 'stagnant_timeout' }
+                            data: { status: 'FAILED', reason: 'stagnant_timeout' },
                         });
                         this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); // Cooldown 6 jam
                         return;
                     }
 
                     // 🚀 ESTABLISHED REBOUND & CTO BOT SERVICE (Lapis 1)
-                    const reboundResult = await this.establishedAnalyzerService.analyzeAndExecuteRebound(tokenMint);
+                    const reboundResult =
+                        await this.establishedAnalyzerService.analyzeAndExecuteRebound(tokenMint);
                     if (reboundResult.isEstablished && reboundResult.executed) {
                         await this.prismaService.watchlist.update({
                             where: { tokenMint },
-                            data: { status: 'TRADED' }
+                            data: { status: 'TRADED' },
                         });
                         return; // Selesai jika sudah ditransaksikan via rebound
                     }
@@ -424,24 +464,41 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             'rugcheck_api_error',
                             'rebound_analysis_error',
                         ];
-                        const isSafetyFail = securityFailReasons.some(r => reboundResult.reason?.includes(r));
+                        const isSafetyFail = securityFailReasons.some((r) =>
+                            reboundResult.reason?.includes(r),
+                        );
 
                         if (isSafetyFail) {
                             // Security/safety issue → update reason & retry di loop
                             if (reboundResult.reason) {
                                 await this.prismaService.watchlist.update({
                                     where: { tokenMint },
-                                    data: { reason: reboundResult.reason }
+                                    data: { reason: reboundResult.reason },
                                 });
                             }
-                            this.logger.debug(`[${tokenMint}] ⏳ Established safety fail (${reboundResult.reason}). Retrying rebound path...`);
-                            await new Promise((res) => setTimeout(res, Number.parseInt(this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'), 10)));
+                            this.logger.debug(
+                                `[${tokenMint}] ⏳ Established safety fail (${reboundResult.reason}). Retrying rebound path...`,
+                            );
+                            await new Promise((res) =>
+                                setTimeout(
+                                    res,
+                                    Number.parseInt(
+                                        this.configService.get<string>(
+                                            'SCANNER_RECHECK_DELAY_MS',
+                                            '30000',
+                                        ),
+                                        10,
+                                    ),
+                                ),
+                            );
                             continue;
                         }
 
                         // Market metrics fail (rebound_not_triggered, low_buyer_dominance, etc.)
                         // → FALL-THROUGH ke standard isTokenSafeToBuy di bawah! 🎯
-                        this.logger.debug(`[${tokenMint}] 🔄 Established rebound not triggered (${reboundResult.reason}). Falling through to standard analyzer...`);
+                        this.logger.debug(
+                            `[${tokenMint}] 🔄 Established rebound not triggered (${reboundResult.reason}). Falling through to standard analyzer...`,
+                        );
                     }
 
                     const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
@@ -459,24 +516,35 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                 zScore: result.metadata.zScore,
                                 priceChange1h: result.metadata.priceChange1h,
                                 isPumpFun: result.metadata.isPumpFun || false,
-                                pairCreatedAt: result.metadata.pairCreatedAt ? new Date(result.metadata.pairCreatedAt) : null,
-                                lastCheckedAt: new Date()
-                            }
+                                pairCreatedAt: result.metadata.pairCreatedAt
+                                    ? new Date(result.metadata.pairCreatedAt)
+                                    : null,
+                                lastCheckedAt: new Date(),
+                            },
                         });
                     }
 
                     // 🛡️ HARDENED ANTI-SPAM (V2)
                     const surge = result.metadata?.volumeSurge || 0;
                     const mcap = result.metadata?.mcap || 0;
-                    const ageHours = result.metadata?.pairCreatedAt ? (Date.now() - result.metadata.pairCreatedAt) / (1000 * 60 * 60) : 0;
-                    
-                    if (!localNotified && !this.notifiedTokens.has(tokenMint) && result.metadata && mcap >= 20000 && ageHours >= 1.5 && surge >= 1.5) {
+                    const ageHours = result.metadata?.pairCreatedAt
+                        ? (Date.now() - result.metadata.pairCreatedAt) / (1000 * 60 * 60)
+                        : 0;
+
+                    if (
+                        !localNotified &&
+                        !this.notifiedTokens.has(tokenMint) &&
+                        result.metadata &&
+                        mcap >= 20000 &&
+                        ageHours >= 1.5 &&
+                        surge >= 1.5
+                    ) {
                         await this.reportingService.sendWatchlistNotification(
-                            tokenMint, 
-                            mcap, 
-                            ageHours, 
+                            tokenMint,
+                            mcap,
+                            ageHours,
                             result.metadata.symbol,
-                            surge
+                            surge,
                         );
                         localNotified = true;
                         this.notifiedTokens.set(tokenMint, Date.now());
@@ -484,26 +552,33 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     }
 
                     if (result.safe) {
-                        this.logger.log(`[${tokenMint}] 🚀 Traction detected! Attempting to buy...`);
-                        const buyResult = await this.tradeService.attemptBuy(tokenMint, result.metadata);
-                        
+                        this.logger.log(
+                            `[${tokenMint}] 🚀 Traction detected! Attempting to buy...`,
+                        );
+                        const buyResult = await this.tradeService.attemptBuy(
+                            tokenMint,
+                            result.metadata,
+                        );
+
                         if (buyResult.success) {
                             await this.prismaService.watchlist.update({
                                 where: { tokenMint },
-                                data: { status: 'TRADED' }
+                                data: { status: 'TRADED' },
                             });
                         }
                         return;
                     }
 
                     if (result.permanent) {
-                        this.logger.debug(`[${tokenMint}] ⛔ Permanent filter fail (${result.reason}). Giving up.`);
+                        this.logger.debug(
+                            `[${tokenMint}] ⛔ Permanent filter fail (${result.reason}). Giving up.`,
+                        );
                         await this.prismaService.watchlist.update({
                             where: { tokenMint },
-                            data: { status: 'FAILED', reason: result.reason }
+                            data: { status: 'FAILED', reason: result.reason },
                         });
                         // Cooldown 6 jam biar nggak masuk discovery lagi
-                        this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); 
+                        this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
                         return;
                     }
 
@@ -514,15 +589,30 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         const isApiOrNetworkError = [
                             'rugcheck_error',
                             'rebound_analysis_error',
-                            'error'
+                            'error',
                         ].includes(result.reason);
 
                         if (isApiOrNetworkError) {
-                            this.logger.debug(`[${tokenMint}] ⏳ API/Network temporary fail (${result.reason}). Retrying actively.`);
-                            await new Promise((res) => setTimeout(res, Number.parseInt(this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'), 10)));
+                            this.logger.debug(
+                                `[${tokenMint}] ⏳ API/Network temporary fail (${result.reason}). Retrying actively.`,
+                            );
+                            await new Promise((res) =>
+                                setTimeout(
+                                    res,
+                                    Number.parseInt(
+                                        this.configService.get<string>(
+                                            'SCANNER_RECHECK_DELAY_MS',
+                                            '30000',
+                                        ),
+                                        10,
+                                    ),
+                                ),
+                            );
                             continue; // Lanjut loop pemantauan aktif
                         } else {
-                            this.logger.debug(`[${tokenMint}] ⏳ Market metric temporary fail (${result.reason}). Exiting active monitor to let background radar handle it.`);
+                            this.logger.debug(
+                                `[${tokenMint}] ⏳ Market metric temporary fail (${result.reason}). Exiting active monitor to let background radar handle it.`,
+                            );
                             return; // Keluar dari monitor aktif, biarkan status tetap PENDING
                         }
                     }
@@ -530,11 +620,19 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     if (result.reason) {
                         await this.prismaService.watchlist.update({
                             where: { tokenMint },
-                            data: { reason: result.reason }
+                            data: { reason: result.reason },
                         });
                     }
 
-                    await new Promise((res) => setTimeout(res, Number.parseInt(this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'), 10)));
+                    await new Promise((res) =>
+                        setTimeout(
+                            res,
+                            Number.parseInt(
+                                this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'),
+                                10,
+                            ),
+                        ),
+                    );
                 } catch (error) {
                     if (error instanceof Error) {
                         this.logger.error(`Error processing token ${tokenMint}: ${error.message}`);
@@ -546,7 +644,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             this.logger.log(`[${tokenMint}] 💤 Token remained quiet after ${maxWaitMin} minutes.`);
             await this.prismaService.watchlist.update({
                 where: { tokenMint },
-                data: { status: 'FAILED', reason: 'stagnant_timeout' }
+                data: { status: 'FAILED', reason: 'stagnant_timeout' },
             });
             this.seenTokens.delete(tokenMint);
         } finally {
