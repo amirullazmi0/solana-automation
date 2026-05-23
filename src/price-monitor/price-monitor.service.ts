@@ -229,7 +229,7 @@ export class PriceMonitorService {
             const calculatedStop = currentPrice * (1 - (effectiveTrailingDistancePercent / 100));
             
             // 🛡️ ZERO-LOSS PROTECTION: Kalau untung >= 8%, jaring jual MINIMAL di harga beli + 3% (menutup fee)
-            let newTrailingStop = Math.max(calculatedStop, trade.entryPrice);
+            let newTrailingStop = Math.max(calculatedStop, trade.entryPrice * 1.03);
             if (profitPercent >= 8) {
                 const breakEvenPlus = trade.entryPrice * 1.03;
                 newTrailingStop = Math.max(newTrailingStop, breakEvenPlus);
