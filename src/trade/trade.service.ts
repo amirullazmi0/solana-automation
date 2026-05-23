@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
-import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+import { Connection, Keypair, VersionedTransaction, ParsedTransactionWithMeta } from '@solana/web3.js';
 import axios from 'axios';
 import bs58 from 'bs58';
 import * as https from 'https';
@@ -543,18 +543,105 @@ export class TradeService implements OnModuleInit {
                 throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
             }
 
-            return { success: true, entryPrice: price || 0.00000001, txHash: txid };
+            // 🛡️ AMBIL HARGA EKSEKUSI RIIL DARI BLOCKCHAIN
+            let finalPrice = price;
+            try {
+                const actualSwap = await this.getActualSwapDetails(
+                    txid,
+                    this.wallet.publicKey.toBase58(),
+                    side === 'BUY' ? outputMint : inputMint,
+                );
+                if (actualSwap) {
+                    const solPrice = await this.getSolPrice();
+                    if (side === 'BUY') {
+                        const solSpent = Math.abs(actualSwap.solChange);
+                        const tokensReceived = actualSwap.tokenChange;
+                        if (tokensReceived > 0) {
+                            finalPrice = (solSpent * solPrice) / tokensReceived;
+                            this.logger.log(
+                                `[Jupiter] Actual BUY price calculated from on-chain balances: $${finalPrice.toFixed(8)} (Quote: $${price.toFixed(8)})`,
+                            );
+                        }
+                    } else {
+                        const solReceived = Math.abs(actualSwap.solChange);
+                        const tokensSpent = Math.abs(actualSwap.tokenChange);
+                        if (tokensSpent > 0) {
+                            finalPrice = (solReceived * solPrice) / tokensSpent;
+                            this.logger.log(
+                                `[Jupiter] Actual SELL price calculated from on-chain balances: $${finalPrice.toFixed(8)} (Quote: $${price.toFixed(8)})`,
+                            );
+                        }
+                    }
+                }
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                this.logger.error(
+                    `[Jupiter] Failed to fetch actual swap details: ${msg}. Falling back to quote price.`,
+                );
+            }
+
+            return { success: true, entryPrice: finalPrice || 0.00000001, txHash: txid };
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             if (retryCount < maxRetries - 1) {
                 const waitTime = 1000 * (retryCount + 1);
                 this.logger.log(`[Jupiter] Retrying in ${waitTime}ms...`);
-                await new Promise(res => setTimeout(res, waitTime));
-                return this.executeJupiterSwap(inputMint, outputMint, amount, side, buyAmountUSD, retryCount + 1, customSlippageBps, priorityFeeLamports);
+                await new Promise((res) => setTimeout(res, waitTime));
+                return this.executeJupiterSwap(
+                    inputMint,
+                    outputMint,
+                    amount,
+                    side,
+                    buyAmountUSD,
+                    retryCount + 1,
+                    customSlippageBps,
+                    priorityFeeLamports,
+                );
             }
             return { success: false, entryPrice: 0, error: message, txHash: undefined };
         }
     }
+
+    private async getActualSwapDetails(
+        txHash: string,
+        wallet: string,
+        tokenMint: string,
+    ): Promise<{ solChange: number; tokenChange: number } | null> {
+        let tx: ParsedTransactionWithMeta | null = null;
+        for (let i = 0; i < 5; i++) {
+            try {
+                tx = await this.connection.getParsedTransaction(txHash, {
+                    maxSupportedTransactionVersion: 0,
+                });
+                if (tx) break;
+            } catch (err) {
+                this.logger.warn(`Failed to parse transaction ${txHash} on attempt ${i + 1}: ${err}`);
+            }
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+        if (!tx) return null;
+
+        // Cari perubahan saldo SOL wallet
+        const walletIndex = tx.transaction.message.accountKeys.findIndex((k) => k.pubkey.toBase58() === wallet);
+        let solChange = 0;
+        if (walletIndex !== -1) {
+            const preSol = tx.meta?.preBalances[walletIndex] ?? 0;
+            const postSol = tx.meta?.postBalances[walletIndex] ?? 0;
+            solChange = (postSol - preSol) / 1_000_000_000;
+        }
+
+        // Cari perubahan saldo Token wallet
+        const preTokenAmount =
+            tx.meta?.preTokenBalances?.find((b) => b.owner === wallet && b.mint === tokenMint)?.uiTokenAmount
+                .uiAmount ?? 0;
+        const postTokenAmount =
+            tx.meta?.postTokenBalances?.find((b) => b.owner === wallet && b.mint === tokenMint)?.uiTokenAmount
+                .uiAmount ?? 0;
+        const tokenChange = postTokenAmount - preTokenAmount;
+
+        return { solChange, tokenChange };
+    }
+
     private async fetchTokenSymbol(tokenMint: string): Promise<string> {
         try {
             // Try DexScreener first
