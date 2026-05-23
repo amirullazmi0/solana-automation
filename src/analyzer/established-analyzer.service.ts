@@ -37,10 +37,7 @@ interface RugCheckKnownAccount {
 export class EstablishedAnalyzerService {
     private readonly logger = new Logger(EstablishedAnalyzerService.name);
     private readonly connection: Connection;
-    private readonly ipCache: Record<string, string> = {
-        'api.rugcheck.xyz': '104.26.0.126',
-        'api.dexscreener.com': '104.26.8.188',
-    };
+    private readonly ipCache: Record<string, string> = {};
 
     constructor(
         private readonly configService: ConfigService,

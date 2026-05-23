@@ -25,8 +25,6 @@ export class ReportingService implements OnModuleInit {
 
     // Cache for resolved IPs
     private ipCache: Record<string, string> = {
-        'api.jup.ag': '18.239.105.107',        // Jupiter Main
-        'api.dexscreener.com': '104.26.13.233',  // DexScreener API
         '1.1.1.1': '1.1.1.1',
         '8.8.8.8': '8.8.8.8',
     };

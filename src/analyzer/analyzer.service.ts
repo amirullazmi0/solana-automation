@@ -76,11 +76,7 @@ export class AnalyzerService {
     private readonly logger = new Logger(AnalyzerService.name);
     private readonly connection: Connection;
     private readonly jupiterApiKey: string;
-    private readonly ipCache: Record<string, string> = {
-        'api.jup.ag': '18.239.105.107',
-        'api.rugcheck.xyz': '104.26.0.126',
-        'api.dexscreener.com': '104.26.8.188',
-    };
+    private readonly ipCache: Record<string, string> = {};
 
     constructor(
         private readonly configService: ConfigService,
@@ -416,7 +412,10 @@ export class AnalyzerService {
             }
 
             const ip = response?.data?.Answer?.[0]?.data;
-            if (ip && /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) return ip;
+            if (ip && /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ip)) {
+                this.ipCache[hostname] = ip;
+                return ip;
+            }
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`[${hostname}] DNS resolution failed: ${msg}`);
