@@ -480,8 +480,8 @@ export class AnalyzerService {
             const creator = response.data.creator;
             let creatorPct = 0;
             if (creator) {
-                const creatorHolder = topHolders.find(h => h.address === creator || h.owner === creator);
-                creatorPct = creatorHolder ? creatorHolder.pct : 0;
+                // Gunakan RPC langsung alih-alih data topHolders RugCheck yang tidak lengkap
+                creatorPct = await this.getCreatorBalancePercent(creator, tokenMint);
             }
             const isCTO = creator ? (creatorPct < 0.1) : false;
 
@@ -552,6 +552,32 @@ export class AnalyzerService {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`RugCheck API Error: ${msg}`);
             return { passed: false, reason: 'rugcheck_error', permanent: false };
+        }
+    }
+
+    private async getCreatorBalancePercent(creatorAddress: string, tokenMint: string): Promise<number> {
+        try {
+            const { PublicKey } = await import('@solana/web3.js');
+            const creatorKey = new PublicKey(creatorAddress);
+            const mintKey = new PublicKey(tokenMint);
+            
+            const accounts = await this.connection.getParsedTokenAccountsByOwner(creatorKey, { mint: mintKey });
+            let creatorBalance = 0;
+            if (accounts.value.length > 0) {
+                creatorBalance = accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+            }
+
+            const accountInfo = await this.connection.getAccountInfo(mintKey);
+            if (!accountInfo) return 0;
+            const { getMint } = await import('@solana/spl-token');
+            const mintInfo = await getMint(this.connection, mintKey, undefined, accountInfo.owner);
+            const totalSupply = Number(mintInfo.supply) / Math.pow(10, mintInfo.decimals);
+
+            if (totalSupply <= 0) return 0;
+            return (creatorBalance / totalSupply) * 100;
+        } catch (error) {
+            this.logger.error(`Failed to get creator balance percent: ${error instanceof Error ? error.message : String(error)}`);
+            return 0;
         }
     }
 }

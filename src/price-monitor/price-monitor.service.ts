@@ -57,23 +57,6 @@ export class PriceMonitorService {
 
             this.processingTrades.add(trade.id);
             try {
-                // DETEKSI RUGPULL (Gua tetep pake 25% drop liq)
-                // Karena likuiditas butuh DexScreener (boros kalau tiap 2 detik),
-                // kita cek likuiditas cuma tiap 10 detik atau kalau harga drop parah.
-                const isPriceDroppingFast = currentPrice < (trade.entryPrice * 0.8); // Drop > 20%
-                const entryLiq = trade.entryLiquidity || 0;
-                if (entryLiq > 0 && (isPriceDroppingFast || Math.random() < 0.2)) { // 20% chance to check liq
-                    const latestLiq = await this.getLiquidityOnly(trade.tokenMint);
-                    if (latestLiq && latestLiq > 0) {
-                        const liqDrop = ((entryLiq - latestLiq) / entryLiq) * 100;
-                        if (liqDrop > 25) {
-                            this.logger.warn(`[Slot ${trade.slotNumber}] 🚨 RUGPULL DETECTED! Liquidity dropped ${liqDrop.toFixed(2)}%.`);
-                            await this.tradeService.executeSell(trade.id, currentPrice, 'RUGPULL');
-                            continue;
-                        }
-                    }
-                }
-
                 await this.evaluateTrade(trade, currentPrice);
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
