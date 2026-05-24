@@ -35,7 +35,7 @@ Real-time Telegram notifications with detailed stats:
 - **IPv4 Force** — `https.Agent({ family: 4 })` untuk stabilitas VPS
 - **LP Safety Check** — Wajib LP burned/locked
 - **Mint Authority Check** — Wajib Mint Authority disabled
-- **Anti-Repeat Buy** — Cooldown 24 jam per token
+- **Anti-Repeat Buy (Dynamic Cooldown)** — Cooldown dinamis (6 jam jika profit, 24 jam jika rugi) per token
 - **Anti-Honeypot** — Deteksi koin yang tidak bisa dijual
 
 ### 6. 🔥 Established Rebound & CTO Bot
@@ -353,5 +353,5 @@ Set via `.env`.
 
 ---
 
-*Last updated: Mei 2026 — Strategi: Real-Time SOL & USD Metrics + Trailing Stop Optimization (Round 11-14)*
+*Last updated: Mei 2026 — Strategi: Dynamic Cooldown Win/Loss + Real-Time SOL & USD Metrics (Round 11-15)*
 *Created with ❤️ by Antigravity for Amirull Azmi.*

@@ -178,19 +178,29 @@ export class TradeService implements OnModuleInit {
             targetTrailingDistance?: number;
         }
     ): Promise<{ success: boolean; message: string }> {
-        // 1. Cek apakah sudah punya koin ini (OPEN) atau sudah pernah trading dalam 24 jam terakhir (Cooldown)
-        const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const existing = await this.prismaService.trade.findFirst({
-            where: { 
-                tokenMint, 
-                createdAt: { gte: dayAgo }
-            }
+        // 1. Cek apakah sudah punya koin ini (OPEN) atau sedang dalam cooldown
+        const recentTrade = await this.prismaService.trade.findFirst({
+            where: { tokenMint },
+            orderBy: { createdAt: 'desc' }
         });
 
-        if (existing && !customAmountUSD) { // Jika manual buy (ada customAmount), abaikan cooldown
-            const msg = existing.status === 'OPEN' ? `Already holding ${tokenMint}` : `Token ${tokenMint} is in 24h cooldown. Skip.`;
-            return { success: false, message: msg };
+        if (recentTrade && !customAmountUSD) { // Jika manual buy (ada customAmount), abaikan cooldown
+            if (recentTrade.status === 'OPEN') {
+                return { success: false, message: `Already holding ${tokenMint}` };
+            }
+            const winCooldownHours = Number.parseInt(this.configService.get<string>('COOLDOWN_WIN_HOURS', '6'), 10);
+            const lossCooldownHours = Number.parseInt(this.configService.get<string>('COOLDOWN_LOSS_HOURS', '24'), 10);
+            const isWin = (recentTrade.profitUsd || 0) > 0;
+            const cooldownHours = isWin ? winCooldownHours : lossCooldownHours;
+            const cooldownMillis = cooldownHours * 60 * 60 * 1000;
+            const cooldownExpiredAt = recentTrade.updatedAt.getTime() + cooldownMillis;
+
+            if (Date.now() < cooldownExpiredAt) {
+                const msg = `Token ${tokenMint} is in cooldown until ${new Date(cooldownExpiredAt).toISOString()} (Last outcome: ${isWin ? 'WIN' : 'LOSS'}, Cooldown: ${cooldownHours}h). Skip.`;
+                return { success: false, message: msg };
+            }
         }
+
 
         const openTradesCount = await this.prismaService.trade.count({ where: { status: 'OPEN' } });
         if (openTradesCount >= this.totalSlots && !customAmountUSD) {

@@ -334,8 +334,55 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             });
 
             if (existing && (existing.status === 'FAILED' || existing.status === 'TRADED')) {
-                this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); // Cooldown 6 jam
-                return;
+                const isTempFail = ['already_traded_24h', 'cooldown_win', 'cooldown_loss', 'stagnant_timeout'].includes(existing.reason || '');
+                if (existing.status === 'TRADED' || isTempFail) {
+                    const recentTrade = await this.prismaService.trade.findFirst({
+                        where: { tokenMint },
+                        orderBy: { createdAt: 'desc' },
+                    });
+
+                    let expired = false;
+                    let isWin = false;
+                    let cooldownHours = 24;
+                    let cooldownExpiredAt = 0;
+
+                    if (recentTrade) {
+                        if (recentTrade.status === 'OPEN') {
+                            this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
+                            return;
+                        }
+                        const winCooldownHours = Number.parseInt(this.configService.get<string>('COOLDOWN_WIN_HOURS', '6'), 10);
+                        const lossCooldownHours = Number.parseInt(this.configService.get<string>('COOLDOWN_LOSS_HOURS', '24'), 10);
+                        isWin = (recentTrade.profitUsd || 0) > 0;
+                        cooldownHours = isWin ? winCooldownHours : lossCooldownHours;
+                        const cooldownMillis = cooldownHours * 60 * 60 * 1000;
+                        cooldownExpiredAt = recentTrade.updatedAt.getTime() + cooldownMillis;
+                        expired = Date.now() >= cooldownExpiredAt;
+                    } else if (existing.status === 'TRADED') {
+                        cooldownExpiredAt = existing.lastCheckedAt.getTime() + 24 * 60 * 60 * 1000;
+                        expired = Date.now() >= cooldownExpiredAt;
+                    } else {
+                        cooldownExpiredAt = existing.lastCheckedAt.getTime() + 6 * 60 * 60 * 1000;
+                        expired = Date.now() >= cooldownExpiredAt;
+                    }
+
+                    if (expired) {
+                        this.logger.log(
+                            `[${tokenMint}] 🔄 Cooldown expired. Resetting watchlist status to PENDING.`,
+                        );
+                        await this.prismaService.watchlist.update({
+                            where: { tokenMint },
+                            data: { status: 'PENDING', reason: null, checkCount: 0 },
+                        });
+                        this.seenTokens.delete(tokenMint);
+                    } else {
+                        this.seenTokens.set(tokenMint, cooldownExpiredAt);
+                        return;
+                    }
+                } else {
+                    this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
+                    return;
+                }
             }
 
             // 🚀 PROTEKSI STAGNANT: Hentikan loop retry jika koin sudah di-check >= 50 kali
@@ -351,25 +398,39 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 return;
             }
 
-            // 🛡️ ANTI-REPEAT BUY: Cek apakah token ini sudah pernah di-trade dalam 24 jam terakhir
+            // 🛡️ ANTI-REPEAT BUY: Cek apakah token ini sedang dalam cooldown
             const recentTrade = await this.prismaService.trade.findFirst({
-                where: {
-                    tokenMint,
-                    createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-                },
+                where: { tokenMint },
+                orderBy: { createdAt: 'desc' },
             });
             if (recentTrade) {
-                this.logger.debug(
-                    `[${tokenMint}] ⛔ Already traded in last 24h (Trade #${recentTrade.id}). Skip.`,
-                );
-                await this.prismaService.watchlist.upsert({
-                    where: { tokenMint },
-                    update: { status: 'FAILED', reason: 'already_traded_24h' },
-                    create: { tokenMint, status: 'FAILED', reason: 'already_traded_24h' },
-                });
-                this.seenTokens.set(tokenMint, Date.now() + 24 * 60 * 60 * 1000); // Cooldown 24 jam
-                return;
+                if (recentTrade.status === 'OPEN') {
+                    this.logger.debug(
+                        `[${tokenMint}] ⛔ Already holding this token (Trade #${recentTrade.id}). Skip.`,
+                    );
+                    return;
+                }
+                const winCooldownHours = Number.parseInt(this.configService.get<string>('COOLDOWN_WIN_HOURS', '6'), 10);
+                const lossCooldownHours = Number.parseInt(this.configService.get<string>('COOLDOWN_LOSS_HOURS', '24'), 10);
+                const isWin = (recentTrade.profitUsd || 0) > 0;
+                const cooldownHours = isWin ? winCooldownHours : lossCooldownHours;
+                const cooldownMillis = cooldownHours * 60 * 60 * 1000;
+                const cooldownExpiredAt = recentTrade.updatedAt.getTime() + cooldownMillis;
+
+                if (Date.now() < cooldownExpiredAt) {
+                    this.logger.debug(
+                        `[${tokenMint}] ⛔ Token is in cooldown until ${new Date(cooldownExpiredAt).toISOString()} (Last outcome: ${isWin ? 'WIN' : 'LOSS'}, Cooldown: ${cooldownHours}h). Skip.`,
+                    );
+                    await this.prismaService.watchlist.upsert({
+                        where: { tokenMint },
+                        update: { status: 'FAILED', reason: `cooldown_${isWin ? 'win' : 'loss'}` },
+                        create: { tokenMint, status: 'FAILED', reason: `cooldown_${isWin ? 'win' : 'loss'}` },
+                    });
+                    this.seenTokens.set(tokenMint, cooldownExpiredAt);
+                    return;
+                }
             }
+
 
             this.logger.log(
                 `[${tokenMint}] Monitoring for traction... [Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT}]`,
