@@ -369,6 +369,8 @@ export class TradeService implements OnModuleInit {
                 const entryValueUsd = entrySolValue * solPrice;
                 const exitValueUsd = sellAmount * exitPrice;
                 const estimatedProfitUsd = exitValueUsd - entryValueUsd;
+                const totalUsdSpent = finalTokensSold * trade.entryPrice;
+                const totalUsdReceived = finalTokensSold * exitPrice;
 
                 // ✅ DATABASE UPDATE: Hanya dilakukan jika transaksi Solana SUKSES
                 if (percentage >= 1.0) {
@@ -423,7 +425,9 @@ export class TradeService implements OnModuleInit {
                         exitPriceSol: finalSolReceived / finalTokensSold,
                         solSpent: entrySolValue,
                         solReceived: finalSolReceived,
-                        solProfitPercent
+                        solProfitPercent,
+                        usdSpent: totalUsdSpent,
+                        usdReceived: totalUsdReceived
                     }
                 );
                 return true;

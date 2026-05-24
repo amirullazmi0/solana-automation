@@ -428,7 +428,8 @@ export class ReportingService implements OnModuleInit {
         
         let solDetails = '';
         if (details) {
-            solDetails = `💸 *SOL Spent:* \`${details.solSpent.toFixed(4)} SOL\`\n` +
+            const totalUsdSpent = details.solSpent * (details.solPrice || 0);
+            solDetails = `💸 *SOL Spent:* \`${details.solSpent.toFixed(4)} SOL\` *($${totalUsdSpent.toFixed(2)})*\n` +
                          `💵 *SOL Price:* \`$${details.solPrice?.toFixed(2) || '0.00'}\`\n`;
         }
 
@@ -489,6 +490,8 @@ export class ReportingService implements OnModuleInit {
             solSpent?: number;
             solReceived?: number;
             solProfitPercent?: number;
+            usdSpent?: number;
+            usdReceived?: number;
         }
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
@@ -503,13 +506,19 @@ export class ReportingService implements OnModuleInit {
                 ? `${details.solProfitPercent >= 0 ? '🟢' : '🔴'} *SOL Profit:* \`${details.solProfitPercent.toFixed(2)}%\`\n`
                 : '';
             
-            detailedStats = `💵 *USD Entry:* \`$${details.entryPriceUsd.toFixed(8)}\`\n` +
-                            `💵 *USD Sell:* \`$${details.exitPriceUsd.toFixed(8)}\`\n` +
-                            `💎 *SOL Entry:* \`${details.entryPriceSol?.toFixed(8) || '0.00000000'} SOL\`\n` +
-                            `💎 *SOL Sell:* \`${details.exitPriceSol?.toFixed(8) || '0.00000000'} SOL\`\n` +
+            const usdSpentDisplay = details.usdSpent !== undefined && details.usdReceived !== undefined
+                ? `📥 *USD Spent:* \`$${details.usdSpent.toFixed(2)}\`\n` +
+                  `📤 *USD Received:* \`$${details.usdReceived.toFixed(2)}\`\n`
+                : '';
+            
+            detailedStats = `💵 *USD Entry Price:* \`$${details.entryPriceUsd.toFixed(8)}\`\n` +
+                            `💵 *USD Sell Price:* \`$${details.exitPriceUsd.toFixed(8)}\`\n` +
+                            `💎 *SOL Entry Price:* \`${details.entryPriceSol?.toFixed(10) || '0.0000000000'} SOL\`\n` +
+                            `💎 *SOL Sell Price:* \`${details.exitPriceSol?.toFixed(10) || '0.0000000000'} SOL\`\n` +
                             `━━━━━━━━━━━━━━━━━━\n` +
                             `📥 *SOL Spent:* \`${details.solSpent?.toFixed(4) || '0.0000'} SOL\`\n` +
                             `📤 *SOL Received:* \`${details.solReceived?.toFixed(4) || '0.0000'} SOL\`\n` +
+                            usdSpentDisplay +
                             solProfitDisplay;
         }
 
