@@ -222,7 +222,7 @@ export class TradeService implements OnModuleInit {
 
         this.logger.log(`[Slot ${slotToUse}] Attempting to buy ${tokenMint} with $${buyAmountUSD} (${amountInSol.toFixed(4)} SOL)`);
 
-        const { success, entryPrice, error, txHash } = await this.executeJupiterSwap(
+        const { success, entryPrice, error, txHash, actualSol, actualTokens } = await this.executeJupiterSwap(
             WRAPPED_SOL_MINT,
             tokenMint,
             amountInLamports,
@@ -234,6 +234,7 @@ export class TradeService implements OnModuleInit {
         );
 
         if (success && entryPrice > 0) {
+            const finalAmountInSol = actualSol || amountInSol;
             const symbol = await this.fetchTokenSymbol(tokenMint);
             // Get initial balances for watch addresses
             let initialCreatorBalance = 0;
@@ -257,7 +258,7 @@ export class TradeService implements OnModuleInit {
                     highestPrice: entryPrice,
                     trailingStopPrice: 0, // 🛡️ Initialized to 0, PriceMonitor will activate it once in profit
                     status: 'OPEN',
-                    amountInSol,
+                    amountInSol: finalAmountInSol,
                     buyTxHash: txHash || null,
                     entryLiquidity: metadata?.liquidity || 0,
                     entryMarketCap: metadata?.marketCap || 0,
@@ -272,7 +273,11 @@ export class TradeService implements OnModuleInit {
             });
             this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
             const strategyName = options?.targetTakeProfit ? '🔥 Established Rebound & CTO (TP 18%, TSL 2.5%, Hard SL 20%)' : 'Standard Second-Wave';
-            await this.reportingService.sendBuyAlert(tokenMint, entryPrice, slotToUse, symbol, metadata?.socials, strategyName);
+            await this.reportingService.sendBuyAlert(tokenMint, entryPrice, slotToUse, symbol, metadata?.socials, strategyName, {
+                solSpent: finalAmountInSol,
+                tokensReceived: actualTokens,
+                solPrice,
+            });
             
             // 🚀 MONITORING: PriceMonitorService otomatis akan mendeteksi trade baru dari DB
             return { success: true, message: `Successfully bought ${symbol} at slot ${slotToUse}` };
@@ -340,7 +345,7 @@ export class TradeService implements OnModuleInit {
             // 🚀 Panic Gas Accel: Hajar priority fee tinggi (0.0005 SOL = 500,000 lamports) biar instan masuk block pertama
             const sellPriorityFee = isUrgent ? 500_000 : undefined;
             
-            const { success, entryPrice: exitPriceResult, error, txHash } = await this.executeJupiterSwap(
+            const { success, entryPrice: exitPriceResult, error, txHash, actualSol, actualTokens } = await this.executeJupiterSwap(
                 trade.tokenMint,
                 'So11111111111111111111111111111111111111112',
                 amountInLamports,
@@ -355,7 +360,13 @@ export class TradeService implements OnModuleInit {
                 const exitPrice = exitPriceResult || 0;
                 const profit = ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100;
                 const solPrice = await this.getSolPrice();
-                const entryValueUsd = (trade.amountInSol * percentage) * solPrice;
+                
+                const finalSolReceived = actualSol || (sellAmount * exitPrice) / solPrice;
+                const finalTokensSold = actualTokens || sellAmount;
+                const entrySolValue = trade.amountInSol * percentage;
+                const solProfitPercent = ((finalSolReceived - entrySolValue) / entrySolValue) * 100;
+                
+                const entryValueUsd = entrySolValue * solPrice;
                 const exitValueUsd = sellAmount * exitPrice;
                 const estimatedProfitUsd = exitValueUsd - entryValueUsd;
 
@@ -405,6 +416,15 @@ export class TradeService implements OnModuleInit {
                     profit,
                     exitReason,
                     trade.symbol || undefined,
+                    {
+                        entryPriceUsd: trade.entryPrice,
+                        exitPriceUsd: exitPrice,
+                        entryPriceSol: entrySolValue / finalTokensSold,
+                        exitPriceSol: finalSolReceived / finalTokensSold,
+                        solSpent: entrySolValue,
+                        solReceived: finalSolReceived,
+                        solProfitPercent
+                    }
                 );
                 return true;
             }
@@ -429,7 +449,7 @@ export class TradeService implements OnModuleInit {
         retryCount = 0,
         customSlippageBps?: number,
         priorityFeeLamports?: number
-    ): Promise<{ success: boolean; entryPrice: number; error?: string; txHash?: string }> {
+    ): Promise<{ success: boolean; entryPrice: number; error?: string; txHash?: string; actualSol?: number; actualTokens?: number }> {
         const maxRetries = 3;
         try {
             // Jurus Pamungkas: Pakai Paid Endpoint & API Key
@@ -545,6 +565,9 @@ export class TradeService implements OnModuleInit {
 
             // 🛡️ AMBIL HARGA EKSEKUSI RIIL DARI BLOCKCHAIN
             let finalPrice = price;
+            let actualSol = side === 'BUY' ? (amount / 1_000_000_000) : (quoteData.outAmount / 1_000_000_000);
+            let actualTokens = side === 'BUY' ? (quoteData.outAmount / Math.pow(10, decimals)) : (amount / Math.pow(10, decimals));
+
             try {
                 const actualSwap = await this.getActualSwapDetails(
                     txid,
@@ -553,20 +576,18 @@ export class TradeService implements OnModuleInit {
                 );
                 if (actualSwap) {
                     const solPrice = await this.getSolPrice();
+                    actualSol = Math.abs(actualSwap.solChange);
+                    actualTokens = Math.abs(actualSwap.tokenChange);
                     if (side === 'BUY') {
-                        const solSpent = Math.abs(actualSwap.solChange);
-                        const tokensReceived = actualSwap.tokenChange;
-                        if (tokensReceived > 0) {
-                            finalPrice = (solSpent * solPrice) / tokensReceived;
+                        if (actualTokens > 0) {
+                            finalPrice = (actualSol * solPrice) / actualTokens;
                             this.logger.log(
                                 `[Jupiter] Actual BUY price calculated from on-chain balances: $${finalPrice.toFixed(8)} (Quote: $${price.toFixed(8)})`,
                             );
                         }
                     } else {
-                        const solReceived = Math.abs(actualSwap.solChange);
-                        const tokensSpent = Math.abs(actualSwap.tokenChange);
-                        if (tokensSpent > 0) {
-                            finalPrice = (solReceived * solPrice) / tokensSpent;
+                        if (actualTokens > 0) {
+                            finalPrice = (actualSol * solPrice) / actualTokens;
                             this.logger.log(
                                 `[Jupiter] Actual SELL price calculated from on-chain balances: $${finalPrice.toFixed(8)} (Quote: $${price.toFixed(8)})`,
                             );
@@ -580,7 +601,7 @@ export class TradeService implements OnModuleInit {
                 );
             }
 
-            return { success: true, entryPrice: finalPrice || 0.00000001, txHash: txid };
+            return { success: true, entryPrice: finalPrice || 0.00000001, txHash: txid, actualSol, actualTokens };
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             if (retryCount < maxRetries - 1) {

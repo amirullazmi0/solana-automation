@@ -415,16 +415,29 @@ export class ReportingService implements OnModuleInit {
         slotUsed: number, 
         symbol?: string, 
         socials?: TokenMetadata['socials'],
-        strategy?: string
+        strategy?: string,
+        details?: {
+            solSpent: number;
+            tokensReceived?: number;
+            solPrice?: number;
+        }
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
         const prefix = this.isDryRun ? '🤖 [SIMULASI] ' : '🚀 ';
         const strategyDisplay = strategy ? `\n⚡ *Strategy:* \`${strategy}\`` : '';
+        
+        let solDetails = '';
+        if (details) {
+            solDetails = `💸 *SOL Spent:* \`${details.solSpent.toFixed(4)} SOL\`\n` +
+                         `💵 *SOL Price:* \`$${details.solPrice?.toFixed(2) || '0.00'}\`\n`;
+        }
+
         const message = `${prefix}*SOLANA BUY ALERT* 🚀\n` +
                         `━━━━━━━━━━━━━━━━━━\n` +
                         `💎 *Token:* ${displaySymbol}\n` +
                         `🆔 *Mint:* \`${tokenMint}\`\n` +
                         `💰 *Price:* \`$${price.toFixed(8)}\`\n` +
+                        solDetails +
                         `🧱 *Slot:* #${slotUsed}\n` +
                         `━━━━━━━ 📊 ━━━━━━━\n` +
                         `📈 *Action:* BUY EXECUTION${strategyDisplay}`;
@@ -468,6 +481,15 @@ export class ReportingService implements OnModuleInit {
         netProfitPercent: number,
         exitReason: string,
         symbol?: string,
+        details?: {
+            entryPriceUsd: number;
+            exitPriceUsd: number;
+            entryPriceSol?: number;
+            exitPriceSol?: number;
+            solSpent?: number;
+            solReceived?: number;
+            solProfitPercent?: number;
+        }
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
         const isSuccess = netProfitPercent >= 0;
@@ -475,12 +497,29 @@ export class ReportingService implements OnModuleInit {
         const profitEmoji = isSuccess ? '🟢' : '🔴';
         const prefix = this.isDryRun ? '🤖 [SIMULASI] ' : '';
         
+        let detailedStats = '';
+        if (details) {
+            const solProfitDisplay = details.solProfitPercent !== undefined 
+                ? `${details.solProfitPercent >= 0 ? '🟢' : '🔴'} *SOL Profit:* \`${details.solProfitPercent.toFixed(2)}%\`\n`
+                : '';
+            
+            detailedStats = `💵 *USD Entry:* \`$${details.entryPriceUsd.toFixed(8)}\`\n` +
+                            `💵 *USD Sell:* \`$${details.exitPriceUsd.toFixed(8)}\`\n` +
+                            `💎 *SOL Entry:* \`${details.entryPriceSol?.toFixed(8) || '0.00000000'} SOL\`\n` +
+                            `💎 *SOL Sell:* \`${details.exitPriceSol?.toFixed(8) || '0.00000000'} SOL\`\n` +
+                            `━━━━━━━━━━━━━━━━━━\n` +
+                            `📥 *SOL Spent:* \`${details.solSpent?.toFixed(4) || '0.0000'} SOL\`\n` +
+                            `📤 *SOL Received:* \`${details.solReceived?.toFixed(4) || '0.0000'} SOL\`\n` +
+                            solProfitDisplay;
+        }
+
         const message = `${prefix}${emoji} *SOLANA SELL ALERT* ${emoji}\n` +
                         `━━━━━━━━━━━━━━━━━━\n` +
                         `💎 *Token:* ${displaySymbol}\n` +
                         `🆔 *Mint:* \`${tokenMint}\`\n` +
                         `💰 *Sell Price:* \`$${sellPrice.toFixed(8)}\`\n` +
-                        `📊 *Result:* ${profitEmoji} *${netProfitPercent.toFixed(2)}%*\n` +
+                        `📊 *Result (USD):* ${profitEmoji} *${netProfitPercent.toFixed(2)}%*\n` +
+                        detailedStats +
                         `━━━━━━━━━━━━━━━━━━\n` +
                         `⚡ *Action:* ${exitReason.replace(/_/g, ' ')} TRIGGERED`;
 
