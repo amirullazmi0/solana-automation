@@ -24,11 +24,11 @@ Bot memahami mekanisme PumpFun:
 - **Safety RPC** — 3x retry dengan backoff jika RPC error (bukan langsung reject)
 
 ### 4. 💎 Premium Telegram Alerts
-Notifikasi real-time yang informatif:
-- 🚀 **BUY ALERT** — Lengkap dengan link DexScreener & Socials
-- 📈 **TRAILING UPDATE** — Cooldown 5 menit agar tidak spam
-- 💰 **SELL ALERT** — Menampilkan % Profit/Loss asli
-- 🔍 **WATCHLIST** — Notifikasi koin potensial (Second Wave Radar)
+Real-time Telegram notifications with detailed stats:
+- 🚀 **BUY ALERT** — Lengkap dengan link DexScreener & Socials, total SOL Spent, harga SOL, dan estimasi nilai USD.
+- 📈 **TRAILING UPDATE** — Cooldown 5 menit agar tidak spam.
+- 💰 **SELL ALERT** — Menampilkan keuntungan bersih riil (SOL spent vs received, profit % SOL, nominal USD spent vs received, profit % USD, serta unit price dengan presisi 10 desimal SOL).
+- 🔍 **WATCHLIST** — Notifikasi koin potensial (Second Wave Radar).
 
 ### 5. 🔒 Hardened Security
 - **DNS Hardening** — Fallback DoH (DNS over HTTPS) via Cloudflare & Google
@@ -294,14 +294,15 @@ PriceMonitorService mulai tracking:
 | Kondisi | Aksi | Slippage |
 |---------|------|----------|
 | Price naik ≥ `TAKE_PROFIT_PERCENT` (Standard: 40% / CTO: 18%) | Trailing Stop **aktif** | Normal (5%) |
-| Price turun ≥ `TRAILING_DISTANCE_PERCENT` (Standard: 4% / CTO: 2.5%) dari peak | **SELL** (Trailing Stop) | Normal (5%) |
-| Price turun ≥ `STOP_LOSS_PERCENT` (Standard: 35% / CTO: 20%) dari entry | **SELL** (Stop Loss) | Panic (15%) |
+| Price turun ≥ `TRAILING_DISTANCE_PERCENT` (Standard: 15% / CTO: 2.5%) dari peak | **SELL** (Trailing Stop) | Normal (5%) |
+| Price turun ≥ `STOP_LOSS_PERCENT` (Standard: 70% / CTO: 20%) dari entry | **SELL** (Stop Loss) | Panic (15%) |
 | Dev dump terdeteksi (creator sell >50%) | **SELL** (Rugpull) | Panic (15%) |
 
 #### ⚡ Optimasi Profitabilitas Tambahan:
 - **Dynamic Take Profit**: Jika koin sangat kencang dan highest price mencapai **1.35x dari harga beli**, target TP secara dinamis disesuaikan menjadi **50%** (dari standard 40%) untuk membiarkan profit berlari namun tetap realistis (menghindari keserakahan).
-- **Early Zero-Loss Protection**: Ketika profit menyentuh **5%** (sebelumnya 10%), stop loss otomatis dinaikkan ke minimal `harga_beli + 1%` untuk mengamankan modal dari pembalikan arah instan.
-- **Patience Protocol (SL Delay)**: Ketika harga menyentuh zona stop loss, bot menunggu **5 menit** (sebelumnya 10m) untuk melihat volume/tekanan beli pemulihan, dengan batas keras (*hard cap*) **10 menit** (sebelumnya 20m) untuk meminimalkan kerugian lebih dalam.
+- **Flexible Trailing Stop**: Trailing Stop (TSL) dibiarkan bergerak bebas mengikuti fluktuasi harga (jarak 15% penuh dari peak) tanpa dikunci terlalu dini di dekat break-even.
+- **Zero-Loss Protection (Safe Zone)**: Ketika profit koin telah menyentuh minimal **15%**, stop loss otomatis dinaikkan ke minimal `harga_beli + 2%` untuk menutupi fee gas/Priority Fee.
+- **Patience Protocol (SL Delay)**: Ketika harga menyentuh zona stop loss, bot menunggu **5 menit** untuk melihat volume/tekanan beli pemulihan, dengan batas keras (*hard cap*) **10 menit** untuk meminimalkan kerugian lebih dalam.
 
 > **🔥 Catatan Khusus untuk Mode Established Rebound & CTO:**
 > Transaksi yang dibuka melalui jalur Rebound & CTO memiliki exit rules kustom mandiri (`targetTakeProfit=18%`, `targetTrailingDistance=2.5%`, dan `targetStopLoss=20%`). `PriceMonitorService` secara otomatis menggunakan nilai kustom ini tanpa dipengaruhi konfigurasi standar bot.
@@ -352,5 +353,5 @@ Set via `.env`.
 
 ---
 
-*Last updated: Mei 2026 — Strategi: Lean Filter Sniper (PumpFun Tolerance) + Profitability Tuning*
+*Last updated: Mei 2026 — Strategi: Real-Time SOL & USD Metrics + Trailing Stop Optimization (Round 11-14)*
 *Created with ❤️ by Antigravity for Amirull Azmi.*
