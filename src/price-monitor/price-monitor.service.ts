@@ -211,10 +211,12 @@ export class PriceMonitorService {
         if (currentPrice > trade.highestPrice && profitPercent >= 5) {
             const calculatedStop = currentPrice * (1 - (effectiveTrailingDistancePercent / 100));
             
-            // 🛡️ ZERO-LOSS PROTECTION: Kalau untung >= 8%, jaring jual MINIMAL di harga beli + 3% (menutup fee)
-            let newTrailingStop = Math.max(calculatedStop, trade.entryPrice * 1.03);
-            if (profitPercent >= 8) {
-                const breakEvenPlus = trade.entryPrice * 1.03;
+            // Jarak trailing stop murni dari peak tanpa floor buatan di awal
+            let newTrailingStop = calculatedStop;
+            
+            // 🛡️ ZERO-LOSS PROTECTION: Hanya kunci profit minimal +2% (untuk cover fee) jika koin sudah terbang >= 15%
+            if (profitPercent >= 15) {
+                const breakEvenPlus = trade.entryPrice * 1.02;
                 newTrailingStop = Math.max(newTrailingStop, breakEvenPlus);
             }
             
