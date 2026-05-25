@@ -37,10 +37,16 @@ export class CreatorProfileService {
 
             // Dynamically calculate risk score based on rugged history
             if (profile.ruggedTokens > 0) {
-                const newRiskScore = Math.min((profile.ruggedTokens / profile.tokensCreated) * 100, 100);
+                const newRiskScore = Math.min(
+                    (profile.ruggedTokens / profile.tokensCreated) * 100,
+                    100,
+                );
                 const shouldBlacklist = newRiskScore >= 80 || profile.isBlacklisted;
-                
-                if (profile.riskScore !== newRiskScore || profile.isBlacklisted !== shouldBlacklist) {
+
+                if (
+                    profile.riskScore !== newRiskScore ||
+                    profile.isBlacklisted !== shouldBlacklist
+                ) {
                     profile = await this.prismaService.creatorProfile.update({
                         where: { address },
                         data: {
@@ -105,7 +111,9 @@ export class CreatorProfileService {
                 },
             });
 
-            this.logger.warn(`[CreatorProfile] 🚨 PENALIZED: Creator ${address} has been blacklisted for ${reason}.`);
+            this.logger.warn(
+                `[CreatorProfile] 🚨 PENALIZED: Creator ${address} has been blacklisted for ${reason}.`,
+            );
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`[CreatorProfile] Failed to penalize creator ${address}: ${msg}`);
