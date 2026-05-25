@@ -177,7 +177,7 @@ export class AnalyzerService {
             // 🧑‍💻 CREATOR PROFILE CHECK (Anti-Rug)
             if (rugResult.creator) {
                 const profile = await this.creatorProfileService.evaluateCreator(rugResult.creator);
-                
+
                 if (profile.isBlacklisted || profile.riskScore >= 80) {
                     this.logger.warn(
                         `[${tokenMint}] 🛑 Creator ${rugResult.creator} is blacklisted or high risk (Score: ${profile.riskScore}). Skip.`,

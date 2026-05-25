@@ -6,6 +6,9 @@ import {
     Keypair,
     VersionedTransaction,
     ParsedTransactionWithMeta,
+    TransactionMessage,
+    SystemProgram,
+    PublicKey,
 } from '@solana/web3.js';
 import axios from 'axios';
 import bs58 from 'bs58';
@@ -482,7 +485,7 @@ export class TradeService implements OnModuleInit {
                 if (['DEV_DUMP', 'RUGPULL'].includes(exitReason) && trade.creatorAddress) {
                     try {
                         const existingProfile = await this.prismaService.creatorProfile.findUnique({
-                            where: { address: trade.creatorAddress }
+                            where: { address: trade.creatorAddress },
                         });
                         const ruggedCount = (existingProfile?.ruggedTokens || 0) + 1;
                         const createdCount = existingProfile?.tokensCreated || 1;
@@ -491,13 +494,13 @@ export class TradeService implements OnModuleInit {
 
                         await this.prismaService.creatorProfile.upsert({
                             where: { address: trade.creatorAddress },
-                            update: { 
+                            update: {
                                 reason: exitReason,
                                 ruggedTokens: ruggedCount,
                                 isBlacklisted: true,
                                 riskScore: 100, // Instant blacklist
                                 tags: Array.from(tags),
-                                lastActiveAt: new Date()
+                                lastActiveAt: new Date(),
                             },
                             create: {
                                 address: trade.creatorAddress,
@@ -506,7 +509,7 @@ export class TradeService implements OnModuleInit {
                                 ruggedTokens: 1,
                                 isBlacklisted: true,
                                 riskScore: 100,
-                                tags: ['Serial Rugger']
+                                tags: ['Serial Rugger'],
                             },
                         });
                         this.logger.warn(
@@ -668,15 +671,28 @@ export class TradeService implements OnModuleInit {
             }
 
             // ⛽ DYNAMIC FEES: Naikin gas tiap kali gagal (Auto-Multiplier + Retry Bonus)
+            const useJito = this.configService.get<string>('USE_JITO') === 'true';
+            const jitoBlockEngineUrl =
+                this.configService.get<string>('JITO_BLOCK_ENGINE_URL') ||
+                'https://mainnet.block-engine.jito.wtf/api/v1/bundles';
+            const jitoTipSol = Number.parseFloat(
+                this.configService.get<string>('JITO_TIP_SOL') || '0.0001',
+            );
+
             const baseMultiplier = Number.parseInt(
                 this.configService.get<string>('TRADE_PRIORITY_MULTIPLIER', '2'),
                 10,
             );
             const multiplier = baseMultiplier + retryCount * 2;
-            const feeConfig =
+            let feeConfig: number | { autoMultiplier: number } =
                 priorityFeeLamports && priorityFeeLamports > 0
                     ? priorityFeeLamports
                     : { autoMultiplier: multiplier };
+
+            if (useJito) {
+                feeConfig = 0; // Jito relies on bundle tip, not priority fee
+                this.logger.debug(`[Jupiter] 🚀 Using Jito MEV. Jupiter priority fee set to 0.`);
+            }
 
             const swapResponse = await axios.post(
                 `${baseUrl}/swap/v1/swap`,
@@ -695,11 +711,85 @@ export class TradeService implements OnModuleInit {
             );
             transaction.sign([this.wallet]);
 
-            const txid = await this.connection.sendRawTransaction(transaction.serialize(), {
-                skipPreflight: false,
-                preflightCommitment: 'confirmed',
-                maxRetries: 3,
-            });
+            let txid = '';
+
+            if (useJito) {
+                const JITO_TIP_ACCOUNTS = [
+                    '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
+                    'HFqU5xCUoS5ncHNZfgXgtRoLmE7UcrK8GqLpL5Ew4w4f',
+                    'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
+                    'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iMgaSka',
+                    'DfXygSm4jMRu1ZfB33kUStA9GokT6pS6xRkK7wP5x5Xb',
+                    'ADuUkR4wZQ2dZStKqA4UXXPZ8yJv2QvU8TjL25uJ1w1k',
+                    'DttWaMuVvZ1KqY6tWf1w9A1hP1m4p2iQ5hZwv3F7m53T',
+                    '3AVi9Tg9Uo68Yh2Sqw7T9C39n1bY6pQn1E5jZ2pUwv3R',
+                ];
+                const randomTipAccount =
+                    JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)];
+                const tipLamports = Math.floor(jitoTipSol * 1_000_000_000);
+
+                const tx2Message = new TransactionMessage({
+                    payerKey: this.wallet.publicKey,
+                    recentBlockhash: transaction.message.recentBlockhash,
+                    instructions: [
+                        SystemProgram.transfer({
+                            fromPubkey: this.wallet.publicKey,
+                            toPubkey: new PublicKey(randomTipAccount),
+                            lamports: tipLamports,
+                        }),
+                    ],
+                }).compileToV0Message();
+
+                const tx2 = new VersionedTransaction(tx2Message);
+                tx2.sign([this.wallet]);
+
+                const tx1Base58 = bs58.encode(transaction.serialize());
+                const tx2Base58 = bs58.encode(tx2.serialize());
+
+                this.logger.log(
+                    `[Jito] 🚀 Sending Bundle (Tip: ${jitoTipSol} SOL to ${randomTipAccount})...`,
+                );
+
+                try {
+                    const bundleResponse = await axios.post(
+                        jitoBlockEngineUrl,
+                        {
+                            jsonrpc: '2.0',
+                            id: 1,
+                            method: 'sendBundle',
+                            params: [[tx2Base58, tx1Base58]],
+                        },
+                        { headers: { 'Content-Type': 'application/json' } },
+                    );
+
+                    if (bundleResponse.data?.error) {
+                        throw new Error(
+                            `Jito Bundle Error: ${JSON.stringify(bundleResponse.data.error)}`,
+                        );
+                    }
+
+                    this.logger.log(
+                        `[Jito] 🎉 Bundle accepted! ID: ${bundleResponse.data?.result}`,
+                    );
+                    txid = bs58.encode(transaction.signatures[0]);
+                } catch (e: unknown) {
+                    const errResponse =
+                        e instanceof Error && 'response' in e
+                            ? JSON.stringify(
+                                  (e as { response?: { data?: unknown } }).response?.data,
+                              )
+                            : '';
+                    const msg = e instanceof Error ? e.message : String(e);
+                    this.logger.error(`[Jito] Bundle submission failed: ${msg} ${errResponse}`);
+                    throw new Error(`Jito Submission Error: ${msg}`);
+                }
+            } else {
+                txid = await this.connection.sendRawTransaction(transaction.serialize(), {
+                    skipPreflight: false,
+                    preflightCommitment: 'confirmed',
+                    maxRetries: 3,
+                });
+            }
 
             this.logger.log(`[Jupiter] Transaction sent: ${txid}. Waiting confirmation...`);
 
