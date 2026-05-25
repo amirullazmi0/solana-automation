@@ -334,7 +334,12 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             });
 
             if (existing && (existing.status === 'FAILED' || existing.status === 'TRADED')) {
-                const isTempFail = ['already_traded_24h', 'cooldown_win', 'cooldown_loss', 'stagnant_timeout'].includes(existing.reason || '');
+                const isTempFail = [
+                    'already_traded_24h',
+                    'cooldown_win',
+                    'cooldown_loss',
+                    'stagnant_timeout',
+                ].includes(existing.reason || '');
                 if (existing.status === 'TRADED' || isTempFail) {
                     const recentTrade = await this.prismaService.trade.findFirst({
                         where: { tokenMint },
@@ -351,8 +356,14 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
                             return;
                         }
-                        const winCooldownHours = Number.parseInt(this.configService.get<string>('COOLDOWN_WIN_HOURS', '6'), 10);
-                        const lossCooldownHours = Number.parseInt(this.configService.get<string>('COOLDOWN_LOSS_HOURS', '24'), 10);
+                        const winCooldownHours = Number.parseInt(
+                            this.configService.get<string>('COOLDOWN_WIN_HOURS', '6'),
+                            10,
+                        );
+                        const lossCooldownHours = Number.parseInt(
+                            this.configService.get<string>('COOLDOWN_LOSS_HOURS', '24'),
+                            10,
+                        );
                         isWin = (recentTrade.profitUsd || 0) > 0;
                         cooldownHours = isWin ? winCooldownHours : lossCooldownHours;
                         const cooldownMillis = cooldownHours * 60 * 60 * 1000;
@@ -410,8 +421,14 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     );
                     return;
                 }
-                const winCooldownHours = Number.parseInt(this.configService.get<string>('COOLDOWN_WIN_HOURS', '6'), 10);
-                const lossCooldownHours = Number.parseInt(this.configService.get<string>('COOLDOWN_LOSS_HOURS', '24'), 10);
+                const winCooldownHours = Number.parseInt(
+                    this.configService.get<string>('COOLDOWN_WIN_HOURS', '6'),
+                    10,
+                );
+                const lossCooldownHours = Number.parseInt(
+                    this.configService.get<string>('COOLDOWN_LOSS_HOURS', '24'),
+                    10,
+                );
                 const isWin = (recentTrade.profitUsd || 0) > 0;
                 const cooldownHours = isWin ? winCooldownHours : lossCooldownHours;
                 const cooldownMillis = cooldownHours * 60 * 60 * 1000;
@@ -424,13 +441,16 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     await this.prismaService.watchlist.upsert({
                         where: { tokenMint },
                         update: { status: 'FAILED', reason: `cooldown_${isWin ? 'win' : 'loss'}` },
-                        create: { tokenMint, status: 'FAILED', reason: `cooldown_${isWin ? 'win' : 'loss'}` },
+                        create: {
+                            tokenMint,
+                            status: 'FAILED',
+                            reason: `cooldown_${isWin ? 'win' : 'loss'}`,
+                        },
                     });
                     this.seenTokens.set(tokenMint, cooldownExpiredAt);
                     return;
                 }
             }
-
 
             this.logger.log(
                 `[${tokenMint}] Monitoring for traction... [Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT}]`,

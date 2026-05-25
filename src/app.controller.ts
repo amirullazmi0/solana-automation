@@ -79,7 +79,9 @@ export class AppController {
             });
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ status: 'error', error: msg });
+            return res
+                .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .json({ status: 'error', error: msg });
         }
     }
 }

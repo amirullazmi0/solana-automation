@@ -44,7 +44,8 @@ export class EstablishedAnalyzerService {
         private readonly moduleRef: ModuleRef,
         private readonly prismaService: PrismaService,
     ) {
-        const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
+        const rpcEndpoint =
+            this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
         this.connection = new Connection(rpcEndpoint, 'confirmed');
     }
 
@@ -62,33 +63,39 @@ export class EstablishedAnalyzerService {
                     if (ip) {
                         cb(null, ip, 4);
                     } else {
-                        import('dns').then(({ lookup }) => {
-                            lookup(hostname, options, cb);
-                        }).catch((err) => {
-                            cb(err, '', 4);
-                        });
+                        import('dns')
+                            .then(({ lookup }) => {
+                                lookup(hostname, options, cb);
+                            })
+                            .catch((err) => {
+                                cb(err, '', 4);
+                            });
                     }
                 } catch (e) {
                     cb(e as Error, '', 4);
                 }
-            }
+            },
         });
     }
 
     private async resolveDns(hostname: string): Promise<string> {
         if (this.ipCache[hostname]) return this.ipCache[hostname];
         try {
-            let response = await axios.get(`https://1.1.1.1/dns-query?name=${hostname}&type=A`, {
-                headers: { accept: 'application/dns-json' },
-                timeout: 5000,
-                httpsAgent: this.getHttpsAgent(),
-            }).catch(() => null);
-
-            if (!response) {
-                response = await axios.get(`https://8.8.8.8/resolve?name=${hostname}&type=A`, {
+            let response = await axios
+                .get(`https://1.1.1.1/dns-query?name=${hostname}&type=A`, {
+                    headers: { accept: 'application/dns-json' },
                     timeout: 5000,
                     httpsAgent: this.getHttpsAgent(),
-                }).catch(() => null);
+                })
+                .catch(() => null);
+
+            if (!response) {
+                response = await axios
+                    .get(`https://8.8.8.8/resolve?name=${hostname}&type=A`, {
+                        timeout: 5000,
+                        httpsAgent: this.getHttpsAgent(),
+                    })
+                    .catch(() => null);
             }
 
             const ip = response?.data?.Answer?.[0]?.data;
@@ -116,7 +123,12 @@ export class EstablishedAnalyzerService {
                 if (!accountInfo) {
                     throw new Error('Mint account not found on-chain');
                 }
-                const mintInfo = await getMint(this.connection, mintPublicKey, undefined, accountInfo.owner);
+                const mintInfo = await getMint(
+                    this.connection,
+                    mintPublicKey,
+                    undefined,
+                    accountInfo.owner,
+                );
 
                 // mintAuthority HARUS null (Renounced / Kunci dibuang)
                 if (mintInfo.mintAuthority !== null) {
@@ -127,19 +139,25 @@ export class EstablishedAnalyzerService {
                 // freezeAuthority HARUS null (Disabled)
                 if (mintInfo.freezeAuthority !== null) {
                     if (isPumpFun) {
-                        this.logger.debug(`[${tokenMint}] ⚠️ Freeze authority active but PumpFun token — TOLERATED.`);
+                        this.logger.debug(
+                            `[${tokenMint}] ⚠️ Freeze authority active but PumpFun token — TOLERATED.`,
+                        );
                         return true;
                     }
-                    this.logger.warn(`[${tokenMint}] 🛑 Freeze authority active (non-PumpFun). Reject.`);
+                    this.logger.warn(
+                        `[${tokenMint}] 🛑 Freeze authority active (non-PumpFun). Reject.`,
+                    );
                     return false;
                 }
 
                 return true;
             } catch (e) {
-                const errName = e instanceof Error ? (e.name || e.message) : String(e);
-                this.logger.warn(`[${tokenMint}] Mint authority check failed (attempt ${attempt}/${maxRetries}): ${errName}`);
+                const errName = e instanceof Error ? e.name || e.message : String(e);
+                this.logger.warn(
+                    `[${tokenMint}] Mint authority check failed (attempt ${attempt}/${maxRetries}): ${errName}`,
+                );
                 if (attempt < maxRetries) {
-                    await new Promise(res => setTimeout(res, 1000 * attempt));
+                    await new Promise((res) => setTimeout(res, 1000 * attempt));
                 }
             }
         }
@@ -149,20 +167,34 @@ export class EstablishedAnalyzerService {
     /**
      * Memeriksa status keamanan token via RugCheck API secara menyeluruh
      */
-    private async checkRugCheckLP(tokenMint: string, isPumpFun: boolean): Promise<{ passed: boolean; creator?: string; topHolder?: string; reason?: string; isCTO?: boolean }> {
+    private async checkRugCheckLP(
+        tokenMint: string,
+        isPumpFun: boolean,
+    ): Promise<{
+        passed: boolean;
+        creator?: string;
+        topHolder?: string;
+        reason?: string;
+        isCTO?: boolean;
+    }> {
         try {
-            const response = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
-                timeout: 5000,
-                httpsAgent: this.getHttpsAgent(),
-            });
+            const response = await axios.get(
+                `https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`,
+                {
+                    timeout: 5000,
+                    httpsAgent: this.getHttpsAgent(),
+                },
+            );
 
             if (!response.data) return { passed: false, reason: 'no_rugcheck_data' };
 
             const topHolders = (response.data.topHolders as RugCheckHolder[]) || [];
-            const knownAccounts = (response.data.knownAccounts as Record<string, RugCheckKnownAccount | undefined>) || {};
+            const knownAccounts =
+                (response.data.knownAccounts as Record<string, RugCheckKnownAccount | undefined>) ||
+                {};
 
             // 🛡️ SAFETY & HOLDER INDEX (Anti-Rug)
-            const filteredHolders = topHolders.filter(h => {
+            const filteredHolders = topHolders.filter((h) => {
                 const known = knownAccounts[h.address] || knownAccounts[h.owner];
                 const isExcludedType = known && (known.type === 'AMM' || known.type === 'LOCKER');
                 const isSystemAccount = h.owner === '1111111111111111111111111111111';
@@ -176,22 +208,31 @@ export class EstablishedAnalyzerService {
                 // Gunakan RPC langsung alih-alih data topHolders RugCheck yang tidak lengkap
                 creatorPct = await this.getCreatorBalancePercent(creator, tokenMint);
             }
-            const isCTO = creator ? (creatorPct < 0.1) : false;
+            const isCTO = creator ? creatorPct < 0.1 : false;
 
-            const top10SumPct = filteredHolders.slice(0, 10).reduce((sum: number, h: RugCheckHolder) => sum + (h.pct || 0), 0);
-            const safetyIndex = 1 - (top10SumPct / 100);
+            const top10SumPct = filteredHolders
+                .slice(0, 10)
+                .reduce((sum: number, h: RugCheckHolder) => sum + (h.pct || 0), 0);
+            const safetyIndex = 1 - top10SumPct / 100;
 
             const defaultSafetyIndex = isCTO ? '0.20' : '0.65';
-            const minSafetyIndex = Number.parseFloat(this.configService.get<string>('RUGCHECK_MIN_SAFETY_INDEX', defaultSafetyIndex));
+            const minSafetyIndex = Number.parseFloat(
+                this.configService.get<string>('RUGCHECK_MIN_SAFETY_INDEX', defaultSafetyIndex),
+            );
             if (safetyIndex < minSafetyIndex) {
-                this.logger.warn(`[${tokenMint}] 🛑 Established High Concentration: Top 10 holds ${(1 - safetyIndex) * 100}%. Reject. (isCTO: ${isCTO})`);
+                this.logger.warn(
+                    `[${tokenMint}] 🛑 Established High Concentration: Top 10 holds ${(1 - safetyIndex) * 100}%. Reject. (isCTO: ${isCTO})`,
+                );
                 return { passed: false, reason: 'established_high_concentration', isCTO };
             }
 
             const markets = (response.data.markets as RugCheckMarket[]) || [];
-            const lpSafe = markets.some((m: RugCheckMarket) => 
-                m.lpType === 'burned' || m.lpStatus === 'burned' || 
-                m.lpType === 'locked' || m.lpStatus === 'locked'
+            const lpSafe = markets.some(
+                (m: RugCheckMarket) =>
+                    m.lpType === 'burned' ||
+                    m.lpStatus === 'burned' ||
+                    m.lpType === 'locked' ||
+                    m.lpStatus === 'locked',
             );
 
             if (!lpSafe && markets.length > 0 && !isPumpFun) {
@@ -200,32 +241,41 @@ export class EstablishedAnalyzerService {
             }
 
             const score = response.data.score || 0;
-            if (score > 2000) {
-                this.logger.warn(`[${tokenMint}] 🛑 Established High Risk Score: ${score}. Reject.`);
+            if (score > 1000) {
+                this.logger.warn(
+                    `[${tokenMint}] 🛑 Established High Risk Score: ${score}. Reject.`,
+                );
                 return { passed: false, reason: 'established_high_risk_score', isCTO };
             }
 
-            const risks = (response.data.risks as Array<{ name: string; level: string }> ) || [];
-            const hasHoneypotRisk = risks.some(r => 
-                r.name.toLowerCase().includes('honeypot') || 
-                r.name.toLowerCase().includes('freeze') ||
-                r.name.toLowerCase().includes('mint authority')
+            const risks = (response.data.risks as Array<{ name: string; level: string }>) || [];
+            const hasHoneypotRisk = risks.some(
+                (r) =>
+                    r.name.toLowerCase().includes('honeypot') ||
+                    r.name.toLowerCase().includes('freeze') ||
+                    r.name.toLowerCase().includes('mint authority'),
             );
 
             if (hasHoneypotRisk) {
-                this.logger.warn(`[${tokenMint}] 🛑 Established HONEYPOT/FREEZE/MINT RISK detected. Reject.`);
+                this.logger.warn(
+                    `[${tokenMint}] 🛑 Established HONEYPOT/FREEZE/MINT RISK detected. Reject.`,
+                );
                 return { passed: false, reason: 'established_honeypot_detected', isCTO };
             }
 
             const highRisks = risks.filter((risk) => risk.level === 'danger');
-            if (highRisks.length >= 2) {
-                this.logger.warn(`[${tokenMint}] 🛑 Established Multiple Danger Risks detected (${highRisks.length}). Reject.`);
+            if (highRisks.length > 0) {
+                this.logger.warn(
+                    `[${tokenMint}] 🛑 Established Danger risk detected (${highRisks.map((r) => r.name).join(', ')}). Reject.`,
+                );
                 return { passed: false, reason: 'established_danger_risks_detected', isCTO };
             }
 
             if (creator && !isCTO) {
                 if (creatorPct > 5) {
-                    this.logger.warn(`[${tokenMint}] 🛑 Established Creator holds too much (${creatorPct.toFixed(2)}%). Reject.`);
+                    this.logger.warn(
+                        `[${tokenMint}] 🛑 Established Creator holds too much (${creatorPct.toFixed(2)}%). Reject.`,
+                    );
                     return { passed: false, reason: 'established_creator_holds_too_much', isCTO };
                 }
             }
@@ -243,16 +293,22 @@ export class EstablishedAnalyzerService {
         }
     }
 
-    private async getCreatorBalancePercent(creatorAddress: string, tokenMint: string): Promise<number> {
+    private async getCreatorBalancePercent(
+        creatorAddress: string,
+        tokenMint: string,
+    ): Promise<number> {
         try {
             const { PublicKey } = await import('@solana/web3.js');
             const creatorKey = new PublicKey(creatorAddress);
             const mintKey = new PublicKey(tokenMint);
-            
-            const accounts = await this.connection.getParsedTokenAccountsByOwner(creatorKey, { mint: mintKey });
+
+            const accounts = await this.connection.getParsedTokenAccountsByOwner(creatorKey, {
+                mint: mintKey,
+            });
             let creatorBalance = 0;
             if (accounts.value.length > 0) {
-                creatorBalance = accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+                creatorBalance =
+                    accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount ?? 0;
             }
 
             const accountInfo = await this.connection.getAccountInfo(mintKey);
@@ -264,7 +320,9 @@ export class EstablishedAnalyzerService {
             if (totalSupply <= 0) return 0;
             return (creatorBalance / totalSupply) * 100;
         } catch (error) {
-            this.logger.error(`Failed to get creator balance percent: ${error instanceof Error ? error.message : String(error)}`);
+            this.logger.error(
+                `Failed to get creator balance percent: ${error instanceof Error ? error.message : String(error)}`,
+            );
             return 0;
         }
     }
@@ -273,8 +331,12 @@ export class EstablishedAnalyzerService {
      * Rumus Divergensi Volume-Harga (Trigger Rebound)
      */
     public checkVolumePriceDivergence(pairData: DexScreenerPair): boolean {
-        const volumeSpikeRatio = Number.parseFloat(this.configService.get<string>('VOLUME_SPIKE_RATIO', '0.25'));
-        const reboundPriceDropPct = Number.parseFloat(this.configService.get<string>('REBOUND_PRICE_DROP_PCT', '-50'));
+        const volumeSpikeRatio = Number.parseFloat(
+            this.configService.get<string>('VOLUME_SPIKE_RATIO', '0.25'),
+        );
+        const reboundPriceDropPct = Number.parseFloat(
+            this.configService.get<string>('REBOUND_PRICE_DROP_PCT', '-50'),
+        );
 
         const volume5m = pairData.volume?.m5 || 0;
         const volume1h = pairData.volume?.h1 || 0;
@@ -282,7 +344,7 @@ export class EstablishedAnalyzerService {
         const priceChange24h = pairData.priceChange?.h24 ?? (pairData.priceChange?.h6 || 0); // Fallback ke h6 jika h24 kosong
 
         // 1. Kondisi Volume Spike: V_5m > V_1h * VOLUME_SPIKE_RATIO
-        const isVolumeSpiking = volume5m > (volume1h * volumeSpikeRatio) && volume5m > 500; // Minimal ada volume $500 di 5m
+        const isVolumeSpiking = volume5m > volume1h * volumeSpikeRatio && volume5m > 500; // Minimal ada volume $500 di 5m
 
         // 2. Kondisi Lantai Konsolidasi (Flat 5m): Pergerakan harga 5m relatif datar (membentuk support/lantai)
         // Harga tidak boleh lanjut terjun bebas di 5m (harus >= -2%) dan belum terbang jauh (<= +5%)
@@ -298,14 +360,19 @@ export class EstablishedAnalyzerService {
      * Pengecekan Dominasi Pembeli (Buyer Dominance)
      */
     public checkBuyerDominance(pairData: DexScreenerPair): boolean {
-        const buySellRatioThreshold = Number.parseFloat(this.configService.get<string>('BUY_SELL_RATIO_THRESHOLD', '1.5'));
-        const minBuys = Number.parseInt(this.configService.get<string>('ESTABLISHED_MIN_BUYS', '5'), 10);
+        const buySellRatioThreshold = Number.parseFloat(
+            this.configService.get<string>('BUY_SELL_RATIO_THRESHOLD', '1.5'),
+        );
+        const minBuys = Number.parseInt(
+            this.configService.get<string>('ESTABLISHED_MIN_BUYS', '5'),
+            10,
+        );
 
         const buys = pairData.txns?.m5?.buys || 0;
         const sells = pairData.txns?.m5?.sells || 0;
 
         // Kondisi: buys > (sells * buySellRatioThreshold) AND buys >= minBuys
-        return buys > (sells * buySellRatioThreshold) && buys >= minBuys;
+        return buys > sells * buySellRatioThreshold && buys >= minBuys;
     }
 
     /**
@@ -316,7 +383,7 @@ export class EstablishedAnalyzerService {
             // 1. Fetch data dari DexScreener
             const response = await DexLimiter.get<{ pairs: DexScreenerPair[] }>(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
-                { timeout: 5000, httpsAgent: this.getHttpsAgent() }
+                { timeout: 5000, httpsAgent: this.getHttpsAgent() },
             );
 
             const pair = response.data?.pairs?.[0];
@@ -324,10 +391,20 @@ export class EstablishedAnalyzerService {
                 return { isEstablished: false, executed: false, reason: 'no_dex_pair' };
             }
 
-            const minAgeHours = Number.parseFloat(this.configService.get<string>('ESTABLISHED_MIN_AGE_HOURS') ?? this.configService.get<string>('MIN_AGE_HOURS', '24'));
-            const maxAgeHours = Number.parseFloat(this.configService.get<string>('ESTABLISHED_MAX_AGE_HOURS') ?? this.configService.get<string>('MAX_AGE_HOURS', '72'));
-            const minLiqUsd = Number.parseFloat(this.configService.get<string>('MIN_ESTABLISHED_LIQUIDITY', '3000'));
-            const maxMcapUsd = Number.parseFloat(this.configService.get<string>('MAX_ESTABLISHED_MCAP', '200000'));
+            const minAgeHours = Number.parseFloat(
+                this.configService.get<string>('ESTABLISHED_MIN_AGE_HOURS') ??
+                    this.configService.get<string>('MIN_AGE_HOURS', '24'),
+            );
+            const maxAgeHours = Number.parseFloat(
+                this.configService.get<string>('ESTABLISHED_MAX_AGE_HOURS') ??
+                    this.configService.get<string>('MAX_AGE_HOURS', '72'),
+            );
+            const minLiqUsd = Number.parseFloat(
+                this.configService.get<string>('MIN_ESTABLISHED_LIQUIDITY', '3000'),
+            );
+            const maxMcapUsd = Number.parseFloat(
+                this.configService.get<string>('MAX_ESTABLISHED_MCAP', '200000'),
+            );
 
             const ageHours = (Date.now() - (pair.pairCreatedAt || 0)) / (1000 * 60 * 60);
             const liquidity = pair.liquidity?.usd || 0;
@@ -342,10 +419,18 @@ export class EstablishedAnalyzerService {
                 return { isEstablished: true, executed: false, reason: 'too_old_for_rebound' };
             }
             if (liquidity < minLiqUsd) {
-                return { isEstablished: true, executed: false, reason: 'low_established_liquidity' };
+                return {
+                    isEstablished: true,
+                    executed: false,
+                    reason: 'low_established_liquidity',
+                };
             }
             if (marketCap > maxMcapUsd) {
-                return { isEstablished: true, executed: false, reason: 'mcap_too_high_for_established' };
+                return {
+                    isEstablished: true,
+                    executed: false,
+                    reason: 'mcap_too_high_for_established',
+                };
             }
 
             // 2. Periksa Rumus Divergensi Volume-Harga
@@ -359,31 +444,50 @@ export class EstablishedAnalyzerService {
             }
 
             // 4. Periksa Keamanan On-Chain (Authority)
-            const isPumpFunToken = tokenMint.toLowerCase().endsWith('pump') || pair.info?.websites?.some(w => w.url.includes('pump.fun')) || false;
+            const isPumpFunToken =
+                tokenMint.toLowerCase().endsWith('pump') ||
+                pair.info?.websites?.some((w) => w.url.includes('pump.fun')) ||
+                false;
             const isAuthoritySafe = await this.checkOnChainAuthority(tokenMint, isPumpFunToken);
             if (!isAuthoritySafe) {
-                return { isEstablished: true, executed: false, reason: 'established_security_authority_failed' };
+                return {
+                    isEstablished: true,
+                    executed: false,
+                    reason: 'established_security_authority_failed',
+                };
             }
 
             // 5. Periksa Status LP RugCheck
             const rugResult = await this.checkRugCheckLP(tokenMint, isPumpFunToken);
             if (!rugResult.passed) {
-                return { isEstablished: true, executed: false, reason: `established_rugcheck_failed_${rugResult.reason}` };
+                return {
+                    isEstablished: true,
+                    executed: false,
+                    reason: `established_rugcheck_failed_${rugResult.reason}`,
+                };
             }
 
             // 🧑‍💻 DEV BLACKLIST CHECK (Anti-Rug)
             if (rugResult.creator) {
                 const isBlacklisted = await this.prismaService.developerBlacklist.findUnique({
-                    where: { address: rugResult.creator }
+                    where: { address: rugResult.creator },
                 });
                 if (isBlacklisted) {
-                    this.logger.warn(`[${tokenMint}] 🛑 Established Creator ${rugResult.creator} is blacklisted (Previous dump/rug). Skip.`);
-                    return { isEstablished: true, executed: false, reason: 'established_creator_blacklisted' };
+                    this.logger.warn(
+                        `[${tokenMint}] 🛑 Established Creator ${rugResult.creator} is blacklisted (Previous dump/rug). Skip.`,
+                    );
+                    return {
+                        isEstablished: true,
+                        executed: false,
+                        reason: 'established_creator_blacklisted',
+                    };
                 }
             }
 
             // 🚀 SEMUA FILTER LOLOS - SIAP EKSEKUSI
-            this.logger.log(`📈 CONFIRMED REBOUND SIGNALS for $${symbol} (${tokenMint})! Ready to strike. (isCTO: ${rugResult.isCTO})`);
+            this.logger.log(
+                `📈 CONFIRMED REBOUND SIGNALS for $${symbol} (${tokenMint})! Ready to strike. (isCTO: ${rugResult.isCTO})`,
+            );
 
             const metadata: TokenMetadata = {
                 liquidity,
@@ -392,8 +496,8 @@ export class EstablishedAnalyzerService {
                 pairCreatedAt: pair.pairCreatedAt,
                 symbol: `$${symbol}`,
                 socials: {
-                    twitter: pair.info?.socials?.find(s => s.type === 'twitter')?.url,
-                    telegram: pair.info?.socials?.find(s => s.type === 'telegram')?.url,
+                    twitter: pair.info?.socials?.find((s) => s.type === 'twitter')?.url,
+                    telegram: pair.info?.socials?.find((s) => s.type === 'telegram')?.url,
                     website: pair.info?.websites?.[0]?.url,
                 },
                 creator: rugResult.creator,
@@ -411,11 +515,19 @@ export class EstablishedAnalyzerService {
                 targetStopLoss: 20.0, // Hard stop loss 20%
             });
 
-            return { isEstablished: true, executed: buyResult.success, reason: buyResult.success ? undefined : buyResult.message };
+            return {
+                isEstablished: true,
+                executed: buyResult.success,
+                reason: buyResult.success ? undefined : buyResult.message,
+            };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`[${tokenMint}] Rebound analysis failed: ${msg}`);
-            return { isEstablished: true, executed: false, reason: `rebound_analysis_error: ${msg}` };
+            return {
+                isEstablished: true,
+                executed: false,
+                reason: `rebound_analysis_error: ${msg}`,
+            };
         }
     }
 }

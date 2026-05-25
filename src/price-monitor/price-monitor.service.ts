@@ -46,7 +46,7 @@ export class PriceMonitorService {
         if (openTrades.length === 0) return;
 
         // 📦 BATCHING: Get all prices in one go
-        const mints = openTrades.map(t => t.tokenMint);
+        const mints = openTrades.map((t) => t.tokenMint);
         const priceMap = await this.getBatchPrices(mints);
 
         for (const trade of openTrades) {
@@ -77,16 +77,18 @@ export class PriceMonitorService {
                     if (ip) {
                         cb(null, ip, 4);
                     } else {
-                        import('dns').then(({ lookup }) => {
-                            lookup(hostname, options, cb);
-                        }).catch((err) => {
-                            cb(err, '', 4);
-                        });
+                        import('dns')
+                            .then(({ lookup }) => {
+                                lookup(hostname, options, cb);
+                            })
+                            .catch((err) => {
+                                cb(err, '', 4);
+                            });
                     }
                 } catch (e) {
                     cb(e as Error, '', 4);
                 }
-            }
+            },
         });
     }
 
@@ -100,7 +102,7 @@ export class PriceMonitorService {
             const response = await axios.get(`https://${hostname}/price/v3?ids=${ids}`, {
                 timeout: 3000,
                 headers: { 'x-api-key': this.jupiterApiKey },
-                httpsAgent: this.getHttpsAgent()
+                httpsAgent: this.getHttpsAgent(),
             });
 
             const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
@@ -119,19 +121,19 @@ export class PriceMonitorService {
         return result;
     }
 
-
     private async getLiquidityOnly(tokenMint: string): Promise<number | null> {
         try {
-            const response = await DexLimiter.get<{ pairs: Array<{ liquidity?: { usd?: number } }> }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, { 
+            const response = await DexLimiter.get<{
+                pairs: Array<{ liquidity?: { usd?: number } }>;
+            }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
                 timeout: 5000,
-                httpsAgent: this.getHttpsAgent()
+                httpsAgent: this.getHttpsAgent(),
             });
             return response.data.pairs?.[0]?.liquidity?.usd || 0;
         } catch {
             return null;
         }
     }
-
 
     private async resolveDns(hostname: string): Promise<string | null> {
         if (this.ipCache[hostname]) return this.ipCache[hostname];
@@ -170,18 +172,26 @@ export class PriceMonitorService {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
 
         const effectiveStopLossPercent = trade.targetStopLoss ?? this.stopLossPercent;
-        const effectiveTrailingDistancePercent = trade.targetTrailingDistance ?? this.trailingDistancePercent;
+        const effectiveTrailingDistancePercent =
+            trade.targetTrailingDistance ?? this.trailingDistancePercent;
 
-        this.logger.debug(`[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)}, Profit: ${profitPercent.toFixed(2)}%, SL: -${effectiveStopLossPercent}%, TSL: $${trade.trailingStopPrice.toFixed(8)}`);
-
+        this.logger.debug(
+            `[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)}, Profit: ${profitPercent.toFixed(2)}%, SL: -${effectiveStopLossPercent}%, TSL: $${trade.trailingStopPrice.toFixed(8)}`,
+        );
 
         // 1. ANALISIS HOLDER (Insting Intelijen)
         if (trade.creatorAddress || trade.topHolderAddress) {
             if (trade.creatorAddress) {
-                const currentCreatorBalance = await this.tradeService.getTokenBalance(trade.creatorAddress, trade.tokenMint);
+                const currentCreatorBalance = await this.tradeService.getTokenBalance(
+                    trade.creatorAddress,
+                    trade.tokenMint,
+                );
                 if (typeof currentCreatorBalance === 'number' && trade.initialCreatorBalance) {
-                    if (currentCreatorBalance < trade.initialCreatorBalance * 0.8) { // Dev dump > 20% (Lebih sensitif buat modal kecil)
-                        this.logger.warn(`[Slot ${trade.slotNumber}] 🔥 EMERGENCY: Developer is dumping! PANIC SELL.`);
+                    if (currentCreatorBalance < trade.initialCreatorBalance * 0.8) {
+                        // Dev dump > 20% (Lebih sensitif buat modal kecil)
+                        this.logger.warn(
+                            `[Slot ${trade.slotNumber}] 🔥 EMERGENCY: Developer is dumping! PANIC SELL.`,
+                        );
                         await this.tradeService.executeSell(trade.id, currentPrice, 'DEV_DUMP');
                         return;
                     }
@@ -189,7 +199,10 @@ export class PriceMonitorService {
             }
             // Top Whale Check (Leniency 15%)
             if (trade.topHolderAddress) {
-                const currentTopBalance = await this.tradeService.getTokenBalance(trade.topHolderAddress, trade.tokenMint);
+                const currentTopBalance = await this.tradeService.getTokenBalance(
+                    trade.topHolderAddress,
+                    trade.tokenMint,
+                );
                 if (typeof currentTopBalance === 'number' && trade.initialTopHolderBalance) {
                     if (currentTopBalance < trade.initialTopHolderBalance * 0.85) {
                         this.logger.warn(`[Slot ${trade.slotNumber}] 🐋 Whale is dumping!`);
@@ -201,7 +214,9 @@ export class PriceMonitorService {
 
         // 2. RUGPULL PROTECTION (Instant Exit)
         if (profitPercent <= -80) {
-            this.logger.error(`[Slot ${trade.slotNumber}] 💀 RUGPULL DETECTED (-80%). IMMEDIATE EXIT.`);
+            this.logger.error(
+                `[Slot ${trade.slotNumber}] 💀 RUGPULL DETECTED (-80%). IMMEDIATE EXIT.`,
+            );
             await this.tradeService.executeSell(trade.id, currentPrice, 'RUGPULL');
             return;
         }
@@ -209,47 +224,60 @@ export class PriceMonitorService {
         // 3. TRAILING STOP LOGIC (Update Peak & TSL)
         // 🚀 Hanya update peak kalau harga sudah naik minimal 5% (Safe Zone)
         if (currentPrice > trade.highestPrice && profitPercent >= 5) {
-            const calculatedStop = currentPrice * (1 - (effectiveTrailingDistancePercent / 100));
-            
+            const calculatedStop = currentPrice * (1 - effectiveTrailingDistancePercent / 100);
+
             // Jarak trailing stop murni dari peak tanpa floor buatan di awal
             let newTrailingStop = calculatedStop;
-            
+
             // 🛡️ ZERO-LOSS PROTECTION: Hanya kunci profit minimal +2% (untuk cover fee) jika koin sudah terbang >= 15%
             if (profitPercent >= 15) {
                 const breakEvenPlus = trade.entryPrice * 1.02;
                 newTrailingStop = Math.max(newTrailingStop, breakEvenPlus);
             }
-            
+
             await this.prismaService.trade.update({
                 where: { id: trade.id },
                 data: { highestPrice: currentPrice, trailingStopPrice: newTrailingStop },
             });
-            this.logger.debug(`[Slot ${trade.slotNumber}] 📈 New Peak: $${currentPrice.toFixed(8)}. TSL Locked at: $${newTrailingStop.toFixed(8)}`);
-            
+            this.logger.debug(
+                `[Slot ${trade.slotNumber}] 📈 New Peak: $${currentPrice.toFixed(8)}. TSL Locked at: $${newTrailingStop.toFixed(8)}`,
+            );
+
             // Anti-Spam Trailing Alert
             const now = Date.now();
             const lastAlert = this.lastAlertTime.get(trade.tokenMint) || 0;
             if (profitPercent >= 5 && now - lastAlert > 5 * 60 * 1000) {
-                await this.reportingService.sendTrailingAlert(trade.tokenMint, newTrailingStop, currentPrice, trade.symbol || undefined);
+                await this.reportingService.sendTrailingAlert(
+                    trade.tokenMint,
+                    newTrailingStop,
+                    currentPrice,
+                    trade.symbol || undefined,
+                );
                 this.lastAlertTime.set(trade.tokenMint, now);
             }
         }
 
         // 4. EXIT CONDITION: Take Profit or Trailing Stop
-        const baseTP = trade.targetTakeProfit ?? parseFloat(this.configService.get<string>('TAKE_PROFIT_PERCENT', '30.0'));
-        
+        const baseTP =
+            trade.targetTakeProfit ??
+            parseFloat(this.configService.get<string>('TAKE_PROFIT_PERCENT', '30.0'));
+
         // 🚀 DYNAMIC TP: Kalau volume lagi "Sakit" (Surge gede), targetin lebih tinggi
         // Kita butuh volumeSurge dari database (Watchlist) kalau ada, atau kita asumsikan dari momentum
         // Untuk sekarang kita pake multiplier kalau highestPrice naik kenceng
         let dynamicTP = baseTP;
         if (profitPercent >= baseTP && trade.highestPrice > trade.entryPrice * 1.35) {
-            this.logger.log(`[Slot ${trade.slotNumber}] 🔥 HIGH MOMENTUM DETECTED! Increasing TP target to 50%...`);
+            this.logger.log(
+                `[Slot ${trade.slotNumber}] 🔥 HIGH MOMENTUM DETECTED! Increasing TP target to 50%...`,
+            );
             dynamicTP = 50.0; // Target lebih realistis untuk microcap
         }
 
         // Trigger TP if price hits target
         if (profitPercent >= dynamicTP) {
-            this.logger.log(`[Slot ${trade.slotNumber}] 🎯 TARGET HIT! Exit at ${profitPercent.toFixed(2)}% profit.`);
+            this.logger.log(
+                `[Slot ${trade.slotNumber}] 🎯 TARGET HIT! Exit at ${profitPercent.toFixed(2)}% profit.`,
+            );
             await this.tradeService.executeSell(trade.id, currentPrice, 'TAKE_PROFIT');
             return;
         }
@@ -257,25 +285,43 @@ export class PriceMonitorService {
         // 🛡️ Trailing Stop Trigger
         if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice) {
             const reason = 'TRAILING_STOP';
-            this.logger.log(`[Slot ${trade.slotNumber}] 💸 ${reason} at $${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`);
+            this.logger.log(
+                `[Slot ${trade.slotNumber}] 💸 ${reason} at $${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`,
+            );
             await this.tradeService.executeSell(trade.id, currentPrice, reason);
             return;
         }
 
         // 5. EXIT CONDITION: Patience Protocol (5-Minute SL with 10-Minute Hard Cap)
         if (profitPercent <= -effectiveStopLossPercent) {
+            const disablePatience =
+                this.configService.get<string>('DISABLE_SL_PATIENCE', 'true') === 'true';
+
+            // Bypass patience protocol if disabled globally or if this is a standard trade (no targetStopLoss override)
+            if (disablePatience || !trade.targetStopLoss) {
+                this.logger.error(
+                    `[Slot ${trade.slotNumber}] 💀 STOP LOSS TRIGGERED (${profitPercent.toFixed(2)}%). Bypassing patience protocol and executing IMMEDIATE STOP LOSS.`,
+                );
+                await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
+                return;
+            }
+
             // Jika crash sangat parah (misal drop di bawah -55%), langsung exit tanpa delay
             if (profitPercent <= -55.0) {
-                this.logger.error(`[Slot ${trade.slotNumber}] 💀 HEAVY CRASH DETECTED (${profitPercent.toFixed(2)}%). Bypassing patience protocol and executing IMMEDIATE STOP LOSS.`);
+                this.logger.error(
+                    `[Slot ${trade.slotNumber}] 💀 HEAVY CRASH DETECTED (${profitPercent.toFixed(2)}%). Bypassing patience protocol and executing IMMEDIATE STOP LOSS.`,
+                );
                 await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
                 return;
             }
 
             if (!trade.slTriggeredAt) {
-                this.logger.warn(`[Slot ${trade.slotNumber}] 🛑 Stop Loss zone. Starting 5-minute patience timer (Hard Cap 10-min)...`);
+                this.logger.warn(
+                    `[Slot ${trade.slotNumber}] 🛑 Stop Loss zone. Starting 5-minute patience timer (Hard Cap 10-min)...`,
+                );
                 await this.prismaService.trade.update({
                     where: { id: trade.id },
-                    data: { slTriggeredAt: new Date() }
+                    data: { slTriggeredAt: new Date() },
                 });
                 return; // Tunggu di iterasi ini
             }
@@ -286,22 +332,30 @@ export class PriceMonitorService {
                 // Check buy pressure untuk melonggarkan waktu jual (Diamond Hands)
                 const hasBuyPressure = await this.checkBuyPressure(trade.tokenMint);
                 if (hasBuyPressure && elapsedMin < 10) {
-                    this.logger.log(`[Slot ${trade.slotNumber}] 🟢 Buy pressure detected in SL zone! DIAMOND HANDS — Delaying exit... (${(10 - elapsedMin).toFixed(1)} min left to Hard Cap)`);
+                    this.logger.log(
+                        `[Slot ${trade.slotNumber}] 🟢 Buy pressure detected in SL zone! DIAMOND HANDS — Delaying exit... (${(10 - elapsedMin).toFixed(1)} min left to Hard Cap)`,
+                    );
                     return;
                 }
 
-                this.logger.warn(`[Slot ${trade.slotNumber}] 🕒 ${elapsedMin >= 10 ? '10 minutes Hard Cap reached' : '5 minutes passed with no buy pressure'}. Executing FINAL STOP LOSS.`);
+                this.logger.warn(
+                    `[Slot ${trade.slotNumber}] 🕒 ${elapsedMin >= 10 ? '10 minutes Hard Cap reached' : '5 minutes passed with no buy pressure'}. Executing FINAL STOP LOSS.`,
+                );
                 await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
             } else {
-                this.logger.log(`[Slot ${trade.slotNumber}] 🕒 In SL zone. Waiting... (${(5 - elapsedMin).toFixed(1)} min left of initial timer)`);
+                this.logger.log(
+                    `[Slot ${trade.slotNumber}] 🕒 In SL zone. Waiting... (${(5 - elapsedMin).toFixed(1)} min left of initial timer)`,
+                );
             }
         } else {
             // ✅ RECOVERY: Reset SL timer if price recovers
             if (trade.slTriggeredAt) {
-                this.logger.log(`[Slot ${trade.slotNumber}] ✨ Price recovered! Resetting SL timer.`);
+                this.logger.log(
+                    `[Slot ${trade.slotNumber}] ✨ Price recovered! Resetting SL timer.`,
+                );
                 await this.prismaService.trade.update({
                     where: { id: trade.id },
-                    data: { slTriggeredAt: null }
+                    data: { slTriggeredAt: null },
                 });
             }
         }

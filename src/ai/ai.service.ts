@@ -62,7 +62,9 @@ export class AIService {
         const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
         const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
 
-        this.logger.log(`🧠 Calling AI Model (${model}) to analyze token $${symbol} (${tokenMint})...`);
+        this.logger.log(
+            `🧠 Calling AI Model (${model}) to analyze token $${symbol} (${tokenMint})...`,
+        );
 
         try {
             const systemPrompt = `You are an expert Solana on-chain analyst and quantitative memecoin trader. Your job is to evaluate if a token is highly likely to pump ("cuan") or if it is a rug/scam/dump.

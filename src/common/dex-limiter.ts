@@ -21,7 +21,10 @@ export class DexLimiter {
     // Cache penyimpanan RAM
     private static cache = new Map<string, CacheEntry>();
 
-    public static async get<T = unknown>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>> {
+    public static async get<T = unknown>(
+        url: string,
+        config?: AxiosRequestConfig,
+    ): Promise<AxiosResponse<T>> {
         // 1. Bersihkan cache yang kedaluwarsa secara berkala
         this.cleanExpiredCache();
 
@@ -37,7 +40,7 @@ export class DexLimiter {
                 url,
                 resolve: resolve as (value: AxiosResponse<unknown>) => void,
                 reject,
-                config
+                config,
             });
             this.processQueue();
         });
@@ -93,12 +96,12 @@ export class DexLimiter {
         for (let attempt = 1; attempt <= retries; attempt++) {
             try {
                 const response = await axios.get(item.url, item.config);
-                
+
                 // Simpan ke cache jika sukses
                 const ttl = this.getTTLForUrl(item.url);
                 this.cache.set(item.url, {
                     response,
-                    expiresAt: Date.now() + ttl
+                    expiresAt: Date.now() + ttl,
                 });
 
                 item.resolve(response);
@@ -107,7 +110,9 @@ export class DexLimiter {
                 const isRateLimit = axios.isAxiosError(error) && error.response?.status === 429;
                 if (isRateLimit && attempt < retries) {
                     const delay = attempt * 1000;
-                    console.warn(`[DexLimiter] Rate limited (429) for ${item.url}. Retrying attempt ${attempt}/${retries} in ${delay}ms...`);
+                    console.warn(
+                        `[DexLimiter] Rate limited (429) for ${item.url}. Retrying attempt ${attempt}/${retries} in ${delay}ms...`,
+                    );
                     await new Promise((res) => setTimeout(res, delay));
                     this.lastRequestTime = Date.now(); // Reset timer
                     continue;
