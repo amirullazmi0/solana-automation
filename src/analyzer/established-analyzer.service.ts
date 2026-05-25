@@ -9,6 +9,7 @@ import { TradeService } from '../trade/trade.service';
 import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { DexLimiter } from '../common/dex-limiter';
+import { CreatorProfileService } from './creator-profile.service';
 
 export interface ReboundResult {
     isEstablished: boolean;
@@ -43,6 +44,7 @@ export class EstablishedAnalyzerService {
         private readonly configService: ConfigService,
         private readonly moduleRef: ModuleRef,
         private readonly prismaService: PrismaService,
+        private readonly creatorProfileService: CreatorProfileService,
     ) {
         const rpcEndpoint =
             this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
@@ -467,19 +469,18 @@ export class EstablishedAnalyzerService {
                 };
             }
 
-            // 🧑‍💻 DEV BLACKLIST CHECK (Anti-Rug)
+            // 🧑‍💻 CREATOR PROFILE CHECK (Anti-Rug)
             if (rugResult.creator) {
-                const isBlacklisted = await this.prismaService.developerBlacklist.findUnique({
-                    where: { address: rugResult.creator },
-                });
-                if (isBlacklisted) {
+                const profile = await this.creatorProfileService.evaluateCreator(rugResult.creator);
+                
+                if (profile.isBlacklisted || profile.riskScore >= 80) {
                     this.logger.warn(
-                        `[${tokenMint}] 🛑 Established Creator ${rugResult.creator} is blacklisted (Previous dump/rug). Skip.`,
+                        `[${tokenMint}] 🛑 Established Creator ${rugResult.creator} is blacklisted or high risk (Score: ${profile.riskScore}). Skip.`,
                     );
                     return {
                         isEstablished: true,
                         executed: false,
-                        reason: 'established_creator_blacklisted',
+                        reason: 'established_creator_high_risk',
                     };
                 }
             }

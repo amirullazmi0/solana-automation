@@ -41,7 +41,6 @@ model Trade {
   targetStopLoss          Float?
   targetTrailingDistance  Float?
 
-
   @@index([status])
   @@index([tokenMint, createdAt])
 }
@@ -71,10 +70,18 @@ model Watchlist {
   reason        String?
 }
 
-model DeveloperBlacklist {
-  id        Int      @id @default(autoincrement())
-  address   String   @unique
-  reason    String
-  createdAt DateTime @default(now())
-}
+model CreatorProfile {
+  address       String   @id
+  tokensCreated Int      @default(1)
+  ruggedTokens  Int      @default(0)
+  riskScore     Float    @default(0)
+  isBlacklisted Boolean  @default(false)
+  reason        String?
+  tags          String[]
+  lastActiveAt  DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
+  @@index([isBlacklisted])
+  @@index([riskScore])
+}

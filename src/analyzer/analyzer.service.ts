@@ -6,6 +6,7 @@ import axios from 'axios';
 import * as https from 'https';
 import { PrismaService } from '../prisma/prisma.service';
 import { DexLimiter } from '../common/dex-limiter';
+import { CreatorProfileService } from './creator-profile.service';
 
 export interface SocialLink {
     type: string;
@@ -82,6 +83,7 @@ export class AnalyzerService {
     constructor(
         private readonly configService: ConfigService,
         private readonly prismaService: PrismaService,
+        private readonly creatorProfileService: CreatorProfileService,
     ) {
         const rpcEndpoint =
             this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
@@ -172,18 +174,17 @@ export class AnalyzerService {
                 };
             }
 
-            // 🧑‍💻 DEV BLACKLIST CHECK (Anti-Rug)
+            // 🧑‍💻 CREATOR PROFILE CHECK (Anti-Rug)
             if (rugResult.creator) {
-                const isBlacklisted = await this.prismaService.developerBlacklist.findUnique({
-                    where: { address: rugResult.creator },
-                });
-                if (isBlacklisted) {
+                const profile = await this.creatorProfileService.evaluateCreator(rugResult.creator);
+                
+                if (profile.isBlacklisted || profile.riskScore >= 80) {
                     this.logger.warn(
-                        `[${tokenMint}] 🛑 Creator ${rugResult.creator} is blacklisted (Previous dump/rug). Skip.`,
+                        `[${tokenMint}] 🛑 Creator ${rugResult.creator} is blacklisted or high risk (Score: ${profile.riskScore}). Skip.`,
                     );
                     return {
                         safe: false,
-                        reason: 'creator_blacklisted',
+                        reason: 'creator_high_risk',
                         permanent: true,
                         metadata: baseMetadata,
                     };

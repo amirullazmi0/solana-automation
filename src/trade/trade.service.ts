@@ -478,15 +478,35 @@ export class TradeService implements OnModuleInit {
                     });
                 }
 
-                // 🧑‍💻 AUTO BLACKLIST ON DEV_DUMP/RUGPULL
+                // 🧑‍💻 AUTO BLACKLIST ON DEV_DUMP/RUGPULL (Self-Learning)
                 if (['DEV_DUMP', 'RUGPULL'].includes(exitReason) && trade.creatorAddress) {
                     try {
-                        await this.prismaService.developerBlacklist.upsert({
+                        const existingProfile = await this.prismaService.creatorProfile.findUnique({
+                            where: { address: trade.creatorAddress }
+                        });
+                        const ruggedCount = (existingProfile?.ruggedTokens || 0) + 1;
+                        const createdCount = existingProfile?.tokensCreated || 1;
+                        const tags = new Set(existingProfile?.tags || []);
+                        tags.add('Serial Rugger');
+
+                        await this.prismaService.creatorProfile.upsert({
                             where: { address: trade.creatorAddress },
-                            update: { reason: exitReason },
+                            update: { 
+                                reason: exitReason,
+                                ruggedTokens: ruggedCount,
+                                isBlacklisted: true,
+                                riskScore: 100, // Instant blacklist
+                                tags: Array.from(tags),
+                                lastActiveAt: new Date()
+                            },
                             create: {
                                 address: trade.creatorAddress,
                                 reason: exitReason,
+                                tokensCreated: createdCount,
+                                ruggedTokens: 1,
+                                isBlacklisted: true,
+                                riskScore: 100,
+                                tags: ['Serial Rugger']
                             },
                         });
                         this.logger.warn(
