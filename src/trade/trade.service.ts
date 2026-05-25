@@ -230,6 +230,18 @@ export class TradeService implements OnModuleInit {
         const amountInLamports = Math.floor(amountInSol * 1_000_000_000);
         const priorityFeeLamports = options?.priorityFeeSol ? Math.floor(options.priorityFeeSol * 1_000_000_000) : undefined;
 
+        // 🛡️ PRE-BUY BALANCE CHECK: Pastikan modal cukup dan tersisa RESERVE_AMOUNT
+        const balanceLamports = await this.connection.getBalance(this.wallet.publicKey);
+        const balanceSol = balanceLamports / 1_000_000_000;
+        const reserveSol = this.reserveAmount / solPrice;
+        const totalRequiredSol = amountInSol + reserveSol + 0.005; // 0.005 SOL buffer gas/priority fee
+
+        if (balanceSol < totalRequiredSol) {
+            const msg = `Insufficient SOL balance. Have: ${balanceSol.toFixed(4)} SOL, Need: ${totalRequiredSol.toFixed(4)} SOL (Position: ${amountInSol.toFixed(4)} SOL, Reserve: ${reserveSol.toFixed(4)} SOL + Fees). Aborting buy to prevent trapped tokens or wasted fees.`;
+            this.logger.warn(`[Slot ${slotToUse}] 🛑 ${msg}`);
+            return { success: false, message: msg };
+        }
+
         this.logger.log(`[Slot ${slotToUse}] Attempting to buy ${tokenMint} with $${buyAmountUSD} (${amountInSol.toFixed(4)} SOL)`);
 
         const { success, entryPrice, error, txHash, actualSol, actualTokens } = await this.executeJupiterSwap(
@@ -560,7 +572,8 @@ export class TradeService implements OnModuleInit {
             transaction.sign([this.wallet]);
 
             const txid = await this.connection.sendRawTransaction(transaction.serialize(), {
-                skipPreflight: true,
+                skipPreflight: false,
+                preflightCommitment: 'confirmed',
                 maxRetries: 3, 
             });
             

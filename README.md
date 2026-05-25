@@ -30,7 +30,10 @@ Real-time Telegram notifications with detailed stats:
 - 💰 **SELL ALERT** — Menampilkan keuntungan bersih riil (SOL spent vs received, profit % SOL, nominal USD spent vs received, profit % USD, serta unit price dengan presisi 10 desimal SOL).
 - 🔍 **WATCHLIST** — Notifikasi koin potensial (Second Wave Radar).
 
-### 5. 🔒 Hardened Security
+### 5. 🔒 Hardened Security & Capital Protection
+- **Pre-Buy SOL Check** — Deteksi saldo SOL lokal sebelum buy untuk menyisakan `RESERVE_AMOUNT` (mencegah token tersangkut & gas fee sia-sia)
+- **Preflight Simulation** — Mengaktifkan simulasi RPC (`skipPreflight: false`) demi meniadakan kerugian gas fee pada transaksi gagal (reverted on-chain)
+- **Hard Crash Bypass** — Jual instan di -55% jika koin crash cepat, melompati delay Patience Protocol
 - **DNS Hardening** — Fallback DoH (DNS over HTTPS) via Cloudflare & Google
 - **IPv4 Force** — `https.Agent({ family: 4 })` untuk stabilitas VPS
 - **LP Safety Check** — Wajib LP burned/locked
@@ -353,5 +356,5 @@ Set via `.env`.
 
 ---
 
-*Last updated: Mei 2026 — Strategi: Dynamic Cooldown Win/Loss + Real-Time SOL & USD Metrics (Round 11-15)*
+*Last updated: Mei 2026 — Strategi: Capital Protection & Risk Management (Round 11-16)*
 *Created with ❤️ by Antigravity for Amirull Azmi.*
