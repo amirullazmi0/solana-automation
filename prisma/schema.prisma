@@ -37,6 +37,7 @@ model Trade {
   createdAt               DateTime    @default(now())
   updatedAt               DateTime    @updatedAt
   slTriggeredAt           DateTime?
+  partialTakeProfitAt     DateTime?
   targetTakeProfit        Float?
   targetStopLoss          Float?
   targetTrailingDistance  Float?

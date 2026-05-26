@@ -309,6 +309,14 @@ export class TradeService implements OnModuleInit {
 
         // Use custom amount if provided, otherwise use config
         const buyAmountUSD = customAmountUSD || this.positionSizeUSD;
+        const committedCapitalUsd = openTradesCount * this.positionSizeUSD + buyAmountUSD;
+        const spendableCapitalUsd = Math.max(this.totalCapital - this.reserveAmount, 0);
+        if (!customAmountUSD && committedCapitalUsd > spendableCapitalUsd) {
+            return {
+                success: false,
+                message: `Capital guard blocked buy. Committed after buy would be $${committedCapitalUsd.toFixed(2)}, spendable cap is $${spendableCapitalUsd.toFixed(2)}.`,
+            };
+        }
 
         // Ambil harga SOL terbaru
         const solPrice = await this.getSolPrice();
@@ -532,6 +540,10 @@ export class TradeService implements OnModuleInit {
                         where: { id: tradeId },
                         data: {
                             amountInSol: trade.amountInSol * (1 - percentage),
+                            partialTakeProfitAt:
+                                exitReason === 'PARTIAL_TAKE_PROFIT'
+                                    ? new Date()
+                                    : trade.partialTakeProfitAt,
                             profitUsd: (trade.profitUsd || 0) + estimatedProfitUsd,
                         },
                     });

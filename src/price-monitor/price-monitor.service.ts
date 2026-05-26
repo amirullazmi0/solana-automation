@@ -273,12 +273,12 @@ export class PriceMonitorService {
             dynamicTP = 50.0; // Target lebih realistis untuk microcap
         }
 
-        // Trigger TP if price hits target
-        if (profitPercent >= dynamicTP) {
+        // Trigger one partial TP first, then let the remaining position ride with trailing stop.
+        if (profitPercent >= dynamicTP && !trade.partialTakeProfitAt) {
             this.logger.log(
-                `[Slot ${trade.slotNumber}] 🎯 TARGET HIT! Exit at ${profitPercent.toFixed(2)}% profit.`,
+                `[Slot ${trade.slotNumber}] 🎯 TARGET HIT! Taking 50% profit at ${profitPercent.toFixed(2)}%, keeping the rest on trailing stop.`,
             );
-            await this.tradeService.executeSell(trade.id, currentPrice, 'TAKE_PROFIT');
+            await this.tradeService.executeSell(trade.id, currentPrice, 'PARTIAL_TAKE_PROFIT', 0.5);
             return;
         }
 

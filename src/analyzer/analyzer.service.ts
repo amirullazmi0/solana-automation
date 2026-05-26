@@ -7,6 +7,7 @@ import * as https from 'https';
 import { PrismaService } from '../prisma/prisma.service';
 import { DexLimiter } from '../common/dex-limiter';
 import { CreatorProfileService } from './creator-profile.service';
+import { AIService } from '../ai/ai.service';
 
 export interface SocialLink {
     type: string;
@@ -84,6 +85,7 @@ export class AnalyzerService {
         private readonly configService: ConfigService,
         private readonly prismaService: PrismaService,
         private readonly creatorProfileService: CreatorProfileService,
+        private readonly aiService: AIService,
     ) {
         const rpcEndpoint =
             this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
@@ -186,6 +188,48 @@ export class AnalyzerService {
                         safe: false,
                         reason: 'creator_high_risk',
                         permanent: true,
+                        metadata: baseMetadata,
+                    };
+                }
+            }
+
+            const openAiKey = this.configService.get<string>('OPENAI_API_KEY') || '';
+            const shouldUseAi =
+                openAiKey.length > 0 &&
+                !openAiKey.includes('your-openai-api-key') &&
+                !openAiKey.includes('your_');
+            if (shouldUseAi) {
+                const aiThreshold = Number.parseFloat(
+                    this.configService.get<string>('AI_CONVICTION_THRESHOLD', '75.0'),
+                );
+                const aiResult = await this.aiService.analyzeToken(
+                    tokenMint,
+                    traction.symbol || 'UNKNOWN',
+                    {
+                        ageHours: traction.pairCreatedAt
+                            ? (Date.now() - traction.pairCreatedAt) / (1000 * 60 * 60)
+                            : 0,
+                        liquidityUsd: traction.liquidity || 0,
+                        marketCapUsd: traction.marketCap || 0,
+                        volume5mUsd: traction.volume5m || 0,
+                        buys5mCount: traction.buys5m || 0,
+                        sells5mCount: traction.sells5m || 0,
+                        priceChange1hPct: traction.priceChange1h || 0,
+                        isPumpFun: traction.isPumpFun || false,
+                        creatorHoldPct: rugResult.isCTO ? 0 : undefined,
+                    },
+                );
+
+                if (
+                    aiResult.action !== 'buy' ||
+                    aiResult.cuanConvictionScore < aiThreshold
+                ) {
+                    this.logger.debug(
+                        `[${tokenMint}] AI rejected signal. Score=${aiResult.cuanConvictionScore}, Threshold=${aiThreshold}, Action=${aiResult.action}.`,
+                    );
+                    return {
+                        safe: false,
+                        reason: 'ai_rejected',
                         metadata: baseMetadata,
                     };
                 }
@@ -306,6 +350,9 @@ export class AnalyzerService {
         zScore?: number;
         priceChange1h?: number;
         isPumpFun?: boolean;
+        volume5m?: number;
+        buys5m?: number;
+        sells5m?: number;
     }> {
         try {
             const minLiq = Number.parseFloat(
@@ -317,6 +364,9 @@ export class AnalyzerService {
             const minBuys = Number.parseInt(this.configService.get<string>('MIN_BUY_COUNT', '3'));
             const minVelocity = Number.parseFloat(
                 this.configService.get<string>('MIN_VOLUME_MCAP_RATIO', '0.02'),
+            );
+            const minVlRatio = Number.parseFloat(
+                this.configService.get<string>('MIN_VL_RATIO', '0'),
             );
             const minMCap = Number.parseFloat(this.configService.get<string>('MIN_MCAP', '5000'));
             const maxMCap = Number.parseFloat(this.configService.get<string>('MAX_MCAP', '300000'));
@@ -406,7 +456,8 @@ export class AnalyzerService {
             // 1. VoL (Velocity of Liquidity)
             // Rumus: (Volume 5m / Liquidity) * Confidence Score
             const confidenceScore = buys5m / (buys5m + sells5m || 1);
-            const volScore = (volume5m / (liquidity || 1)) * confidenceScore;
+            const vlRatio = volume5m / (liquidity || 1);
+            const volScore = vlRatio * confidenceScore;
 
             // 2. Volume Z-Score (Anomaly Detection)
             // Pseudo Z-Score: (Current - Avg) / StdDev (Asumsi StdDev = Avg * 0.5)
@@ -519,6 +570,25 @@ export class AnalyzerService {
                 };
             }
 
+            if (vlRatio < minVlRatio) {
+                return {
+                    passed: false,
+                    reason: 'low_vl_ratio',
+                    marketCap,
+                    symbol,
+                    pairCreatedAt,
+                    socials,
+                    liquidity,
+                    volScore,
+                    zScore,
+                    priceChange1h,
+                    isPumpFun,
+                    volume5m,
+                    buys5m,
+                    sells5m,
+                };
+            }
+
             // 📊 BUY VS SELL RATIO (Confidence Score)
             if (confidenceScore < minConfidence) {
                 return {
@@ -565,6 +635,9 @@ export class AnalyzerService {
                 zScore,
                 priceChange1h,
                 isPumpFun,
+                volume5m,
+                buys5m,
+                sells5m,
             };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
