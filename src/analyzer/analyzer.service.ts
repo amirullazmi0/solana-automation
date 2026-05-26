@@ -309,7 +309,7 @@ export class AnalyzerService {
     }> {
         try {
             const minLiq = Number.parseFloat(
-                this.configService.get<string>('MIN_LIQUIDITY_USD', '3000'),
+                this.configService.get<string>('MIN_LIQUIDITY_USD', '7500'),
             );
             const minVol = Number.parseFloat(
                 this.configService.get<string>('MIN_VOLUME_USD', '200'),
@@ -324,7 +324,7 @@ export class AnalyzerService {
                 this.configService.get<string>('MIN_AGE_HOURS', '0.02'),
             );
             const minConfidence = Number.parseFloat(
-                this.configService.get<string>('MIN_BUY_CONFIDENCE', '0.50'),
+                this.configService.get<string>('MIN_BUY_CONFIDENCE', '0.60'),
             );
 
             const response = await DexLimiter.get<{ pairs: DexScreenerPair[] }>(

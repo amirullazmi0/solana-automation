@@ -632,7 +632,10 @@ export class TradeService implements OnModuleInit {
         actualSol?: number;
         actualTokens?: number;
     }> {
-        const maxRetries = 3;
+        const maxRetries = Number.parseInt(
+            this.configService.get<string>('TRADE_MAX_RETRIES', '5'),
+            10,
+        );
         try {
             // Jurus Pamungkas: Pakai Paid Endpoint & API Key
             const hostname = 'api.jup.ag';

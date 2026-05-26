@@ -6,6 +6,7 @@ import axios from 'axios';
 import * as https from 'https';
 import { DexScreenerPair, TokenMetadata } from './analyzer.service';
 import { TradeService } from '../trade/trade.service';
+import { ReportingService } from '../reporting/reporting.service';
 import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { DexLimiter } from '../common/dex-limiter';
@@ -53,6 +54,10 @@ export class EstablishedAnalyzerService {
 
     private get tradeService(): TradeService {
         return this.moduleRef.get(TradeService, { strict: false });
+    }
+
+    private get reportingService(): ReportingService {
+        return this.moduleRef.get(ReportingService, { strict: false });
     }
 
     private getHttpsAgent() {
@@ -506,6 +511,22 @@ export class EstablishedAnalyzerService {
                 isPumpFun: isPumpFunToken,
                 isCTO: rugResult.isCTO,
             };
+
+            const autoBuyEnabled =
+                this.configService.get<string>('AUTO_BUY_ENABLED', 'false') === 'true';
+            if (!autoBuyEnabled) {
+                await this.reportingService.sendBuySignalAlert(tokenMint, metadata, {
+                    strategy: 'Established Rebound & CTO',
+                    targetTakeProfit: 18.0,
+                    targetTrailingDistance: 2.5,
+                    targetStopLoss: 20.0,
+                });
+                return {
+                    isEstablished: true,
+                    executed: false,
+                    reason: 'signal_only',
+                };
+            }
 
             // Eksekusi Swap Jupiter V6 dengan Pengaturan Keluar Ketat
             const buyResult = await this.tradeService.attemptBuy(tokenMint, metadata, undefined, {

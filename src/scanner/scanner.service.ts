@@ -339,6 +339,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     'cooldown_win',
                     'cooldown_loss',
                     'stagnant_timeout',
+                    'signal_only',
                 ].includes(existing.reason || '');
                 if (existing.status === 'TRADED' || isTempFail) {
                     const recentTrade = await this.prismaService.trade.findFirst({
@@ -533,6 +534,15 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     // 🔄 ESTABLISHED FALL-THROUGH: Jika rebound gagal karena safety/security,
                     // retry di loop. Jika gagal karena market metrics, FALL-THROUGH ke standard analyzer.
                     if (reboundResult.isEstablished && !reboundResult.executed) {
+                        if (reboundResult.reason === 'signal_only') {
+                            await this.prismaService.watchlist.update({
+                                where: { tokenMint },
+                                data: { status: 'FAILED', reason: 'signal_only' },
+                            });
+                            this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
+                            return;
+                        }
+
                         const securityFailReasons = [
                             'established_security_authority_failed',
                             'established_rugcheck_failed',
@@ -639,6 +649,25 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     }
 
                     if (result.safe) {
+                        const autoBuyEnabled =
+                            this.configService.get<string>('AUTO_BUY_ENABLED', 'false') === 'true';
+
+                        if (!autoBuyEnabled) {
+                            this.logger.log(
+                                `[${tokenMint}] MUST BUY signal detected. Auto-buy disabled, sending Telegram signal only.`,
+                            );
+                            await this.reportingService.sendBuySignalAlert(
+                                tokenMint,
+                                result.metadata,
+                            );
+                            await this.prismaService.watchlist.update({
+                                where: { tokenMint },
+                                data: { status: 'FAILED', reason: 'signal_only' },
+                            });
+                            this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
+                            return;
+                        }
+
                         this.logger.log(
                             `[${tokenMint}] 🚀 Traction detected! Attempting to buy...`,
                         );

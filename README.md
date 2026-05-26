@@ -15,7 +15,7 @@ Bot tidak melupakan koin potensial. Koin yang gagal filter **sementara** (terlal
 Rumus matematis untuk membedakan koin "micin" biasa dengan koin yang punya potensi ledakan nyata:
 - **VoL (Velocity of Liquidity)** — Kecepatan aliran uang dibanding ketersediaan liquidity di pool
 - **Volume Z-Score** — Deteksi anomali volume untuk menemukan jejak akumulasi Whale/insider
-- **Safety Index** — Analisa konsentrasi Top 10 Holders (reject jika Top 10 pegang > 30% supply)
+- **Safety Index** — Analisa konsentrasi Top 10 Holders (reject jika Top 10 pegang > 20% supply)
 
 ### 3. 💊 PumpFun Tolerance
 Bot memahami mekanisme PumpFun:
@@ -82,9 +82,9 @@ Salin `.env.example` ke `.env` dan isi value-nya. Semua parameter sudah diberi k
 |-----------|-------|------------|
 | `ANALYZER_MIN_Z_SCORE` | `1.5` | Volume anomaly detection (lebih rendah = lebih agresif) |
 | `ANALYZER_MIN_VOL_SCORE` | `0.02` | Kecepatan uang masuk pool |
-| `ANALYZER_MIN_VOLUME_SURGE` | `1.0` | Volume saat ini vs rata-rata |
-| `MIN_BUY_CONFIDENCE` | `0.55` | Rasio buyer vs seller |
-| `MIN_LIQUIDITY_USD` | `3000` | Minimum liquidity di pool |
+| `ANALYZER_MIN_VOLUME_SURGE` | `1.5` | Volume saat ini vs rata-rata |
+| `MIN_BUY_CONFIDENCE` | `0.60` | Rasio buyer vs seller |
+| `MIN_LIQUIDITY_USD` | `7500` | Minimum liquidity di pool |
 | `MIN_BUY_COUNT` | `5` | Minimum buyer dalam 5 menit |
 
 ### Established Rebound & CTO Thresholds
@@ -92,6 +92,7 @@ Salin `.env.example` ke `.env` dan isi value-nya. Semua parameter sudah diberi k
 |-----------|-------|------------|
 | `ESTABLISHED_MIN_AGE_HOURS` | `24` | Umur minimum token (jam) |
 | `ESTABLISHED_MAX_AGE_HOURS` | `72` | Umur maksimum token (jam) |
+| `ESTABLISHED_MIN_BUYS` | `5` | Minimum buyer dalam 5 menit untuk rebound |
 | `MIN_ESTABLISHED_LIQUIDITY` | `3000` | Minimum likuiditas (USD) |
 | `MAX_ESTABLISHED_MCAP` | `200000` | Maksimum kapitalisasi pasar (USD) |
 | `REBOUND_PRICE_DROP_PCT` | `-50` | Syarat penurunan harga dalam 24 jam |
@@ -152,7 +153,7 @@ Setiap token harus melewati gate ini **secara berurutan**:
 
 #### Gate 1: Liquidity Check
 ```
-PASS jika: liquidity >= MIN_LIQUIDITY_USD ($3,000)
+PASS jika: liquidity >= MIN_LIQUIDITY_USD ($7,500)
 FAIL: zero_liquidity (permanent jika koin > 1 jam tapi liq tetap 0)
 ```
 > Koin tanpa liquidity = mustahil dijual tanpa slippage besar.
@@ -176,7 +177,7 @@ FAIL: too_young (temporary) | too_old (temporary)
 volumeSurge = volume_5m / avgVolume_5m
 avgVolume_5m = volume_1h / 12
 
-PASS jika: volumeSurge >= ANALYZER_MIN_VOLUME_SURGE (1.0x)
+PASS jika: volumeSurge >= ANALYZER_MIN_VOLUME_SURGE (1.5x)
 FAIL: low_surge (temporary)
 ```
 > Memastikan volume saat ini **minimal sama** dengan rata-rata. Surge > 1 = volume naik.
@@ -184,7 +185,7 @@ FAIL: low_surge (temporary)
 #### Gate 5: Price Trend
 ```
 PASS jika: priceChange_1h > -15%
-FAIL: bearish_trend (temporary)
+FAIL: bearish_trend (permanent)
 ```
 > Jangan beli koin yang sedang downtrend tajam. Tunggu reversal.
 
@@ -192,15 +193,15 @@ FAIL: bearish_trend (temporary)
 ```
 confidenceScore = buys_5m / (buys_5m + sells_5m)
 
-PASS jika: confidenceScore >= MIN_BUY_CONFIDENCE (0.55)
+PASS jika: confidenceScore >= MIN_BUY_CONFIDENCE (0.60)
 FAIL: low_buy_confidence (temporary)
 ```
-> 55% buyer artinya ada demand yang lebih kuat dari supply. Di bawah itu = orang lebih banyak jual.
+> 60% buyer artinya ada demand yang lebih kuat dari supply. Di bawah itu = orang lebih banyak jual.
 
 #### Gate 7: Base Metrics Combo
 ```
 PASS jika:
-  - liquidity >= MIN_LIQUIDITY_USD ($3,000)
+  - liquidity >= MIN_LIQUIDITY_USD ($7,500)
   - volume_5m >= MIN_VOLUME_USD ($500)
   - buys_5m >= MIN_BUY_COUNT (5)
 FAIL: low_metrics (temporary)
@@ -251,11 +252,11 @@ FAIL: safety_rpc_failed (temporary, retry 3x)
 #### Gate 12: RugCheck API (Advanced Safety)
 ```
 Sub-checks (harus SEMUA pass):
-  1. Safety Index = 1 - (top10HolderSupply / totalSupply) >= 0.70
+  1. Safety Index = 1 - (top10HolderSupply / totalSupply) >= 0.80
   2. LP Status = 'burned' ATAU 'locked' (PumpFun skip jika no market data)
-  3. Risk Score <= 2000
+  3. Risk Score <= 1000
   4. Tidak ada risk: 'honeypot', 'freeze', 'mint authority'
-  5. Danger level risks < 2 (toleransi 1 danger risk untuk menghindari false positive)
+  5. Danger level risks = 0
   6. Creator balance <= 5% dari total supply
 
 FAIL: high_concentration | lp_not_burned | high_risk_score | honeypot_detected | creator_holds_too_much
@@ -287,23 +288,23 @@ Token ditemukan (via Polling atau WS)
     │
     ▼
 PriceMonitorService mulai tracking:
-  • Take Profit standar (40%) / CTO (18%) → Trailing Stop aktif
-  • Stop Loss standar (35%) / CTO (20%) → Auto-sell dengan slippage 15%
-  • Trailing Stop standar (4%) / CTO (2.5%) → Kunci profit, sell jika turun dari peak
+  • Take Profit standar (30%) / CTO (18%) → Trailing Stop aktif
+  • Stop Loss standar (25%) / CTO (20%) → Auto-sell dengan slippage 15%
+  • Trailing Stop standar (5%) / CTO (2.5%) → Kunci profit, sell jika turun dari peak
 ```
 
 ### 📈 Exit Strategy & Profit Optimizations (PriceMonitorService)
 
 | Kondisi | Aksi | Slippage |
 |---------|------|----------|
-| Price naik ≥ `TAKE_PROFIT_PERCENT` (Standard: 40% / CTO: 18%) | Trailing Stop **aktif** | Normal (5%) |
-| Price turun ≥ `TRAILING_DISTANCE_PERCENT` (Standard: 15% / CTO: 2.5%) dari peak | **SELL** (Trailing Stop) | Normal (5%) |
-| Price turun ≥ `STOP_LOSS_PERCENT` (Standard: 70% / CTO: 20%) dari entry | **SELL** (Stop Loss) | Panic (15%) |
+| Price naik ≥ `TAKE_PROFIT_PERCENT` (Standard: 30% / CTO: 18%) | Trailing Stop **aktif** | Normal (5%) |
+| Price turun ≥ `TRAILING_DISTANCE_PERCENT` (Standard: 5% / CTO: 2.5%) dari peak | **SELL** (Trailing Stop) | Normal (5%) |
+| Price turun ≥ `STOP_LOSS_PERCENT` (Standard: 25% / CTO: 20%) dari entry | **SELL** (Stop Loss) | Panic (15%) |
 | Dev dump terdeteksi (creator sell >50%) | **SELL** (Rugpull) | Panic (15%) |
 
 #### ⚡ Optimasi Profitabilitas Tambahan:
-- **Dynamic Take Profit**: Jika koin sangat kencang dan highest price mencapai **1.35x dari harga beli**, target TP secara dinamis disesuaikan menjadi **50%** (dari standard 40%) untuk membiarkan profit berlari namun tetap realistis (menghindari keserakahan).
-- **Flexible Trailing Stop**: Trailing Stop (TSL) dibiarkan bergerak bebas mengikuti fluktuasi harga (jarak 15% penuh dari peak) tanpa dikunci terlalu dini di dekat break-even.
+- **Dynamic Take Profit**: Jika koin sangat kencang dan highest price mencapai **1.35x dari harga beli**, target TP secara dinamis disesuaikan menjadi **50%** (dari standard 30%) untuk membiarkan profit berlari namun tetap realistis (menghindari keserakahan).
+- **Flexible Trailing Stop**: Trailing Stop (TSL) dibiarkan bergerak bebas mengikuti fluktuasi harga (jarak 5% penuh dari peak) tanpa dikunci terlalu dini di dekat break-even.
 - **Zero-Loss Protection (Safe Zone)**: Ketika profit koin telah menyentuh minimal **15%**, stop loss otomatis dinaikkan ke minimal `harga_beli + 2%` untuk menutupi fee gas/Priority Fee.
 - **Patience Protocol (SL Delay)**: Ketika harga menyentuh zona stop loss, bot menunggu **5 menit** untuk melihat volume/tekanan beli pemulihan, dengan batas keras (*hard cap*) **10 menit** untuk meminimalkan kerugian lebih dalam.
 
@@ -320,7 +321,7 @@ Token yang gagal karena alasan **temporary** tidak langsung dibuang:
 | `mcap_too_low` | ✅ | Tunggu MCap naik |
 | `low_surge` | ✅ | Tunggu volume surge |
 | `safety_rpc_failed` | ✅ | Retry 3x, lalu watchlist |
-| `bearish_trend` | ✅ | Tunggu reversal |
+| `bearish_trend` | ❌ | Permanent — downtrend tajam |
 | `low_buy_confidence` | ✅ | Tunggu lebih banyak buyer |
 | `too_old` | ✅ | Temporary — jika umur di bawah `ESTABLISHED_MAX_AGE_HOURS` (72 jam) |
 | `mcap_too_high` | ❌ | Permanent — sudah terlalu besar |

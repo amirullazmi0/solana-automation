@@ -576,6 +576,59 @@ export class ReportingService implements OnModuleInit {
         });
     }
 
+    async sendBuySignalAlert(
+        tokenMint: string,
+        metadata?: TokenMetadata,
+        options?: {
+            strategy?: string;
+            targetTakeProfit?: number;
+            targetTrailingDistance?: number;
+            targetStopLoss?: number;
+        },
+    ) {
+        const displaySymbol = metadata?.symbol || 'UNKNOWN';
+        const strategy =
+            options?.strategy || (metadata?.isCTO ? 'CTO Candidate' : 'Standard Second-Wave');
+        const exitPlan = options
+            ? `\nTarget: TP ${options.targetTakeProfit}% | TSL ${options.targetTrailingDistance}% | SL ${options.targetStopLoss}%`
+            : '';
+
+        const message =
+            `*MUST BUY SIGNAL - NO AUTO BUY*\n` +
+            `Token: ${displaySymbol}\n` +
+            `Mint: \`${tokenMint}\`\n` +
+            `Strategy: \`${strategy}\`${exitPlan}\n\n` +
+            `MCap: \`$${(metadata?.mcap || metadata?.marketCap || 0).toLocaleString()}\`\n` +
+            `Liquidity: \`$${(metadata?.liquidity || 0).toLocaleString()}\`\n` +
+            `Surge: \`${metadata?.volumeSurge?.toFixed(2) || 'N/A'}x\`\n` +
+            `VoL: \`${metadata?.volScore?.toFixed(4) || 'N/A'}\` | Z: \`${metadata?.zScore?.toFixed(2) || 'N/A'}\`\n\n` +
+            `Mode: \`Signal only. Bot did not execute swap.\``;
+
+        const socialButtons: TelegramBot.InlineKeyboardButton[] = [];
+        if (metadata?.socials?.twitter) {
+            socialButtons.push({ text: 'Twitter', url: metadata.socials.twitter });
+        }
+        if (metadata?.socials?.telegram) {
+            socialButtons.push({ text: 'Telegram', url: metadata.socials.telegram });
+        }
+
+        const buttons: TelegramBot.InlineKeyboardButton[][] = [
+            socialButtons,
+            [
+                { text: 'Pump.fun', url: `https://pump.fun/coin/${tokenMint}` },
+                { text: 'DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` },
+            ],
+            [
+                { text: 'RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` },
+                { text: 'Solscan', url: `https://solscan.io/token/${tokenMint}` },
+            ],
+        ].filter((row) => row.length > 0);
+
+        await this.sendMessage(message, {
+            reply_markup: { inline_keyboard: buttons },
+        });
+    }
+
     async sendWatchlistNotification(
         tokenMint: string,
         mcap: number,

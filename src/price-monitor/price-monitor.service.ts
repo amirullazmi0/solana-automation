@@ -30,7 +30,7 @@ export class PriceMonitorService {
             this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '5.0'),
         );
         this.stopLossPercent = parseFloat(
-            this.configService.get<string>('STOP_LOSS_PERCENT', '40.0'),
+            this.configService.get<string>('STOP_LOSS_PERCENT', '25.0'),
         );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }

@@ -78,7 +78,7 @@ Analyze the provided metrics and return a JSON object with the following fields:
 }
 Rules:
 1. "action" must only be "buy" if "cuanConvictionScore" is >= 75. Otherwise, "action" must be "skip".
-2. If liquidity is low (< $3000) or RugCheck danger risks are high, conviction must be very low.
+2. If liquidity is low (< $7500) or RugCheck danger risks are high, conviction must be very low.
 3. Be highly objective. Most memecoins are scams. Only rate high if volume, buy/sell ratio, and support consolidation look solid.
 4. Output MUST be a valid JSON object matching the schema. Do not output markdown wrappers.`;
 
