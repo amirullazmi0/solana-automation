@@ -26,6 +26,7 @@ export class TradeService implements OnModuleInit {
     private connection: Connection;
     private wallet: Keypair;
     private readonly sellingTrades = new Set<number>();
+    private jitoTipAccounts: string[] = [];
 
     private readonly totalCapital: number;
     private readonly reserveAmount: number;
@@ -116,9 +117,64 @@ export class TradeService implements OnModuleInit {
                 this.logger.error(`Failed to fetch wallet balance: ${message}`);
             }
 
+            // 🚀 JITO TIP ACCOUNTS: Fetch Jito tip accounts on startup
+            await this.refreshJitoTipAccounts();
+
             // 🚀 RESUME MONITORING: Pantau lagi koin yang masih nyangkut/open
             await this.startMonitoringAllTrades();
         }
+    }
+
+    private async refreshJitoTipAccounts() {
+        const useJito = this.configService.get<string>('USE_JITO') === 'true';
+        if (!useJito) return;
+
+        const jitoBlockEngineUrl =
+            this.configService.get<string>('JITO_BLOCK_ENGINE_URL') ||
+            'https://mainnet.block-engine.jito.wtf/api/v1/bundles';
+
+        try {
+            const response = await axios.post(
+                jitoBlockEngineUrl,
+                {
+                    jsonrpc: '2.0',
+                    id: 1,
+                    method: 'getTipAccounts',
+                    params: [],
+                },
+                {
+                    headers: { 'Content-Type': 'application/json' },
+                    httpsAgent: this.httpsAgent,
+                    timeout: 5000,
+                },
+            );
+
+            if (
+                response.data?.result &&
+                Array.isArray(response.data.result) &&
+                response.data.result.length > 0
+            ) {
+                this.jitoTipAccounts = response.data.result as string[];
+                this.logger.log(
+                    `[Jito] Successfully loaded ${this.jitoTipAccounts.length} tip accounts dynamically.`,
+                );
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error(
+                `[Jito] Failed to fetch tip accounts dynamically: ${message}`,
+            );
+        }
+    }
+
+    private async getJitoTipAccount(): Promise<string> {
+        if (this.jitoTipAccounts.length === 0) {
+            await this.refreshJitoTipAccounts();
+        }
+        if (this.jitoTipAccounts.length === 0) {
+            throw new Error('No Jito tip accounts available from block engine API');
+        }
+        return this.jitoTipAccounts[Math.floor(Math.random() * this.jitoTipAccounts.length)];
     }
 
     private async startMonitoringAllTrades() {
@@ -714,18 +770,7 @@ export class TradeService implements OnModuleInit {
             let txid = '';
 
             if (useJito) {
-                const JITO_TIP_ACCOUNTS = [
-                    '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
-                    'HFqU5xCUoS5ncHNZfgXgtRoLmE7UcrK8GqLpL5Ew4w4f',
-                    'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
-                    'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iMgaSka',
-                    'DfXygSm4jMRu1ZfB33kUStA9GokT6pS6xRkK7wP5x5Xb',
-                    'ADuUkR4wZQ2dZStKqA4UXXPZ8yJv2QvU8TjL25uJ1w1k',
-                    'DttWaMuVvZ1KqY6tWf1w9A1hP1m4p2iQ5hZwv3F7m53T',
-                    '3AVi9Tg9Uo68Yh2Sqw7T9C39n1bY6pQn1E5jZ2pUwv3R',
-                ];
-                const randomTipAccount =
-                    JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)];
+                const randomTipAccount = await this.getJitoTipAccount();
                 const tipLamports = Math.floor(jitoTipSol * 1_000_000_000);
 
                 const tx2Message = new TransactionMessage({

@@ -13,16 +13,7 @@ import * as dotenv from 'dotenv';
 // Load .env
 dotenv.config();
 
-const JITO_TIP_ACCOUNTS = [
-    '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
-    'HFqU5xCUoS5ncHNZfgXgtRoLmE7UcrK8GqLpL5Ew4w4f',
-    'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
-    'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iMgaSka',
-    'DfXygSm4jMRu1ZfB33kUStA9GokT6pS6xRkK7wP5x5Xb',
-    'ADuUkR4wZQ2dZStKqA4UXXPZ8yJv2QvU8TjL25uJ1w1k',
-    'DttWaMuVvZ1KqY6tWf1w9A1hP1m4p2iQ5hZwv3F7m53T',
-    '3AVi9Tg9Uo68Yh2Sqw7T9C39n1bY6pQn1E5jZ2pUwv3R',
-];
+// No hardcoded Jito tip accounts fallback list
 
 const JITO_BLOCK_ENGINE_URL = 'https://mainnet.block-engine.jito.wtf/api/v1/bundles';
 
@@ -64,8 +55,35 @@ async function main() {
 
     // 2. Buat Tx2 (Transaksi Jito Tip)
     console.log('🛠️ Membangun Tx2 (Jito Tip)...');
-    const randomTipAccount = JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)];
-    const tipLamports = 100_000; // 0.0001 SOL Tip
+
+    // Fetch Jito tip accounts dynamically
+    let tipAccounts: string[] = [];
+    try {
+        console.log('🔍 Mengambil Jito Tip Accounts secara dinamis...');
+        const response = await axios.post(JITO_BLOCK_ENGINE_URL, {
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'getTipAccounts',
+            params: [],
+        }, {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 5000,
+        });
+        if (response.data?.result && Array.isArray(response.data.result) && response.data.result.length > 0) {
+            tipAccounts = response.data.result;
+            console.log(`✅ Loaded ${tipAccounts.length} Jito Tip Accounts dynamically`);
+        }
+    } catch (e: any) {
+        console.error('❌ Gagal mengambil Jito Tip Accounts secara dinamis:', e.message);
+        throw new Error('Gagal mengambil Jito Tip Accounts secara dinamis');
+    }
+
+    if (tipAccounts.length === 0) {
+        throw new Error('Tidak ada Jito Tip Accounts yang tersedia');
+    }
+
+    const randomTipAccount = tipAccounts[Math.floor(Math.random() * tipAccounts.length)];
+    const tipLamports = 1_000_000; // 0.001 SOL Tip
 
     const tx2Message = new TransactionMessage({
         payerKey: wallet.publicKey,
