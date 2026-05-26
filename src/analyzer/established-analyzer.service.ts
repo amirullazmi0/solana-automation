@@ -512,9 +512,8 @@ export class EstablishedAnalyzerService {
                 isCTO: rugResult.isCTO,
             };
 
-            const autoBuyEnabled =
-                this.configService.get<string>('AUTO_BUY_ENABLED', 'false') === 'true';
-            if (!autoBuyEnabled) {
+            const isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
+            if (isDryRun) {
                 await this.reportingService.sendBuySignalAlert(tokenMint, metadata, {
                     strategy: 'Established Rebound & CTO',
                     targetTakeProfit: 18.0,

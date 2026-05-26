@@ -649,12 +649,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     }
 
                     if (result.safe) {
-                        const autoBuyEnabled =
-                            this.configService.get<string>('AUTO_BUY_ENABLED', 'false') === 'true';
+                        const isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
 
-                        if (!autoBuyEnabled) {
+                        if (isDryRun) {
                             this.logger.log(
-                                `[${tokenMint}] MUST BUY signal detected. Auto-buy disabled, sending Telegram signal only.`,
+                                `[${tokenMint}] MUST BUY signal detected. DRY_RUN enabled, sending Telegram signal only.`,
                             );
                             await this.reportingService.sendBuySignalAlert(
                                 tokenMint,
