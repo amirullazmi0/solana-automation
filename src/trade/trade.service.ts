@@ -13,6 +13,7 @@ import {
 import axios from 'axios';
 import bs58 from 'bs58';
 import * as https from 'https';
+import { Trade as PrismaTrade } from '@prisma/client';
 import { TokenMetadata } from '../analyzer/analyzer.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
@@ -20,12 +21,87 @@ import { DexLimiter } from '../common/dex-limiter';
 
 export const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
+type TradeAuditFields = {
+    solPriceAtEntry?: number | null;
+    entryValueUsd?: number | null;
+    totalFeesSol?: number | null;
+};
+
+export class TokenDecimalsUnavailableError extends Error {
+    constructor(public readonly mint: string) {
+        super(`Token decimals unavailable for ${mint}`);
+        this.name = 'TokenDecimalsUnavailableError';
+    }
+}
+
+export class PriceAnomalyError extends Error {
+    constructor(
+        public readonly mint: string,
+        public readonly calculatedPrice: number,
+        public readonly jupiterPrice: number,
+        public readonly deviation: number,
+    ) {
+        super(
+            `Price anomaly for ${mint}: calculated=${calculatedPrice}, jupiter=${jupiterPrice}, deviation=${deviation}`,
+        );
+        this.name = 'PriceAnomalyError';
+    }
+}
+
+export function validateSellPrice(
+    calculatedPrice: number,
+    jupiterPrice: number | null,
+    tokenMint: string,
+    logger?: Pick<Logger, 'warn'>,
+): number {
+    const calculatedValid = Number.isFinite(calculatedPrice) && calculatedPrice > 0;
+    const jupiterValid = jupiterPrice !== null && Number.isFinite(jupiterPrice) && jupiterPrice > 0;
+
+    if (!calculatedValid && !jupiterValid) {
+        throw new PriceAnomalyError(tokenMint, calculatedPrice, jupiterPrice || 0, Infinity);
+    }
+    if (calculatedValid && !jupiterValid) return calculatedPrice;
+    const validJupiterPrice = jupiterPrice as number;
+    if (!calculatedValid && jupiterValid) return validJupiterPrice;
+
+    const deviation = Math.abs(calculatedPrice - validJupiterPrice) / validJupiterPrice;
+    if (deviation <= 0.1) return calculatedPrice;
+    if (deviation <= 0.25) {
+        logger?.warn(
+            `[${tokenMint}] Sell price deviation ${(deviation * 100).toFixed(2)}%. Calculated=${calculatedPrice}, Jupiter=${validJupiterPrice}. Using Jupiter price.`,
+        );
+        return validJupiterPrice;
+    }
+
+    throw new PriceAnomalyError(tokenMint, calculatedPrice, validJupiterPrice, deviation);
+}
+
+export function calculateCleanSwapSolAmount(
+    rawSolDeltaLamports: number,
+    networkFeeLamports: number,
+    rentDeltaLamports: number,
+    jitoTipLamports: number,
+): { cleanSolAmount: number | null; totalFeesSol: number } {
+    const totalNoiseLamports = networkFeeLamports + rentDeltaLamports + jitoTipLamports;
+    const cleanLamports = rawSolDeltaLamports - totalNoiseLamports;
+    return {
+        cleanSolAmount:
+            cleanLamports > 0 && cleanLamports <= rawSolDeltaLamports
+                ? cleanLamports / 1_000_000_000
+                : null,
+        totalFeesSol: totalNoiseLamports / 1_000_000_000,
+    };
+}
+
 @Injectable()
 export class TradeService implements OnModuleInit {
     private readonly logger = new Logger(TradeService.name);
     private connection: Connection;
     private wallet: Keypair;
     private readonly sellingTrades = new Set<number>();
+    private readonly decimalsCache = new Map<string, number>();
+    private readonly sellRetryCounts = new Map<number, number>();
+    private readonly priceAnomalyCounts = new Map<number, number>();
     private jitoTipAccounts: string[] = [];
 
     private readonly totalCapital: number;
@@ -122,6 +198,7 @@ export class TradeService implements OnModuleInit {
 
             // 🚀 RESUME MONITORING: Pantau lagi koin yang masih nyangkut/open
             await this.startMonitoringAllTrades();
+            await this.preloadOpenTradeDecimals();
         }
     }
 
@@ -185,6 +262,53 @@ export class TradeService implements OnModuleInit {
         this.logger.log(
             `[Monitor] Found ${openTrades} open positions. PriceMonitorService will handle tracking.`,
         );
+    }
+
+    private async preloadOpenTradeDecimals() {
+        const openTrades = await this.prismaService.trade.findMany({
+            where: { status: 'OPEN' },
+            select: { tokenMint: true },
+        });
+
+        for (const trade of openTrades) {
+            try {
+                await this.getTokenDecimalsStrict(trade.tokenMint);
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                this.logger.warn(`[Decimals] Could not preload ${trade.tokenMint}: ${msg}`);
+            }
+        }
+    }
+
+    private async updateTradeAuditFields(
+        tradeId: number,
+        fields: Required<TradeAuditFields>,
+    ): Promise<void> {
+        await this.prismaService.$executeRaw`
+            UPDATE "Trade"
+            SET "solPriceAtEntry" = ${fields.solPriceAtEntry},
+                "entryValueUsd" = ${fields.entryValueUsd},
+                "totalFeesSol" = ${fields.totalFeesSol}
+            WHERE "id" = ${tradeId}
+        `;
+    }
+
+    private async incrementTradeFees(tradeId: number, totalFeesSol: number): Promise<void> {
+        await this.prismaService.$executeRaw`
+            UPDATE "Trade"
+            SET "totalFeesSol" = COALESCE("totalFeesSol", 0) + ${totalFeesSol}
+            WHERE "id" = ${tradeId}
+        `;
+    }
+
+    private async getTradeAuditFields(tradeId: number): Promise<TradeAuditFields> {
+        const rows = await this.prismaService.$queryRaw<TradeAuditFields[]>`
+            SELECT "solPriceAtEntry", "entryValueUsd", "totalFeesSol"
+            FROM "Trade"
+            WHERE "id" = ${tradeId}
+            LIMIT 1
+        `;
+        return rows[0] || {};
     }
 
     private setupWalletAndConnection() {
@@ -342,7 +466,7 @@ export class TradeService implements OnModuleInit {
             `[Slot ${slotToUse}] Attempting to buy ${tokenMint} with $${buyAmountUSD} (${amountInSol.toFixed(4)} SOL)`,
         );
 
-        const { success, entryPrice, error, txHash, actualSol, actualTokens } =
+        const { success, entryPrice, error, txHash, actualSol, actualTokens, totalFeesSol } =
             await this.executeJupiterSwap(
                 WRAPPED_SOL_MINT,
                 tokenMint,
@@ -356,6 +480,7 @@ export class TradeService implements OnModuleInit {
 
         if (success && entryPrice > 0) {
             const finalAmountInSol = actualSol || amountInSol;
+            const entryValueUsd = finalAmountInSol * solPrice;
             const symbol = await this.fetchTokenSymbol(tokenMint);
             // Get initial balances for watch addresses
             let initialCreatorBalance = 0;
@@ -370,7 +495,7 @@ export class TradeService implements OnModuleInit {
                 initialTopHolderBalance = typeof bal === 'number' ? bal : 0;
             }
 
-            await this.prismaService.trade.create({
+            const createdTrade = await this.prismaService.trade.create({
                 data: {
                     tokenMint,
                     symbol,
@@ -391,6 +516,11 @@ export class TradeService implements OnModuleInit {
                     targetStopLoss: options?.targetStopLoss,
                     targetTrailingDistance: options?.targetTrailingDistance,
                 },
+            });
+            await this.updateTradeAuditFields(createdTrade.id, {
+                solPriceAtEntry: solPrice,
+                entryValueUsd,
+                totalFeesSol: totalFeesSol || 0,
             });
             this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
             const strategyName = options?.targetTakeProfit
@@ -423,7 +553,15 @@ export class TradeService implements OnModuleInit {
         exitReason: string,
         percentage: number = 1.0,
     ): Promise<boolean> {
-        const trade = await this.prismaService.trade.findUnique({ where: { id: tradeId } });
+        const baseTrade = await this.prismaService.trade.findUnique({
+            where: { id: tradeId },
+        });
+        const trade = baseTrade
+            ? ({
+                  ...baseTrade,
+                  ...(await this.getTradeAuditFields(baseTrade.id)),
+              } as PrismaTrade & TradeAuditFields)
+            : null;
         if (!trade || trade.status !== 'OPEN') {
             this.logger.debug(`[Trade ${tradeId}] Already closed or not found. Skipping sell.`);
             return false;
@@ -460,7 +598,16 @@ export class TradeService implements OnModuleInit {
             }
 
             const sellAmount = actualBalance * percentage;
-            const decimals = await this.getTokenDecimals(trade.tokenMint);
+            let decimals: number;
+            try {
+                decimals = await this.getTokenDecimalsStrict(trade.tokenMint);
+            } catch (error) {
+                if (error instanceof TokenDecimalsUnavailableError) {
+                    this.queueSellRetry(tradeId, currentPrice, exitReason, percentage, 30_000);
+                    return false;
+                }
+                throw error;
+            }
             const amountInLamports = Math.floor(sellAmount * Math.pow(10, decimals));
 
             if (amountInLamports <= 0) {
@@ -496,6 +643,7 @@ export class TradeService implements OnModuleInit {
                 txHash,
                 actualSol,
                 actualTokens,
+                totalFeesSol,
             } = await this.executeJupiterSwap(
                 trade.tokenMint,
                 'So11111111111111111111111111111111111111112',
@@ -517,7 +665,7 @@ export class TradeService implements OnModuleInit {
                 const entrySolValue = trade.amountInSol * percentage;
                 const solProfitPercent = ((finalSolReceived - entrySolValue) / entrySolValue) * 100;
 
-                const entryValueUsd = entrySolValue * solPrice;
+                const entryValueUsd = this.getEntryValueUsdForSell(trade, percentage, solPrice);
                 const exitValueUsd = sellAmount * exitPrice;
                 const estimatedProfitUsd = exitValueUsd - entryValueUsd;
                 const totalUsdSpent = finalTokensSold * trade.entryPrice;
@@ -547,6 +695,9 @@ export class TradeService implements OnModuleInit {
                             profitUsd: (trade.profitUsd || 0) + estimatedProfitUsd,
                         },
                     });
+                }
+                if (totalFeesSol) {
+                    await this.incrementTradeFees(tradeId, totalFeesSol);
                 }
 
                 // 🧑‍💻 AUTO BLACKLIST ON DEV_DUMP/RUGPULL (Self-Learning)
@@ -616,6 +767,9 @@ export class TradeService implements OnModuleInit {
             this.logger.error(
                 `[Slot ${trade.slotNumber}] ❌ SELL FAILED on Solana: ${error}. Trade remains OPEN for retry.`,
             );
+            if (error?.startsWith('price_anomaly')) {
+                this.queuePriceAnomalyRetry(tradeId, currentPrice, exitReason, percentage);
+            }
             return false;
         } catch (error) {
             this.logger.error(
@@ -625,6 +779,76 @@ export class TradeService implements OnModuleInit {
         } finally {
             this.sellingTrades.delete(tradeId);
         }
+    }
+
+    private getEntryValueUsdForSell(
+        trade: { id: number; amountInSol: number; entryValueUsd?: number | null },
+        percentage: number,
+        currentSolPrice: number,
+    ): number {
+        if (trade.entryValueUsd !== null && trade.entryValueUsd !== undefined) {
+            return trade.entryValueUsd * percentage;
+        }
+
+        this.logger.warn(
+            `[Trade ${trade.id}] entryValueUsd missing. Falling back to legacy current SOL price calculation; backfill this trade.`,
+        );
+        return trade.amountInSol * percentage * currentSolPrice;
+    }
+
+    private queueSellRetry(
+        tradeId: number,
+        currentPrice: number,
+        exitReason: string,
+        percentage: number,
+        delayMs: number,
+    ) {
+        const retryCount = (this.sellRetryCounts.get(tradeId) || 0) + 1;
+        this.sellRetryCounts.set(tradeId, retryCount);
+
+        if (retryCount > 3) {
+            this.logger.error(
+                `[Trade ${tradeId}] Sell retry limit reached after decimals failure. Admin action required.`,
+            );
+            return;
+        }
+
+        this.logger.warn(
+            `[Trade ${tradeId}] Queueing sell retry ${retryCount}/3 in ${delayMs}ms.`,
+        );
+        setTimeout(() => {
+            void this.executeSell(tradeId, currentPrice, exitReason, percentage);
+        }, delayMs);
+    }
+
+    private queuePriceAnomalyRetry(
+        tradeId: number,
+        currentPrice: number,
+        exitReason: string,
+        percentage: number,
+    ) {
+        const retryCount = (this.priceAnomalyCounts.get(tradeId) || 0) + 1;
+        this.priceAnomalyCounts.set(tradeId, retryCount);
+
+        if (retryCount > 3) {
+            this.logger.error(
+                `[Trade ${tradeId}] Price anomaly repeated 3 times. Escalating to admin notification.`,
+            );
+            void this.reportingService.sendSellAlert(
+                'UNKNOWN',
+                currentPrice,
+                0,
+                'PRICE_ANOMALY_ADMIN_REVIEW',
+            );
+            return;
+        }
+
+        this.logger.warn(
+            `[Trade ${tradeId}] Queueing price anomaly retry ${retryCount}/3 in 60000ms.`,
+        );
+        setTimeout(() => {
+            void this.executeSell(tradeId, currentPrice, exitReason, percentage);
+        }, 60_000);
     }
 
     private async executeJupiterSwap(
@@ -643,6 +867,7 @@ export class TradeService implements OnModuleInit {
         txHash?: string;
         actualSol?: number;
         actualTokens?: number;
+        totalFeesSol?: number;
     }> {
         const maxRetries = Number.parseInt(
             this.configService.get<string>('TRADE_MAX_RETRIES', '5'),
@@ -700,7 +925,23 @@ export class TradeService implements OnModuleInit {
             }
 
             let price = 0;
-            const decimals = await this.getTokenDecimals(side === 'BUY' ? outputMint : inputMint);
+            const tokenMintForDecimals = side === 'BUY' ? outputMint : inputMint;
+            let decimals: number;
+            try {
+                decimals = await this.getTokenDecimalsStrict(tokenMintForDecimals);
+            } catch (error) {
+                if (error instanceof TokenDecimalsUnavailableError) {
+                    return {
+                        success: false,
+                        entryPrice: 0,
+                        error:
+                            side === 'BUY'
+                                ? 'cancelled_decimals_unavailable'
+                                : 'decimals_unavailable',
+                    };
+                }
+                throw error;
+            }
             if (side === 'BUY') {
                 const usdValue = buyAmountUSD || this.positionSizeUSD;
                 price = usdValue / (quoteData.outAmount / Math.pow(10, decimals));
@@ -709,24 +950,10 @@ export class TradeService implements OnModuleInit {
                 const solPrice = await this.getSolPrice();
                 const outAmountSol = quoteData.outAmount / 1_000_000_000;
                 const inAmountToken = amount / Math.pow(10, decimals);
-                price = (outAmountSol * solPrice) / inAmountToken;
+                const calculatedPrice = (outAmountSol * solPrice) / inAmountToken;
+                const fallbackPrice = await this.getSellPriceFallback(inputMint);
+                price = validateSellPrice(calculatedPrice, fallbackPrice, inputMint, this.logger);
 
-                // 🛡️ SANITY CHECK: Sell price tidak mungkin > $1 untuk microcap token
-                // Jika price > $1 atau <= 0, kemungkinan besar decimals error
-                if (price > 1 || price <= 0) {
-                    this.logger.error(
-                        `[Jupiter] ⚠️ INSANE SELL PRICE: $${price.toFixed(8)} for ${inputMint}. Likely decimals error (got ${decimals}). Falling back to Jupiter Price API.`,
-                    );
-                    const fallbackPrice = await this.getSellPriceFallback(inputMint);
-                    if (fallbackPrice && fallbackPrice > 0 && fallbackPrice < 1) {
-                        price = fallbackPrice;
-                        this.logger.log(`[Jupiter] ✅ Fallback price: $${price.toFixed(8)}`);
-                    } else {
-                        this.logger.error(
-                            `[Jupiter] ❌ Fallback price also failed. Using raw calculated price.`,
-                        );
-                    }
-                }
             }
 
             // 🤖 DRY RUN MODE: Skip actual swap execution, just return simulated success with quote price
@@ -869,6 +1096,7 @@ export class TradeService implements OnModuleInit {
 
             // 🛡️ AMBIL HARGA EKSEKUSI RIIL DARI BLOCKCHAIN
             let finalPrice = price;
+            let totalFeesSol = 0;
             let actualSol =
                 side === 'BUY' ? amount / 1_000_000_000 : quoteData.outAmount / 1_000_000_000;
             let actualTokens =
@@ -884,7 +1112,8 @@ export class TradeService implements OnModuleInit {
                 );
                 if (actualSwap) {
                     const solPrice = await this.getSolPrice();
-                    actualSol = Math.abs(actualSwap.solChange);
+                    totalFeesSol = actualSwap.totalFeesSol;
+                    actualSol = actualSwap.cleanSolAmount ?? Math.abs(actualSwap.solChange);
                     actualTokens = Math.abs(actualSwap.tokenChange);
                     if (side === 'BUY') {
                         if (actualTokens > 0) {
@@ -915,8 +1144,20 @@ export class TradeService implements OnModuleInit {
                 txHash: txid,
                 actualSol,
                 actualTokens,
+                totalFeesSol,
             };
         } catch (error) {
+            if (error instanceof PriceAnomalyError) {
+                this.logger.error(
+                    `[Jupiter] Price anomaly for ${error.mint}: calculated=${error.calculatedPrice}, jupiter=${error.jupiterPrice}, deviation=${(error.deviation * 100).toFixed(2)}%`,
+                );
+                return {
+                    success: false,
+                    entryPrice: 0,
+                    error: `price_anomaly:${error.mint}`,
+                    txHash: undefined,
+                };
+            }
             const message = error instanceof Error ? error.message : String(error);
             if (retryCount < maxRetries - 1) {
                 const waitTime = 1000 * (retryCount + 1);
@@ -941,7 +1182,12 @@ export class TradeService implements OnModuleInit {
         txHash: string,
         wallet: string,
         tokenMint: string,
-    ): Promise<{ solChange: number; tokenChange: number } | null> {
+    ): Promise<{
+        solChange: number;
+        tokenChange: number;
+        cleanSolAmount: number | null;
+        totalFeesSol: number;
+    } | null> {
         let tx: ParsedTransactionWithMeta | null = null;
         for (let i = 0; i < 5; i++) {
             try {
@@ -963,9 +1209,11 @@ export class TradeService implements OnModuleInit {
             (k) => k.pubkey.toBase58() === wallet,
         );
         let solChange = 0;
+        let rawSolDeltaLamports = 0;
         if (walletIndex !== -1) {
             const preSol = tx.meta?.preBalances[walletIndex] ?? 0;
             const postSol = tx.meta?.postBalances[walletIndex] ?? 0;
+            rawSolDeltaLamports = Math.abs(postSol - preSol);
             solChange = (postSol - preSol) / 1_000_000_000;
         }
 
@@ -978,7 +1226,48 @@ export class TradeService implements OnModuleInit {
                 ?.uiTokenAmount.uiAmount ?? 0;
         const tokenChange = postTokenAmount - preTokenAmount;
 
-        return { solChange, tokenChange };
+        const networkFeeLamports = tx.meta?.fee || 0;
+        const rentDeltaLamports = this.calculateRentDelta(tx, walletIndex);
+        const useJito = this.configService.get<string>('USE_JITO') === 'true';
+        const jitoTipLamports = useJito
+            ? Math.floor(
+                  Number.parseFloat(this.configService.get<string>('JITO_TIP_SOL') || '0.0001') *
+                      1_000_000_000,
+              )
+            : 0;
+        const { cleanSolAmount, totalFeesSol } = calculateCleanSwapSolAmount(
+            rawSolDeltaLamports,
+            networkFeeLamports,
+            rentDeltaLamports,
+            jitoTipLamports,
+        );
+
+        if (cleanSolAmount === null) {
+            this.logger.error(
+                `[SwapDetails] Invalid clean SOL amount. raw=${rawSolDeltaLamports}, feesSol=${totalFeesSol}. Falling back to quote price.`,
+            );
+        }
+
+        return {
+            solChange,
+            tokenChange,
+            cleanSolAmount,
+            totalFeesSol,
+        };
+    }
+
+    private calculateRentDelta(tx: ParsedTransactionWithMeta, walletIndex: number): number {
+        const preBalances = tx.meta?.preBalances || [];
+        const postBalances = tx.meta?.postBalances || [];
+        let rentDelta = 0;
+
+        for (let i = 0; i < Math.min(preBalances.length, postBalances.length); i++) {
+            if (i === walletIndex) continue;
+            const delta = Math.abs((postBalances[i] || 0) - (preBalances[i] || 0));
+            if (delta > 0 && delta <= 20_000_000) rentDelta += delta;
+        }
+
+        return rentDelta;
     }
 
     private async fetchTokenSymbol(tokenMint: string): Promise<string> {
@@ -1000,6 +1289,52 @@ export class TradeService implements OnModuleInit {
     }
 
     async getTokenDecimals(tokenMint: string): Promise<number> {
+        return this.getTokenDecimalsStrict(tokenMint);
+    }
+
+    async getTokenDecimalsStrict(tokenMint: string): Promise<number> {
+        const cached = this.decimalsCache.get(tokenMint);
+        if (cached !== undefined) return cached;
+
+        if (tokenMint.toLowerCase().endsWith('pump')) {
+            this.decimalsCache.set(tokenMint, 6);
+            return 6;
+        }
+
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const { PublicKey } = await import('@solana/web3.js');
+                const { getMint } = await import('@solana/spl-token');
+                const mintPublicKey = new PublicKey(tokenMint);
+                const accountInfo = await this.connection.getAccountInfo(mintPublicKey);
+                if (!accountInfo) throw new Error('Mint account not found');
+                const mintInfo = await getMint(
+                    this.connection,
+                    mintPublicKey,
+                    undefined,
+                    accountInfo.owner,
+                );
+                const decimals = mintInfo.decimals;
+                if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
+                    throw new Error(`Invalid decimals value: ${decimals}`);
+                }
+                this.decimalsCache.set(tokenMint, decimals);
+                return decimals;
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                this.logger.warn(
+                    `Failed to fetch decimals for ${tokenMint} (attempt ${attempt}/3): ${msg}`,
+                );
+                if (attempt < 3) {
+                    await new Promise((res) => setTimeout(res, 200 * attempt));
+                }
+            }
+        }
+
+        throw new TokenDecimalsUnavailableError(tokenMint);
+    }
+
+    private async getTokenDecimalsLegacyUnused(tokenMint: string): Promise<number> {
         // 💊 PUMP.FUN DETECTOR: Koin pump.fun selalu 6 desimal
         if (tokenMint.toLowerCase().endsWith('pump')) {
             return 6;
@@ -1015,10 +1350,8 @@ export class TradeService implements OnModuleInit {
             return mintInfo.decimals;
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
-            this.logger.error(
-                `Failed to fetch decimals for ${tokenMint}: ${msg}. Defaulting to 6 (microcap standard).`,
-            );
-            return 6; // Majority of microcap Solana tokens use 6 decimals
+            this.logger.error(`Failed to fetch decimals for ${tokenMint}: ${msg}.`);
+            throw new TokenDecimalsUnavailableError(tokenMint);
         }
     }
 

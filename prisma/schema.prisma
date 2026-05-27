@@ -25,11 +25,14 @@ model Trade {
   profitUsd               Float?
   entryLiquidity          Float?
   entryMarketCap          Float?
+  solPriceAtEntry         Float?
+  entryValueUsd           Float?
   status                  TradeStatus @default(OPEN)
   amountInSol             Float
   buyTxHash               String?
   sellTxHash              String?
   feesPaid                Float?
+  totalFeesSol            Float?
   creatorAddress          String?
   topHolderAddress        String?
   initialCreatorBalance   Float?
