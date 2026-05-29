@@ -35,11 +35,18 @@ interface RugCheckKnownAccount {
     type: string;
 }
 
+interface CreatorOwnershipResult {
+    creatorPct: number | null;
+    isCTO: boolean;
+    reliable: boolean;
+}
+
 @Injectable()
 export class EstablishedAnalyzerService {
     private readonly logger = new Logger(EstablishedAnalyzerService.name);
     private readonly connection: Connection;
     private readonly ipCache: Record<string, string> = {};
+    private creatorRpcFailureCount = 0;
 
     constructor(
         private readonly configService: ConfigService,
@@ -210,12 +217,24 @@ export class EstablishedAnalyzerService {
 
             // 🧑‍💻 CREATOR BALANCE CHECK (Anti-Dump)
             const creator = response.data.creator;
-            let creatorPct = 0;
+            let ownership: CreatorOwnershipResult = {
+                creatorPct: null,
+                isCTO: false,
+                reliable: true,
+            };
             if (creator) {
                 // Gunakan RPC langsung alih-alih data topHolders RugCheck yang tidak lengkap
-                creatorPct = await this.getCreatorBalancePercent(creator, tokenMint);
+                ownership = await this.getCreatorOwnership(creator, tokenMint);
+                if (!ownership.reliable) {
+                    return {
+                        passed: false,
+                        reason: 'creator_data_unavailable',
+                        isCTO: false,
+                    };
+                }
             }
-            const isCTO = creator ? creatorPct < 0.1 : false;
+            const creatorPct = ownership.creatorPct ?? 0;
+            const isCTO = creator ? ownership.isCTO : false;
 
             const top10SumPct = filteredHolders
                 .slice(0, 10)
@@ -300,38 +319,76 @@ export class EstablishedAnalyzerService {
         }
     }
 
-    private async getCreatorBalancePercent(
+    private async getCreatorOwnership(
         creatorAddress: string,
         tokenMint: string,
-    ): Promise<number> {
+    ): Promise<CreatorOwnershipResult> {
         try {
             const { PublicKey } = await import('@solana/web3.js');
             const creatorKey = new PublicKey(creatorAddress);
             const mintKey = new PublicKey(tokenMint);
 
-            const accounts = await this.connection.getParsedTokenAccountsByOwner(creatorKey, {
-                mint: mintKey,
-            });
-            let creatorBalance = 0;
-            if (accounts.value.length > 0) {
-                creatorBalance =
-                    accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+            const creatorBalance = await this.getCreatorTokenBalanceWithRetry(
+                creatorKey,
+                mintKey,
+            );
+            if (creatorBalance === null) {
+                this.creatorRpcFailureCount++;
+                this.logger.warn(
+                    `[metrics] creator_rpc_failure=${this.creatorRpcFailureCount} token=${tokenMint}`,
+                );
+                return { creatorPct: null, isCTO: false, reliable: false };
             }
 
             const accountInfo = await this.connection.getAccountInfo(mintKey);
-            if (!accountInfo) return 0;
+            if (!accountInfo) {
+                this.creatorRpcFailureCount++;
+                this.logger.warn(
+                    `[metrics] creator_rpc_failure=${this.creatorRpcFailureCount} token=${tokenMint}`,
+                );
+                return { creatorPct: null, isCTO: false, reliable: false };
+            }
             const { getMint } = await import('@solana/spl-token');
             const mintInfo = await getMint(this.connection, mintKey, undefined, accountInfo.owner);
             const totalSupply = Number(mintInfo.supply) / Math.pow(10, mintInfo.decimals);
 
-            if (totalSupply <= 0) return 0;
-            return (creatorBalance / totalSupply) * 100;
+            if (totalSupply <= 0) return { creatorPct: null, isCTO: false, reliable: false };
+            const creatorPct = (creatorBalance / totalSupply) * 100;
+            return { creatorPct, isCTO: creatorPct < 0.1, reliable: true };
         } catch (error) {
             this.logger.error(
-                `Failed to get creator balance percent: ${error instanceof Error ? error.message : String(error)}`,
+                `Failed to get creator ownership: ${error instanceof Error ? error.message : String(error)}`,
             );
-            return 0;
+            this.creatorRpcFailureCount++;
+            this.logger.warn(
+                `[metrics] creator_rpc_failure=${this.creatorRpcFailureCount} token=${tokenMint}`,
+            );
+            return { creatorPct: null, isCTO: false, reliable: false };
         }
+    }
+
+    private async getCreatorTokenBalanceWithRetry(
+        creatorKey: PublicKey,
+        mintKey: PublicKey,
+    ): Promise<number | null> {
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const accounts = await this.connection.getParsedTokenAccountsByOwner(creatorKey, {
+                    mint: mintKey,
+                });
+                if (accounts.value.length === 0) return 0;
+                return accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                this.logger.warn(
+                    `Creator balance RPC failed (attempt ${attempt}/3): ${msg}`,
+                );
+                if (attempt < 3) {
+                    await new Promise((res) => setTimeout(res, 300 * attempt));
+                }
+            }
+        }
+        return null;
     }
 
     /**
