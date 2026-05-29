@@ -1,5 +1,6 @@
 import {
     calculateCleanSwapSolAmount,
+    evaluateBuyRisk,
     PriceAnomalyError,
     validateSellPrice,
 } from './trade.service';
@@ -44,6 +45,84 @@ describe('TradeService calculation helpers', () => {
         it('returns null when fees exceed the raw SOL delta', () => {
             const result = calculateCleanSwapSolAmount(100, 50, 50, 1);
             expect(result.cleanSolAmount).toBeNull();
+        });
+    });
+
+    describe('evaluateBuyRisk', () => {
+        it('allows when all guards disabled', () => {
+            const res = evaluateBuyRisk(
+                { dailyRealizedPnlUsd: -999, consecutiveLosses: 10, totalRealizedPnlUsd: -9999 },
+                {
+                    disabledUntilMs: null,
+                    dailyMaxLossUsd: 0,
+                    maxConsecutiveLosses: 0,
+                    maxDrawdownPct: 0,
+                },
+                100,
+                1000,
+            );
+            expect(res.allowed).toBe(true);
+        });
+
+        it('blocks when disabledUntil is in the future', () => {
+            const res = evaluateBuyRisk(
+                { dailyRealizedPnlUsd: 0, consecutiveLosses: 0, totalRealizedPnlUsd: 0 },
+                {
+                    disabledUntilMs: 2000,
+                    dailyMaxLossUsd: 0,
+                    maxConsecutiveLosses: 0,
+                    maxDrawdownPct: 0,
+                },
+                100,
+                1000,
+            );
+            expect(res.allowed).toBe(false);
+            expect(res.reason).toBe('disabled_until');
+        });
+
+        it('blocks on daily max loss', () => {
+            const res = evaluateBuyRisk(
+                { dailyRealizedPnlUsd: -50, consecutiveLosses: 0, totalRealizedPnlUsd: 0 },
+                {
+                    disabledUntilMs: null,
+                    dailyMaxLossUsd: 20,
+                    maxConsecutiveLosses: 0,
+                    maxDrawdownPct: 0,
+                },
+                100,
+            );
+            expect(res.allowed).toBe(false);
+            expect(res.reason).toBe('daily_max_loss');
+        });
+
+        it('blocks on consecutive losses', () => {
+            const res = evaluateBuyRisk(
+                { dailyRealizedPnlUsd: 0, consecutiveLosses: 3, totalRealizedPnlUsd: 0 },
+                {
+                    disabledUntilMs: null,
+                    dailyMaxLossUsd: 0,
+                    maxConsecutiveLosses: 3,
+                    maxDrawdownPct: 0,
+                },
+                100,
+            );
+            expect(res.allowed).toBe(false);
+            expect(res.reason).toBe('max_consecutive_losses');
+        });
+
+        it('blocks on max drawdown pct', () => {
+            const res = evaluateBuyRisk(
+                { dailyRealizedPnlUsd: 0, consecutiveLosses: 0, totalRealizedPnlUsd: -11 },
+                {
+                    disabledUntilMs: null,
+                    dailyMaxLossUsd: 0,
+                    maxConsecutiveLosses: 0,
+                    maxDrawdownPct: 10,
+                },
+                100,
+            );
+            expect(res.allowed).toBe(false);
+            expect(res.reason).toBe('max_drawdown');
         });
     });
 });

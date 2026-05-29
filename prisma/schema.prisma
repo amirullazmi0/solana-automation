@@ -12,6 +12,11 @@ enum TradeStatus {
   CLOSED
 }
 
+enum TradeMode {
+  LIVE
+  PAPER
+}
+
 model Trade {
   id                      Int         @id @default(autoincrement())
   tokenMint               String
@@ -28,6 +33,7 @@ model Trade {
   solPriceAtEntry         Float?
   entryValueUsd           Float?
   status                  TradeStatus @default(OPEN)
+  mode                    TradeMode   @default(LIVE)
   amountInSol             Float
   buyTxHash               String?
   sellTxHash              String?
@@ -46,6 +52,7 @@ model Trade {
   targetTrailingDistance  Float?
 
   @@index([status])
+  @@index([mode, status])
   @@index([tokenMint, createdAt])
 }
 

@@ -93,6 +93,43 @@ export function calculateCleanSwapSolAmount(
     };
 }
 
+export type BuyRiskMetrics = {
+    dailyRealizedPnlUsd: number;
+    consecutiveLosses: number;
+    totalRealizedPnlUsd: number;
+};
+
+export type BuyRiskConfig = {
+    disabledUntilMs: number | null;
+    dailyMaxLossUsd: number; // blocks when daily PnL <= -dailyMaxLossUsd
+    maxConsecutiveLosses: number; // blocks when consecutiveLosses >= limit
+    maxDrawdownPct: number; // blocks when total PnL <= -(totalCapital * pct/100)
+};
+
+export function evaluateBuyRisk(
+    metrics: BuyRiskMetrics,
+    config: BuyRiskConfig,
+    totalCapitalUsd: number,
+    nowMs: number = Date.now(),
+): { allowed: boolean; reason?: string } {
+    if (config.disabledUntilMs !== null && nowMs < config.disabledUntilMs) {
+        return { allowed: false, reason: 'disabled_until' };
+    }
+    if (config.dailyMaxLossUsd > 0 && metrics.dailyRealizedPnlUsd <= -config.dailyMaxLossUsd) {
+        return { allowed: false, reason: 'daily_max_loss' };
+    }
+    if (config.maxConsecutiveLosses > 0 && metrics.consecutiveLosses >= config.maxConsecutiveLosses) {
+        return { allowed: false, reason: 'max_consecutive_losses' };
+    }
+    if (config.maxDrawdownPct > 0) {
+        const maxLoss = (Math.max(totalCapitalUsd, 0) * config.maxDrawdownPct) / 100;
+        if (maxLoss > 0 && metrics.totalRealizedPnlUsd <= -maxLoss) {
+            return { allowed: false, reason: 'max_drawdown' };
+        }
+    }
+    return { allowed: true };
+}
+
 @Injectable()
 export class TradeService implements OnModuleInit {
     private readonly logger = new Logger(TradeService.name);
@@ -256,7 +293,7 @@ export class TradeService implements OnModuleInit {
 
     private async startMonitoringAllTrades() {
         const openTrades = await this.prismaService.trade.count({
-            where: { status: 'OPEN' },
+            where: { status: 'OPEN', mode: 'LIVE' },
         });
 
         this.logger.log(
@@ -266,7 +303,7 @@ export class TradeService implements OnModuleInit {
 
     private async preloadOpenTradeDecimals() {
         const openTrades = await this.prismaService.trade.findMany({
-            where: { status: 'OPEN' },
+            where: { status: 'OPEN', mode: 'LIVE' },
             select: { tokenMint: true },
         });
 
@@ -309,6 +346,49 @@ export class TradeService implements OnModuleInit {
             LIMIT 1
         `;
         return rows[0] || {};
+    }
+
+    private getStartOfDayUtc(): Date {
+        const d = new Date();
+        d.setUTCHours(0, 0, 0, 0);
+        return d;
+    }
+
+    private async getBuyRiskMetrics(maxConsecutiveLosses: number): Promise<BuyRiskMetrics> {
+        const dayStart = this.getStartOfDayUtc();
+
+        const [dailyAgg, totalAgg, recentClosed] = await Promise.all([
+            this.prismaService.trade.aggregate({
+                where: { status: 'CLOSED', mode: 'LIVE', updatedAt: { gte: dayStart } },
+                _sum: { profitUsd: true },
+            }),
+            this.prismaService.trade.aggregate({
+                where: { status: 'CLOSED', mode: 'LIVE' },
+                _sum: { profitUsd: true },
+            }),
+            maxConsecutiveLosses > 0
+                ? this.prismaService.trade.findMany({
+                      where: { status: 'CLOSED', mode: 'LIVE' },
+                      orderBy: { updatedAt: 'desc' },
+                      take: Math.min(maxConsecutiveLosses, 50),
+                      select: { profitUsd: true },
+                  })
+                : Promise.resolve([] as Array<{ profitUsd: number | null }>),
+        ]);
+
+        const dailyRealizedPnlUsd = dailyAgg._sum.profitUsd ?? 0;
+        const totalRealizedPnlUsd = totalAgg._sum.profitUsd ?? 0;
+
+        let consecutiveLosses = 0;
+        if (maxConsecutiveLosses > 0) {
+            for (const t of recentClosed) {
+                const p = t.profitUsd ?? 0;
+                if (p < 0) consecutiveLosses++;
+                else break;
+            }
+        }
+
+        return { dailyRealizedPnlUsd, consecutiveLosses, totalRealizedPnlUsd };
     }
 
     private setupWalletAndConnection() {
@@ -382,9 +462,58 @@ export class TradeService implements OnModuleInit {
             targetTrailingDistance?: number;
         },
     ): Promise<{ success: boolean; message: string }> {
+        // DRY_RUN should not mutate trading state in DB. Use it as signal-only mode.
+        if (this.isDryRun) {
+            const buyAmountUSD = customAmountUSD || this.positionSizeUSD;
+            const solPrice = await this.getSolPrice();
+            const amountInSol = buyAmountUSD / solPrice;
+            const amountInLamports = Math.floor(amountInSol * 1_000_000_000);
+            const priorityFeeLamports = options?.priorityFeeSol
+                ? Math.floor(options.priorityFeeSol * 1_000_000_000)
+                : undefined;
+
+            const { success, entryPrice, error, actualSol, actualTokens } =
+                await this.executeJupiterSwap(
+                    WRAPPED_SOL_MINT,
+                    tokenMint,
+                    amountInLamports,
+                    'BUY',
+                    buyAmountUSD,
+                    0,
+                    options?.customSlippageBps,
+                    priorityFeeLamports,
+                );
+
+            if (success && entryPrice > 0) {
+                const symbol = await this.fetchTokenSymbol(tokenMint);
+                const strategyName = options?.targetTakeProfit
+                    ? 'ðŸ”¥ Established Rebound & CTO (TP 18%, TSL 2.5%, Hard SL 20%)'
+                    : 'Standard Second-Wave';
+                await this.reportingService.sendBuyAlert(
+                    tokenMint,
+                    entryPrice,
+                    0,
+                    symbol,
+                    metadata?.socials,
+                    strategyName,
+                    {
+                        solSpent: actualSol || amountInSol,
+                        tokensReceived: actualTokens,
+                        solPrice,
+                    },
+                );
+                return { success: true, message: `[DRY_RUN] Signal emitted for ${symbol}` };
+            }
+
+            return {
+                success: false,
+                message: `[DRY_RUN] Quote failed: ${error || 'Unknown error'}`,
+            };
+        }
+
         // 1. Cek apakah sudah punya koin ini (OPEN) atau sedang dalam cooldown
         const recentTrade = await this.prismaService.trade.findFirst({
-            where: { tokenMint },
+            where: { tokenMint, mode: 'LIVE' },
             orderBy: { createdAt: 'desc' },
         });
 
@@ -412,13 +541,15 @@ export class TradeService implements OnModuleInit {
             }
         }
 
-        const openTradesCount = await this.prismaService.trade.count({ where: { status: 'OPEN' } });
+        const openTradesCount = await this.prismaService.trade.count({
+            where: { status: 'OPEN', mode: 'LIVE' },
+        });
         if (openTradesCount >= this.totalSlots && !customAmountUSD) {
             return { success: false, message: 'All trading slots are full.' };
         }
 
         const openTrades = await this.prismaService.trade.findMany({
-            where: { status: 'OPEN' },
+            where: { status: 'OPEN', mode: 'LIVE' },
             select: { slotNumber: true },
         });
 
@@ -440,6 +571,53 @@ export class TradeService implements OnModuleInit {
                 success: false,
                 message: `Capital guard blocked buy. Committed after buy would be $${committedCapitalUsd.toFixed(2)}, spendable cap is $${spendableCapitalUsd.toFixed(2)}.`,
             };
+        }
+
+        // 🛡️ RISK CIRCUIT BREAKERS: block new buys on drawdown / daily loss / loss streak
+        const riskApplyToManual =
+            this.configService.get<string>('RISK_APPLY_TO_MANUAL', 'false') === 'true';
+        const isManual = !!customAmountUSD;
+        if (!isManual || riskApplyToManual) {
+            const disabledUntilRaw = this.configService.get<string>('DISABLE_BUY_UNTIL') || '';
+            const disabledUntilMs =
+                disabledUntilRaw && !Number.isNaN(Date.parse(disabledUntilRaw))
+                    ? Date.parse(disabledUntilRaw)
+                    : null;
+
+            const dailyMaxLossUsd = Number.parseFloat(
+                this.configService.get<string>('DAILY_MAX_LOSS_USD', '0'),
+            );
+            const maxConsecutiveLosses = Number.parseInt(
+                this.configService.get<string>('MAX_CONSECUTIVE_LOSSES', '0'),
+                10,
+            );
+            const maxDrawdownPct = Number.parseFloat(
+                this.configService.get<string>('MAX_DRAWDOWN_PCT', '0'),
+            );
+
+            const metrics = await this.getBuyRiskMetrics(maxConsecutiveLosses);
+            const decision = evaluateBuyRisk(
+                metrics,
+                {
+                    disabledUntilMs,
+                    dailyMaxLossUsd: Number.isFinite(dailyMaxLossUsd) ? dailyMaxLossUsd : 0,
+                    maxConsecutiveLosses: Number.isFinite(maxConsecutiveLosses)
+                        ? maxConsecutiveLosses
+                        : 0,
+                    maxDrawdownPct: Number.isFinite(maxDrawdownPct) ? maxDrawdownPct : 0,
+                },
+                this.totalCapital,
+            );
+
+            if (!decision.allowed) {
+                const msg =
+                    `Risk breaker blocked buy (${decision.reason}). ` +
+                    `dailyPnL=$${metrics.dailyRealizedPnlUsd.toFixed(2)}, ` +
+                    `consecutiveLosses=${metrics.consecutiveLosses}, ` +
+                    `totalPnL=$${metrics.totalRealizedPnlUsd.toFixed(2)}.`;
+                this.logger.warn(`[Risk] ${msg}`);
+                return { success: false, message: msg };
+            }
         }
 
         // Ambil harga SOL terbaru
@@ -504,6 +682,7 @@ export class TradeService implements OnModuleInit {
                     highestPrice: entryPrice,
                     trailingStopPrice: 0, // 🛡️ Initialized to 0, PriceMonitor will activate it once in profit
                     status: 'OPEN',
+                    mode: 'LIVE',
                     amountInSol: finalAmountInSol,
                     buyTxHash: txHash || null,
                     entryLiquidity: metadata?.liquidity || 0,
@@ -1425,7 +1604,7 @@ export class TradeService implements OnModuleInit {
         percentage: number,
     ): Promise<{ success: boolean; message: string }> {
         const trade = await this.prismaService.trade.findFirst({
-            where: { tokenMint, status: 'OPEN' },
+            where: { tokenMint, status: 'OPEN', mode: 'LIVE' },
         });
 
         const currentPrice = await this.reportingService.fetchCurrentPrice(tokenMint);

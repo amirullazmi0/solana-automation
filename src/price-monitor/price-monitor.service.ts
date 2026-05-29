@@ -40,7 +40,7 @@ export class PriceMonitorService {
     @Interval(2000)
     async monitorPrices() {
         const openTrades = await this.prismaService.trade.findMany({
-            where: { status: 'OPEN' },
+            where: { status: 'OPEN', mode: 'LIVE' },
         });
 
         if (openTrades.length === 0) return;

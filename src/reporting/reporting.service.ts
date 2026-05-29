@@ -314,7 +314,7 @@ export class ReportingService implements OnModuleInit {
 
     async handleStatusRequest() {
         const openTrades = await this.prismaService.trade.findMany({
-            where: { status: 'OPEN' },
+            where: { status: 'OPEN', mode: 'LIVE' },
         });
 
         if (openTrades.length === 0) {
@@ -355,7 +355,7 @@ export class ReportingService implements OnModuleInit {
 
         // 🕒 RECENT HISTORY: Tampilkan 5 transaksi terakhir yang laku
         const recentTrades = await this.prismaService.trade.findMany({
-            where: { status: 'CLOSED' },
+            where: { status: 'CLOSED', mode: 'LIVE' },
             orderBy: { updatedAt: 'desc' },
             take: 5,
         });
@@ -714,6 +714,7 @@ export class ReportingService implements OnModuleInit {
             const trades = await this.prismaService.trade.findMany({
                 where: {
                     status: 'CLOSED',
+                    mode: 'LIVE',
                     updatedAt: { gte: dayAgo },
                 },
             });

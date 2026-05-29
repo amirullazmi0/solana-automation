@@ -11,7 +11,8 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             console.error('[ERROR] Database connection failed:', msg);
-            // Don't throw, let the app start so we can see logs
+            const failFast = (process.env.DB_FAIL_FAST || 'true') === 'true';
+            if (failFast) throw error;
         }
     }
 }

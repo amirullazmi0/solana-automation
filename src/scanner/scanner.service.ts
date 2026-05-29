@@ -343,7 +343,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 ].includes(existing.reason || '');
                 if (existing.status === 'TRADED' || isTempFail) {
                     const recentTrade = await this.prismaService.trade.findFirst({
-                        where: { tokenMint },
+                        where: { tokenMint, mode: 'LIVE' },
                         orderBy: { createdAt: 'desc' },
                     });
 
@@ -412,7 +412,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
             // 🛡️ ANTI-REPEAT BUY: Cek apakah token ini sedang dalam cooldown
             const recentTrade = await this.prismaService.trade.findFirst({
-                where: { tokenMint },
+                where: { tokenMint, mode: 'LIVE' },
                 orderBy: { createdAt: 'desc' },
             });
             if (recentTrade) {
