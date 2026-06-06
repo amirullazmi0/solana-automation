@@ -11,6 +11,7 @@ import { ReportingService } from '../reporting/reporting.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ModuleRef } from '@nestjs/core';
 import { DexLimiter } from '../common/dex-limiter';
+import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class ScannerService implements OnModuleInit, OnModuleDestroy {
@@ -317,6 +318,23 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         };
     }
 
+    private async updateWatchlistByMint(
+        tokenMint: string,
+        data: Prisma.WatchlistUpdateManyMutationInput,
+    ): Promise<boolean> {
+        const result = await this.prismaService.watchlist.updateMany({
+            where: { tokenMint },
+            data,
+        });
+
+        if (result.count === 0) {
+            this.logger.warn(`[${tokenMint}] Watchlist row no longer exists. Stopping monitor.`);
+            return false;
+        }
+
+        return true;
+    }
+
     private async processNewToken(tokenMint: string) {
         if (this.processingTokens.has(tokenMint)) return;
 
@@ -382,9 +400,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         this.logger.log(
                             `[${tokenMint}] 🔄 Cooldown expired. Resetting watchlist status to PENDING.`,
                         );
-                        await this.prismaService.watchlist.update({
-                            where: { tokenMint },
-                            data: { status: 'PENDING', reason: null, checkCount: 0 },
+                        await this.updateWatchlistByMint(tokenMint, {
+                            status: 'PENDING',
+                            reason: null,
+                            checkCount: 0,
                         });
                         this.seenTokens.delete(tokenMint);
                     } else {
@@ -402,9 +421,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 this.logger.log(
                     `[${tokenMint}] ⏳ Stagnant timeout reached (${existing.checkCount} checks). Marking as FAILED.`,
                 );
-                await this.prismaService.watchlist.update({
-                    where: { tokenMint },
-                    data: { status: 'FAILED', reason: 'stagnant_timeout' },
+                await this.updateWatchlistByMint(tokenMint, {
+                    status: 'FAILED',
+                    reason: 'stagnant_timeout',
                 });
                 this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); // Cooldown 6 jam
                 return;
@@ -488,13 +507,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             while (Date.now() - startTime < maxWaitTime) {
                 try {
                     // Update checkCount & lastCheckedAt in DB at the start of each iteration
-                    await this.prismaService.watchlist.update({
-                        where: { tokenMint },
-                        data: {
-                            lastCheckedAt: new Date(),
-                            checkCount: { increment: 1 },
-                        },
+                    const watchlistExists = await this.updateWatchlistByMint(tokenMint, {
+                        lastCheckedAt: new Date(),
+                        checkCount: { increment: 1 },
                     });
+                    if (!watchlistExists) return;
 
                     // 🛡️ RE-FETCH LATEST DATA
                     const currentItem = await this.prismaService.watchlist.findUnique({
@@ -512,9 +529,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         this.logger.log(
                             `[${tokenMint}] ⏳ Stagnant timeout reached in active loop (${currentItem.checkCount} checks). Marking as FAILED.`,
                         );
-                        await this.prismaService.watchlist.update({
-                            where: { tokenMint },
-                            data: { status: 'FAILED', reason: 'stagnant_timeout' },
+                        await this.updateWatchlistByMint(tokenMint, {
+                            status: 'FAILED',
+                            reason: 'stagnant_timeout',
                         });
                         this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); // Cooldown 6 jam
                         return;
@@ -524,10 +541,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     const reboundResult =
                         await this.establishedAnalyzerService.analyzeAndExecuteRebound(tokenMint);
                     if (reboundResult.isEstablished && reboundResult.executed) {
-                        await this.prismaService.watchlist.update({
-                            where: { tokenMint },
-                            data: { status: 'TRADED' },
-                        });
+                        await this.updateWatchlistByMint(tokenMint, { status: 'TRADED' });
                         return; // Selesai jika sudah ditransaksikan via rebound
                     }
 
@@ -535,9 +549,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     // retry di loop. Jika gagal karena market metrics, FALL-THROUGH ke standard analyzer.
                     if (reboundResult.isEstablished && !reboundResult.executed) {
                         if (reboundResult.reason === 'signal_only') {
-                            await this.prismaService.watchlist.update({
-                                where: { tokenMint },
-                                data: { status: 'FAILED', reason: 'signal_only' },
+                            await this.updateWatchlistByMint(tokenMint, {
+                                status: 'FAILED',
+                                reason: 'signal_only',
                             });
                             this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
                             return;
@@ -562,9 +576,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         if (isSafetyFail) {
                             // Security/safety issue → update reason & retry di loop
                             if (reboundResult.reason) {
-                                await this.prismaService.watchlist.update({
-                                    where: { tokenMint },
-                                    data: { reason: reboundResult.reason },
+                                await this.updateWatchlistByMint(tokenMint, {
+                                    reason: reboundResult.reason,
                                 });
                             }
                             this.logger.debug(
@@ -596,22 +609,19 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
                     // Update metadata di Watchlist
                     if (result.metadata) {
-                        await this.prismaService.watchlist.update({
-                            where: { tokenMint },
-                            data: {
-                                symbol: result.metadata.symbol,
-                                mcap: result.metadata.mcap,
-                                liquidity: result.metadata.liquidity,
-                                volumeSurge: result.metadata.volumeSurge,
-                                volScore: result.metadata.volScore,
-                                zScore: result.metadata.zScore,
-                                priceChange1h: result.metadata.priceChange1h,
-                                isPumpFun: result.metadata.isPumpFun || false,
-                                pairCreatedAt: result.metadata.pairCreatedAt
-                                    ? new Date(result.metadata.pairCreatedAt)
-                                    : null,
-                                lastCheckedAt: new Date(),
-                            },
+                        await this.updateWatchlistByMint(tokenMint, {
+                            symbol: result.metadata.symbol,
+                            mcap: result.metadata.mcap,
+                            liquidity: result.metadata.liquidity,
+                            volumeSurge: result.metadata.volumeSurge,
+                            volScore: result.metadata.volScore,
+                            zScore: result.metadata.zScore,
+                            priceChange1h: result.metadata.priceChange1h,
+                            isPumpFun: result.metadata.isPumpFun || false,
+                            pairCreatedAt: result.metadata.pairCreatedAt
+                                ? new Date(result.metadata.pairCreatedAt)
+                                : null,
+                            lastCheckedAt: new Date(),
                         });
                     }
 
@@ -659,9 +669,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                 tokenMint,
                                 result.metadata,
                             );
-                            await this.prismaService.watchlist.update({
-                                where: { tokenMint },
-                                data: { status: 'FAILED', reason: 'signal_only' },
+                            await this.updateWatchlistByMint(tokenMint, {
+                                status: 'FAILED',
+                                reason: 'signal_only',
                             });
                             this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
                             return;
@@ -676,10 +686,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         );
 
                         if (buyResult.success) {
-                            await this.prismaService.watchlist.update({
-                                where: { tokenMint },
-                                data: { status: 'TRADED' },
-                            });
+                            await this.updateWatchlistByMint(tokenMint, { status: 'TRADED' });
                         }
                         return;
                     }
@@ -688,9 +695,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         this.logger.debug(
                             `[${tokenMint}] ⛔ Permanent filter fail (${result.reason}). Giving up.`,
                         );
-                        await this.prismaService.watchlist.update({
-                            where: { tokenMint },
-                            data: { status: 'FAILED', reason: result.reason },
+                        await this.updateWatchlistByMint(tokenMint, {
+                            status: 'FAILED',
+                            reason: result.reason,
                         });
                         // Cooldown 6 jam biar nggak masuk discovery lagi
                         this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
@@ -734,10 +741,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     }
 
                     if (result.reason) {
-                        await this.prismaService.watchlist.update({
-                            where: { tokenMint },
-                            data: { reason: result.reason },
-                        });
+                        await this.updateWatchlistByMint(tokenMint, { reason: result.reason });
                     }
 
                     await new Promise((res) =>
@@ -758,9 +762,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             }
 
             this.logger.log(`[${tokenMint}] 💤 Token remained quiet after ${maxWaitMin} minutes.`);
-            await this.prismaService.watchlist.update({
-                where: { tokenMint },
-                data: { status: 'FAILED', reason: 'stagnant_timeout' },
+            await this.updateWatchlistByMint(tokenMint, {
+                status: 'FAILED',
+                reason: 'stagnant_timeout',
             });
             this.seenTokens.delete(tokenMint);
         } finally {

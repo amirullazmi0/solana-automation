@@ -3,8 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import * as TelegramBot from 'node-telegram-bot-api';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
-import { Connection, PublicKey, Keypair } from '@solana/web3.js';
-import bs58 from 'bs58';
+import { Connection } from '@solana/web3.js';
 import axios from 'axios';
 import * as https from 'https';
 import { TokenMetadata } from '../analyzer/analyzer.service';
@@ -19,7 +18,6 @@ export class ReportingService implements OnModuleInit {
     private readonly bot: TelegramBot;
     private readonly chatId: string;
     private readonly connection: Connection;
-    private readonly walletPublicKey: string;
     private readonly isDryRun: boolean;
     private readonly httpsAgent: https.Agent;
 
@@ -41,17 +39,6 @@ export class ReportingService implements OnModuleInit {
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
         if (rpcEndpoint) {
             this.connection = new Connection(rpcEndpoint, 'confirmed');
-        }
-
-        const privateKey = this.configService.get<string>('PRIVATE_KEY');
-        if (privateKey && privateKey !== 'YOUR_BASE58_PRIVATE_KEY_HERE') {
-            try {
-                const secretKey = bs58.decode(privateKey);
-                const keypair = Keypair.fromSecretKey(secretKey);
-                this.walletPublicKey = keypair.publicKey.toBase58();
-            } catch {
-                // Silently fail
-            }
         }
 
         if (token && token !== 'your_telegram_bot_token') {
@@ -99,24 +86,17 @@ export class ReportingService implements OnModuleInit {
             const text = msg.text;
             const incomingChatId = msg.chat.id.toString();
 
-            // Security check: Only respond to the owner
-            if (incomingChatId !== this.chatId) {
-                this.logger.warn(`Unauthorized access attempt from Chat ID: ${incomingChatId}`);
-                return;
-            }
 
             if (!text) return;
 
             if (text === '/start' || text === '/help') {
-                await this.sendMainMenu();
-            } else if (text === '/status' || text === '📊 Status') {
-                await this.handleStatusRequest();
-            } else if (text === '/balance' || text === '💰 Balance') {
-                await this.handleBalanceRequest();
-            } else if (text === '🔍 Watchlist') {
-                await this.handleWatchlistRequest();
+                await this.sendMainMenu(incomingChatId);
+            } else if (text === '/status' || text === 'Status') {
+                await this.handleStatusRequest(incomingChatId);
+            } else if (text === 'Watchlist') {
+                await this.handleWatchlistRequest(incomingChatId);
             } else if (this.isSolanaAddress(text)) {
-                await this.handleTokenInput(text);
+                await this.handleTokenInput(text, incomingChatId);
             }
         });
 
@@ -129,25 +109,22 @@ export class ReportingService implements OnModuleInit {
         return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
     }
 
-    private async sendMainMenu() {
+    private async sendMainMenu(targetChatId?: string) {
         const message =
-            `🤖 *Solana Trend Follower Bot Active*\n\n` +
-            `Selamat datang Amirull! Pilih menu di bawah untuk mengelola bot kamu.`;
+            `*Solana Trend Follower Bot Active*\n\n` +
+            `Pilih menu di bawah untuk mengelola bot.`;
 
         const options: TelegramBot.SendMessageOptions = {
             reply_markup: {
-                keyboard: [
-                    [{ text: '📊 Status' }, { text: '💰 Balance' }],
-                    [{ text: '🔍 Watchlist' }],
-                ],
+                keyboard: [[{ text: 'Status' }], [{ text: 'Watchlist' }]],
                 resize_keyboard: true,
             },
         };
 
-        await this.sendMessage(message, options);
+        await this.sendMessage(message, options, 0, targetChatId);
     }
 
-    private async handleWatchlistRequest() {
+    private async handleWatchlistRequest(targetChatId?: string) {
         const pendingWatchlist = await this.prismaService.watchlist.findMany({
             where: { status: 'PENDING' },
             orderBy: { createdAt: 'desc' },
@@ -156,82 +133,100 @@ export class ReportingService implements OnModuleInit {
 
         if (pendingWatchlist.length === 0) {
             await this.sendMessage(
-                '🔍 *Watchlist Kosong.* Saat ini tidak ada token yang dipantau.',
+                '*Watchlist Kosong.* Saat ini tidak ada token yang dipantau.',
+                {},
+                0,
+                targetChatId,
             );
             return;
         }
 
-        await this.sendMessage(`🔍 *Menampilkan ${pendingWatchlist.length} token di Watchlist...*`);
+        await this.sendMessage(
+            `*Menampilkan ${pendingWatchlist.length} token di Watchlist...*`,
+            {},
+            0,
+            targetChatId,
+        );
 
         for (const item of pendingWatchlist) {
             const symbol = item.symbol || 'UNKNOWN';
-            let msg = `💎 *${symbol}*\n`;
-            msg += `🆔 \`${item.tokenMint}\`\n`;
-            msg += `💹 MCap: \`$${item.mcap?.toLocaleString()}\` | Surge: \`${item.volumeSurge?.toFixed(1)}x\`\n`;
+            let msg = `*${symbol}*\n`;
+            msg += `Mint: \`${item.tokenMint}\`\n`;
+            msg += `MCap: \`$${item.mcap?.toLocaleString() || 'N/A'}\` | Surge: \`${item.volumeSurge?.toFixed(1) || 'N/A'}x\`\n`;
 
             const buttons: TelegramBot.InlineKeyboardButton[][] = [
                 [
-                    { text: '💊 Pump.fun', url: `https://pump.fun/coin/${item.tokenMint}` },
+                    { text: 'Pump.fun', url: `https://pump.fun/coin/${item.tokenMint}` },
                     {
-                        text: '📊 DexScreener',
+                        text: 'DexScreener',
                         url: `https://dexscreener.com/solana/${item.tokenMint}`,
                     },
                 ],
             ];
 
-            await this.sendMessage(msg, {
-                reply_markup: { inline_keyboard: buttons },
-            });
+            await this.sendMessage(
+                msg,
+                {
+                    reply_markup: { inline_keyboard: buttons },
+                },
+                0,
+                targetChatId,
+            );
         }
     }
 
-    private async handleTokenInput(mint: string) {
+    private async handleTokenInput(mint: string, targetChatId?: string) {
         const symbol = await this.fetchTokenSymbolFromDex(mint);
         const message =
-            `🎯 *Token Detected: ${symbol}*\n` +
-            `🆔 \`${mint}\`\n\n` +
+            `*Token Detected: ${symbol}*\n` +
+            `Mint: \`${mint}\`\n\n` +
             `Apa yang ingin kamu lakukan dengan token ini?`;
 
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
             [
-                { text: '💵 Buy', callback_data: `buy_menu:${mint}` },
-                { text: '💸 Sell', callback_data: `sell_menu:${mint}` },
+                { text: 'Buy', callback_data: `buy_menu:${mint}` },
+                { text: 'Sell', callback_data: `sell_menu:${mint}` },
             ],
             [
-                { text: '🛡️ RugCheck', url: `https://rugcheck.xyz/tokens/${mint}` },
-                { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${mint}` },
+                { text: 'RugCheck', url: `https://rugcheck.xyz/tokens/${mint}` },
+                { text: 'DexScreener', url: `https://dexscreener.com/solana/${mint}` },
             ],
         ];
 
-        await this.sendMessage(message, {
-            reply_markup: { inline_keyboard: buttons },
-        });
+        await this.sendMessage(
+            message,
+            {
+                reply_markup: { inline_keyboard: buttons },
+            },
+            0,
+            targetChatId,
+        );
     }
 
     private async handleCallbackQuery(query: TelegramBot.CallbackQuery) {
         const data = query.data;
         if (!data) return;
 
+        const targetChatId = query.message?.chat.id.toString();
         const [action, payload] = data.split(':');
 
         if (action === 'buy_menu') {
-            await this.sendBuyMenu(payload);
+            await this.sendBuyMenu(payload, targetChatId);
         } else if (action === 'sell_menu') {
-            await this.sendSellMenu(payload);
+            await this.sendSellMenu(payload, targetChatId);
         } else if (action === 'buy_exec') {
             const [mint, amount] = payload.split('|');
-            await this.executeManualBuy(mint, Number.parseFloat(amount));
+            await this.executeManualBuy(mint, Number.parseFloat(amount), targetChatId);
         } else if (action === 'sell_exec') {
             const [mint, percent] = payload.split('|');
-            await this.executeManualSell(mint, Number.parseFloat(percent));
+            await this.executeManualSell(mint, Number.parseFloat(percent), targetChatId);
         }
 
-        // Answer callback to remove loading state
         await this.bot.answerCallbackQuery(query.id);
     }
 
-    private async sendBuyMenu(mint: string) {
-        const message = `💵 *Pilih Jumlah Buy ($USD):*\nToken: \`${mint}\``;
+    private async sendBuyMenu(mint: string, targetChatId?: string) {
+        const message = `*Pilih Jumlah Buy ($USD):*\nToken: \`${mint}\``;
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
             [
                 { text: '$5', callback_data: `buy_exec:${mint}|5` },
@@ -243,13 +238,18 @@ export class ReportingService implements OnModuleInit {
             ],
         ];
 
-        await this.sendMessage(message, {
-            reply_markup: { inline_keyboard: buttons },
-        });
+        await this.sendMessage(
+            message,
+            {
+                reply_markup: { inline_keyboard: buttons },
+            },
+            0,
+            targetChatId,
+        );
     }
 
-    private async sendSellMenu(mint: string) {
-        const message = `💸 *Pilih Persentase Sell:*\nToken: \`${mint}\``;
+    private async sendSellMenu(mint: string, targetChatId?: string) {
+        const message = `*Pilih Persentase Sell:*\nToken: \`${mint}\``;
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
             [
                 { text: '25%', callback_data: `sell_exec:${mint}|0.25` },
@@ -261,40 +261,50 @@ export class ReportingService implements OnModuleInit {
             ],
         ];
 
-        await this.sendMessage(message, {
-            reply_markup: { inline_keyboard: buttons },
-        });
+        await this.sendMessage(
+            message,
+            {
+                reply_markup: { inline_keyboard: buttons },
+            },
+            0,
+            targetChatId,
+        );
     }
 
-    private async executeManualBuy(mint: string, amount: number) {
-        await this.sendMessage(`⏳ *Memproses Buy $${amount}...*`);
+    private async executeManualBuy(mint: string, amount: number, targetChatId?: string) {
+        await this.sendMessage(`*Memproses Buy $${amount}...*`, {}, 0, targetChatId);
         try {
             const tradeService = this.moduleRef.get(TradeService, { strict: false });
             const result = await tradeService.handleManualBuy(mint, amount);
             if (result.success) {
-                await this.sendMessage(`✅ *Success:* ${result.message}`);
+                await this.sendMessage(`*Success:* ${result.message}`, {}, 0, targetChatId);
             } else {
-                await this.sendMessage(`❌ *Failed:* ${result.message}`);
+                await this.sendMessage(`*Failed:* ${result.message}`, {}, 0, targetChatId);
             }
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
-            await this.sendMessage(`❌ *Error:* ${msg}`);
+            await this.sendMessage(`*Error:* ${msg}`, {}, 0, targetChatId);
         }
     }
 
-    private async executeManualSell(mint: string, percent: number) {
-        await this.sendMessage(`⏳ *Memproses Sell ${(percent * 100).toFixed(0)}%...*`);
+    private async executeManualSell(mint: string, percent: number, targetChatId?: string) {
+        await this.sendMessage(
+            `*Memproses Sell ${(percent * 100).toFixed(0)}%...*`,
+            {},
+            0,
+            targetChatId,
+        );
         try {
             const tradeService = this.moduleRef.get(TradeService, { strict: false });
             const result = await tradeService.handleManualSell(mint, percent);
             if (result.success) {
-                await this.sendMessage(`✅ *Success:* ${result.message}`);
+                await this.sendMessage(`*Success:* ${result.message}`, {}, 0, targetChatId);
             } else {
-                await this.sendMessage(`❌ *Failed:* ${result.message}`);
+                await this.sendMessage(`*Failed:* ${result.message}`, {}, 0, targetChatId);
             }
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
-            await this.sendMessage(`❌ *Error:* ${msg}`);
+            await this.sendMessage(`*Error:* ${msg}`, {}, 0, targetChatId);
         }
     }
 
@@ -312,13 +322,13 @@ export class ReportingService implements OnModuleInit {
         }
     }
 
-    async handleStatusRequest() {
+    async handleStatusRequest(targetChatId?: string) {
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN', mode: 'LIVE' },
         });
 
         if (openTrades.length === 0) {
-            await this.sendMessage('📭 *No open positions currently.*');
+            await this.sendMessage('*No open positions currently.*', {}, 0, targetChatId);
             return;
         }
 
@@ -370,7 +380,7 @@ export class ReportingService implements OnModuleInit {
             }
         }
 
-        await this.sendMessage(statusMsg);
+        await this.sendMessage(statusMsg, {}, 0, targetChatId);
     }
 
     async fetchCurrentPrice(tokenMint: string): Promise<number | null> {
@@ -411,24 +421,6 @@ export class ReportingService implements OnModuleInit {
             this.logger.error(`Error fetching price for report: ${msg}`);
         }
         return null;
-    }
-
-    private async handleBalanceRequest() {
-        if (!this.connection || !this.walletPublicKey) {
-            await this.sendMessage('❌ Wallet/Connection not configured.');
-            return;
-        }
-
-        try {
-            const balance = await this.connection.getBalance(new PublicKey(this.walletPublicKey));
-            const solBalance = balance / 1_000_000_000;
-            await this.sendMessage(
-                `💰 *Wallet Balance:*\nAddress: \`${this.walletPublicKey}\`\nBalance: \`${solBalance.toFixed(4)} SOL\``,
-            );
-        } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            await this.sendMessage(`❌ Error fetching balance: ${message}`);
-        }
     }
 
     async sendBuyAlert(
@@ -672,10 +664,13 @@ export class ReportingService implements OnModuleInit {
         message: string,
         options: TelegramBot.SendMessageOptions = {},
         retryCount = 0,
+        targetChatId?: string,
     ) {
-        if (this.bot && this.chatId) {
+        const destinationChatId = targetChatId || this.chatId;
+
+        if (this.bot && destinationChatId) {
             try {
-                await this.bot.sendMessage(this.chatId, message, {
+                await this.bot.sendMessage(destinationChatId, message, {
                     parse_mode: 'Markdown',
                     ...options,
                 });
@@ -694,7 +689,7 @@ export class ReportingService implements OnModuleInit {
                         `Telegram send failed (${errorMsg}). Retrying in ${delay}ms... (Attempt ${retryCount + 1}/3)`,
                     );
                     await new Promise((res) => setTimeout(res, delay));
-                    return this.sendMessage(message, options, retryCount + 1);
+                    return this.sendMessage(message, options, retryCount + 1, targetChatId);
                 }
 
                 this.logger.error(`Failed to send telegram message after retries: ${errorMsg}`);
