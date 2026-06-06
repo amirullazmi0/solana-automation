@@ -79,6 +79,10 @@ model Watchlist {
   createdAt     DateTime        @default(now())
   status        WatchlistStatus @default(PENDING)
   reason        String?
+
+  @@index([status, lastCheckedAt])
+  @@index([createdAt, status])
+  @@index([pairCreatedAt, createdAt])
 }
 
 model CreatorProfile {
@@ -88,7 +92,7 @@ model CreatorProfile {
   riskScore     Float    @default(0)
   isBlacklisted Boolean  @default(false)
   reason        String?
-  tags          String[]
+  tags          String[] @default([])
   lastActiveAt  DateTime @default(now())
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt

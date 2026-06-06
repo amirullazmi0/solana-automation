@@ -12,7 +12,7 @@ async function bootstrap() {
     // 🛡️ GRACEFUL SHUTDOWN: Biar in-progress sell bisa selesai sebelum restart
     app.enableShutdownHooks();
 
-    const port = 3000;
+    const port = Number(process.env.PORT ?? 3000);
     console.log(`[DEBUG] Attempting to listen on port ${port}...`);
 
     await app.listen(port);
