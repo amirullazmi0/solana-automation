@@ -1,23 +1,23 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
+import { Trade as PrismaTrade } from '@prisma/client';
 import {
     Connection,
     Keypair,
-    VersionedTransaction,
     ParsedTransactionWithMeta,
-    TransactionMessage,
-    SystemProgram,
     PublicKey,
+    SystemProgram,
+    TransactionMessage,
+    VersionedTransaction,
 } from '@solana/web3.js';
 import axios from 'axios';
 import bs58 from 'bs58';
 import * as https from 'https';
-import { Trade as PrismaTrade } from '@prisma/client';
-import { TokenMetadata } from '../analyzer/analyzer.service';
+import { DexLimiter } from '../common/dex-limiter';
+import { TokenMetadata, TradeExecutionPayload } from '../dto/analyzer.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
-import { DexLimiter } from '../common/dex-limiter';
 
 export const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -118,7 +118,10 @@ export function evaluateBuyRisk(
     if (config.dailyMaxLossUsd > 0 && metrics.dailyRealizedPnlUsd <= -config.dailyMaxLossUsd) {
         return { allowed: false, reason: 'daily_max_loss' };
     }
-    if (config.maxConsecutiveLosses > 0 && metrics.consecutiveLosses >= config.maxConsecutiveLosses) {
+    if (
+        config.maxConsecutiveLosses > 0 &&
+        metrics.consecutiveLosses >= config.maxConsecutiveLosses
+    ) {
         return { allowed: false, reason: 'max_consecutive_losses' };
     }
     if (config.maxDrawdownPct > 0) {
@@ -275,9 +278,7 @@ export class TradeService implements OnModuleInit {
             }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            this.logger.error(
-                `[Jito] Failed to fetch tip accounts dynamically: ${message}`,
-            );
+            this.logger.error(`[Jito] Failed to fetch tip accounts dynamically: ${message}`);
         }
     }
 
@@ -487,7 +488,7 @@ export class TradeService implements OnModuleInit {
             if (success && entryPrice > 0) {
                 const symbol = await this.fetchTokenSymbol(tokenMint);
                 const strategyName = options?.targetTakeProfit
-                    ? 'ðŸ”¥ Established Rebound & CTO (TP 18%, TSL 2.5%, Hard SL 20%)'
+                    ? '🔥 Established Rebound & CTO (TP 18%, TSL 2.5%, Hard SL 20%)'
                     : 'Standard Second-Wave';
                 await this.reportingService.sendBuyAlert(
                     tokenMint,
@@ -573,7 +574,7 @@ export class TradeService implements OnModuleInit {
             };
         }
 
-        // 🛡️ RISK CIRCUIT BREAKERS: block new buys on drawdown / daily loss / loss streak
+        // RISK CIRCUIT BREAKERS: block new buys on drawdown / daily loss / loss streak
         const riskApplyToManual =
             this.configService.get<string>('RISK_APPLY_TO_MANUAL', 'false') === 'true';
         const isManual = !!customAmountUSD;
@@ -627,17 +628,45 @@ export class TradeService implements OnModuleInit {
         const priorityFeeLamports = options?.priorityFeeSol
             ? Math.floor(options.priorityFeeSol * 1_000_000_000)
             : undefined;
+        const executionPayload: TradeExecutionPayload = {
+            tokenMint,
+            amountSol: amountInSol,
+            slippage: options?.customSlippageBps || this.slippageBps,
+            priorityFee: priorityFeeLamports || 0,
+            skipPreflight: false,
+        };
 
-        // 🛡️ PRE-BUY BALANCE CHECK: Pastikan modal cukup dan tersisa RESERVE_AMOUNT
-        const balanceLamports = await this.connection.getBalance(this.wallet.publicKey);
-        const balanceSol = balanceLamports / 1_000_000_000;
-        const reserveSol = this.reserveAmount / solPrice;
-        const totalRequiredSol = amountInSol + reserveSol + 0.005; // 0.005 SOL buffer gas/priority fee
+        try {
+            if (
+                !Number.isFinite(solPrice) ||
+                solPrice <= 0 ||
+                !Number.isFinite(executionPayload.amountSol) ||
+                executionPayload.amountSol <= 0
+            ) {
+                return {
+                    success: false,
+                    message: 'Capital guard blocked buy. Invalid SOL price or buy amount.',
+                };
+            }
 
-        if (balanceSol < totalRequiredSol) {
-            const msg = `Insufficient SOL balance. Have: ${balanceSol.toFixed(4)} SOL, Need: ${totalRequiredSol.toFixed(4)} SOL (Position: ${amountInSol.toFixed(4)} SOL, Reserve: ${reserveSol.toFixed(4)} SOL + Fees). Aborting buy to prevent trapped tokens or wasted fees.`;
-            this.logger.warn(`[Slot ${slotToUse}] 🛑 ${msg}`);
-            return { success: false, message: msg };
+            const balanceLamports = await this.connection.getBalance(this.wallet.publicKey);
+            const balanceSol = balanceLamports / 1_000_000_000;
+            const reserveSol = this.reserveAmount / solPrice;
+            const totalRequiredSol = executionPayload.amountSol + reserveSol + 0.005;
+            const balanceAfterBuy = balanceSol - executionPayload.amountSol;
+
+            if (balanceAfterBuy < reserveSol || balanceSol < totalRequiredSol) {
+                const msg = `Insufficient SOL balance. Have: ${balanceSol.toFixed(4)} SOL, Need: ${totalRequiredSol.toFixed(4)} SOL (Position: ${executionPayload.amountSol.toFixed(4)} SOL, Reserve: ${reserveSol.toFixed(4)} SOL + Fees). Aborting buy to prevent trapped tokens or wasted fees.`;
+                this.logger.warn(`[Slot ${slotToUse}] ${msg}`);
+                return { success: false, message: msg };
+            }
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`[Slot ${slotToUse}] Capital protection check failed: ${msg}`);
+            return {
+                success: false,
+                message: `Capital protection check failed: ${msg}`,
+            };
         }
 
         this.logger.log(
@@ -680,7 +709,7 @@ export class TradeService implements OnModuleInit {
                     slotNumber: slotToUse,
                     entryPrice,
                     highestPrice: entryPrice,
-                    trailingStopPrice: 0, // 🛡️ Initialized to 0, PriceMonitor will activate it once in profit
+                    trailingStopPrice: 0, // PriceMonitor activates it once the position is in profit.
                     status: 'OPEN',
                     mode: 'LIVE',
                     amountInSol: finalAmountInSol,
@@ -703,7 +732,7 @@ export class TradeService implements OnModuleInit {
             });
             this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
             const strategyName = options?.targetTakeProfit
-                ? '🔥 Established Rebound & CTO (TP 18%, TSL 2.5%, Hard SL 20%)'
+                ? 'Established Rebound & CTO (TP 18%, TSL 2.5%, Hard SL 20%)'
                 : 'Standard Second-Wave';
             await this.reportingService.sendBuyAlert(
                 tokenMint,
@@ -719,7 +748,7 @@ export class TradeService implements OnModuleInit {
                 },
             );
 
-            // 🚀 MONITORING: PriceMonitorService otomatis akan mendeteksi trade baru dari DB
+            // PriceMonitorService otomatis akan mendeteksi trade baru dari DB
             return { success: true, message: `Successfully bought ${symbol} at slot ${slotToUse}` };
         }
 
@@ -807,9 +836,13 @@ export class TradeService implements OnModuleInit {
             );
 
             // 2. PANIC SLIPPAGE: Kalau SL, Trailing Stop, atau Rugpull, hajar slippage 15% (1500 bps) biar pasti laku
-            const isUrgent = ['STOP_LOSS', 'TRAILING_STOP', 'DEV_DUMP', 'RUGPULL'].includes(
-                exitReason,
-            );
+            const isUrgent = [
+                'STOP_LOSS',
+                'TRAILING_STOP',
+                'DEV_DUMP',
+                'RUGPULL',
+                'PANIC_SELL',
+            ].includes(exitReason);
             const sellSlippage = isUrgent ? 1500 : this.slippageBps;
 
             // 🚀 Panic Gas Accel: Hajar priority fee tinggi (0.0005 SOL = 500,000 lamports) biar instan masuk block pertama
@@ -992,9 +1025,7 @@ export class TradeService implements OnModuleInit {
             return;
         }
 
-        this.logger.warn(
-            `[Trade ${tradeId}] Queueing sell retry ${retryCount}/3 in ${delayMs}ms.`,
-        );
+        this.logger.warn(`[Trade ${tradeId}] Queueing sell retry ${retryCount}/3 in ${delayMs}ms.`);
         setTimeout(() => {
             void this.executeSell(tradeId, currentPrice, exitReason, percentage);
         }, delayMs);
@@ -1132,7 +1163,6 @@ export class TradeService implements OnModuleInit {
                 const calculatedPrice = (outAmountSol * solPrice) / inAmountToken;
                 const fallbackPrice = await this.getSellPriceFallback(inputMint);
                 price = validateSellPrice(calculatedPrice, fallbackPrice, inputMint, this.logger);
-
             }
 
             // 🤖 DRY RUN MODE: Skip actual swap execution, just return simulated success with quote price

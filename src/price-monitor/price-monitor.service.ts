@@ -212,12 +212,12 @@ export class PriceMonitorService {
             }
         }
 
-        // 2. RUGPULL PROTECTION (Instant Exit)
-        if (profitPercent <= -80) {
+        // 2. HARD CRASH BYPASS: instant panic sell with urgent slippage path.
+        if (profitPercent <= -55) {
             this.logger.error(
-                `[Slot ${trade.slotNumber}] 💀 RUGPULL DETECTED (-80%). IMMEDIATE EXIT.`,
+                `[Slot ${trade.slotNumber}] HARD CRASH DETECTED (${profitPercent.toFixed(2)}%). PANIC SELL with 15% slippage.`,
             );
-            await this.tradeService.executeSell(trade.id, currentPrice, 'RUGPULL');
+            await this.tradeService.executeSell(trade.id, currentPrice, 'PANIC_SELL');
             return;
         }
 
@@ -295,10 +295,10 @@ export class PriceMonitorService {
         // 5. EXIT CONDITION: Patience Protocol (5-Minute SL with 10-Minute Hard Cap)
         if (profitPercent <= -effectiveStopLossPercent) {
             const disablePatience =
-                this.configService.get<string>('DISABLE_SL_PATIENCE', 'true') === 'true';
+                this.configService.get<string>('DISABLE_SL_PATIENCE', 'false') === 'true';
 
             // Bypass patience protocol if disabled globally or if this is a standard trade (no targetStopLoss override)
-            if (disablePatience || !trade.targetStopLoss) {
+            if (disablePatience) {
                 this.logger.error(
                     `[Slot ${trade.slotNumber}] 💀 STOP LOSS TRIGGERED (${profitPercent.toFixed(2)}%). Bypassing patience protocol and executing IMMEDIATE STOP LOSS.`,
                 );
@@ -306,14 +306,6 @@ export class PriceMonitorService {
                 return;
             }
 
-            // Jika crash sangat parah (misal drop di bawah -55%), langsung exit tanpa delay
-            if (profitPercent <= -55.0) {
-                this.logger.error(
-                    `[Slot ${trade.slotNumber}] 💀 HEAVY CRASH DETECTED (${profitPercent.toFixed(2)}%). Bypassing patience protocol and executing IMMEDIATE STOP LOSS.`,
-                );
-                await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
-                return;
-            }
 
             if (!trade.slTriggeredAt) {
                 this.logger.warn(

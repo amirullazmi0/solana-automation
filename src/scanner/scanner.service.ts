@@ -335,6 +335,26 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         return true;
     }
 
+    private getTradeCooldown(recentTrade: { profitUsd: number | null; updatedAt: Date }): {
+        isWin: boolean;
+        cooldownHours: number;
+        expiredAt: number;
+    } {
+        const winCooldownHours = Number.parseInt(
+            this.configService.get<string>('COOLDOWN_WIN_HOURS', '6'),
+            10,
+        );
+        const lossCooldownHours = Number.parseInt(
+            this.configService.get<string>('COOLDOWN_LOSS_HOURS', '24'),
+            10,
+        );
+        const isWin = (recentTrade.profitUsd || 0) > 0;
+        const cooldownHours = isWin ? winCooldownHours : lossCooldownHours;
+        const expiredAt = recentTrade.updatedAt.getTime() + cooldownHours * 60 * 60 * 1000;
+
+        return { isWin, cooldownHours, expiredAt };
+    }
+
     private async processNewToken(tokenMint: string) {
         if (this.processingTokens.has(tokenMint)) return;
 
@@ -366,8 +386,6 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     });
 
                     let expired = false;
-                    let isWin = false;
-                    let cooldownHours = 24;
                     let cooldownExpiredAt = 0;
 
                     if (recentTrade) {
@@ -375,18 +393,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
                             return;
                         }
-                        const winCooldownHours = Number.parseInt(
-                            this.configService.get<string>('COOLDOWN_WIN_HOURS', '6'),
-                            10,
-                        );
-                        const lossCooldownHours = Number.parseInt(
-                            this.configService.get<string>('COOLDOWN_LOSS_HOURS', '24'),
-                            10,
-                        );
-                        isWin = (recentTrade.profitUsd || 0) > 0;
-                        cooldownHours = isWin ? winCooldownHours : lossCooldownHours;
-                        const cooldownMillis = cooldownHours * 60 * 60 * 1000;
-                        cooldownExpiredAt = recentTrade.updatedAt.getTime() + cooldownMillis;
+                        const cooldown = this.getTradeCooldown(recentTrade);
+                        cooldownExpiredAt = cooldown.expiredAt;
                         expired = Date.now() >= cooldownExpiredAt;
                     } else if (existing.status === 'TRADED') {
                         cooldownExpiredAt = existing.lastCheckedAt.getTime() + 24 * 60 * 60 * 1000;
@@ -441,18 +449,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     );
                     return;
                 }
-                const winCooldownHours = Number.parseInt(
-                    this.configService.get<string>('COOLDOWN_WIN_HOURS', '6'),
-                    10,
-                );
-                const lossCooldownHours = Number.parseInt(
-                    this.configService.get<string>('COOLDOWN_LOSS_HOURS', '24'),
-                    10,
-                );
-                const isWin = (recentTrade.profitUsd || 0) > 0;
-                const cooldownHours = isWin ? winCooldownHours : lossCooldownHours;
-                const cooldownMillis = cooldownHours * 60 * 60 * 1000;
-                const cooldownExpiredAt = recentTrade.updatedAt.getTime() + cooldownMillis;
+                const { isWin, cooldownHours, expiredAt: cooldownExpiredAt } =
+                    this.getTradeCooldown(recentTrade);
 
                 if (Date.now() < cooldownExpiredAt) {
                     this.logger.debug(

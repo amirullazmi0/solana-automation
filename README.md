@@ -87,6 +87,12 @@ Salin `.env.example` ke `.env` dan isi value-nya. Semua parameter sudah diberi k
 | `MIN_LIQUIDITY_USD` | `7500` | Minimum liquidity di pool |
 | `MIN_BUY_COUNT` | `5` | Minimum buyer dalam 5 menit |
 
+### AI Analysis Layer
+| Parameter | Keterangan |
+|-----------|------------|
+| `OPENAI_API_KEY` | Jika diisi dengan key valid, `AnalyzerService` otomatis menjalankan `AIService.analyzeToken()` setelah gate market/RPC/RugCheck lulus. |
+| `AI_CONVICTION_THRESHOLD` | Minimum skor AI agar token boleh lanjut buy. Default `75.0`. |
+
 ### Established Rebound & CTO Thresholds
 | Parameter | Value | Keterangan |
 |-----------|-------|------------|
@@ -252,15 +258,19 @@ FAIL: safety_rpc_failed (temporary, retry 3x)
 #### Gate 12: RugCheck API (Advanced Safety)
 ```
 Sub-checks (harus SEMUA pass):
-  1. Safety Index = 1 - (top10HolderSupply / totalSupply) >= 0.80
+  1. Top 10 holder murni <= 20% supply (Safety Index >= 0.80)
   2. LP Status = 'burned' ATAU 'locked' (PumpFun skip jika no market data)
   3. Risk Score <= 1000
   4. Tidak ada risk: 'honeypot', 'freeze', 'mint authority'
   5. Danger level risks = 0
   6. Creator balance <= 5% dari total supply
 
-FAIL: high_concentration | lp_not_burned | high_risk_score | honeypot_detected | creator_holds_too_much
+FAIL: high_concentration | lp_not_burned | high_risk_score | honeypot_detected | danger_risks_detected | creator_holds_too_much
 ```
+Gate 12 V85/V86 memakai `checkHolderConcentration(rugCheckData)` dengan DTO global
+`src/dto/analyzer.dto.ts`. Holder yang berada di pool atau burned wallet dikeluarkan
+dulu dari perhitungan, lalu Top 10 holder yang tersisa dijumlahkan. Jika hasilnya
+lebih dari 20%, token langsung ditolak.
 
 ### 🎯 Decision Flow (Summary)
 
@@ -289,27 +299,32 @@ Token ditemukan (via Polling atau WS)
     ▼
 PriceMonitorService mulai tracking:
   • Take Profit standar (30%) / CTO (18%) → Trailing Stop aktif
-  • Stop Loss standar (25%) / CTO (20%) → Auto-sell dengan slippage 15%
+  - Stop Loss standar (25%) / CTO (20%) -> Patience Protocol 5 menit, hard cap 10 menit
+  - Hard crash -55% -> Panic sell instan dengan slippage 15%
   • Trailing Stop standar (5%) / CTO (2.5%) → Kunci profit, sell jika turun dari peak
 ```
 
-### 📈 Exit Strategy & Profit Optimizations (PriceMonitorService)
+### Price Monitor Rules (V85/V86)
+
+PriceMonitorService mulai tracking:
+- Take Profit standar (30%) / CTO (18%) -> partial take profit lalu trailing stop aktif.
+- Zero-Loss Protection: saat profit >= 15%, trailing stop minimal naik ke `harga_beli + 2%`.
+- Stop Loss standar (25%) / CTO (20%) -> Patience Protocol 5 menit, hard cap 10 menit.
+- Hard crash -55% -> `PANIC_SELL` instan dengan slippage 15%, melewati Patience Protocol.
+- Trailing Stop standar (5%) / CTO (2.5%) -> sell jika harga turun dari peak ke trailing stop.
 
 | Kondisi | Aksi | Slippage |
 |---------|------|----------|
-| Price naik ≥ `TAKE_PROFIT_PERCENT` (Standard: 30% / CTO: 18%) | Trailing Stop **aktif** | Normal (5%) |
-| Price turun ≥ `TRAILING_DISTANCE_PERCENT` (Standard: 5% / CTO: 2.5%) dari peak | **SELL** (Trailing Stop) | Normal (5%) |
-| Price turun ≥ `STOP_LOSS_PERCENT` (Standard: 25% / CTO: 20%) dari entry | **SELL** (Stop Loss) | Panic (15%) |
-| Dev dump terdeteksi (creator sell >50%) | **SELL** (Rugpull) | Panic (15%) |
+| Price naik >= `TAKE_PROFIT_PERCENT` (Standard: 30% / CTO: 18%) | Partial take profit 50%, sisanya trailing | Normal |
+| Profit >= 15% | SL/TSL floor dinaikkan ke `entryPrice * 1.02` | Tidak sell langsung |
+| Price turun ke trailing stop | SELL (`TRAILING_STOP`) | Panic 15% |
+| Price turun ke stop loss normal | Patience Protocol 5 menit, hard cap 10 menit | Panic 15% saat exit |
+| Price turun >= 55% dari entry | SELL INSTAN (`PANIC_SELL`) | Panic 15% |
+| Dev dump terdeteksi | SELL (`DEV_DUMP`) | Panic 15% |
 
-#### ⚡ Optimasi Profitabilitas Tambahan:
-- **Dynamic Take Profit**: Jika koin sangat kencang dan highest price mencapai **1.35x dari harga beli**, target TP secara dinamis disesuaikan menjadi **50%** (dari standard 30%) untuk membiarkan profit berlari namun tetap realistis (menghindari keserakahan).
-- **Flexible Trailing Stop**: Trailing Stop (TSL) dibiarkan bergerak bebas mengikuti fluktuasi harga (jarak 5% penuh dari peak) tanpa dikunci terlalu dini di dekat break-even.
-- **Zero-Loss Protection (Safe Zone)**: Ketika profit koin telah menyentuh minimal **15%**, stop loss otomatis dinaikkan ke minimal `harga_beli + 2%` untuk menutupi fee gas/Priority Fee.
-- **Patience Protocol (SL Delay)**: Ketika harga menyentuh zona stop loss, bot menunggu **5 menit** untuk melihat volume/tekanan beli pemulihan, dengan batas keras (*hard cap*) **10 menit** untuk meminimalkan kerugian lebih dalam.
+Set `DISABLE_SL_PATIENCE=true` hanya jika ingin kembali ke stop loss instan.
 
-> **🔥 Catatan Khusus untuk Mode Established Rebound & CTO:**
-> Transaksi yang dibuka melalui jalur Rebound & CTO memiliki exit rules kustom mandiri (`targetTakeProfit=18%`, `targetTrailingDistance=2.5%`, dan `targetStopLoss=20%`). `PriceMonitorService` secara otomatis menggunakan nilai kustom ini tanpa dipengaruhi konfigurasi standar bot.
+> Catatan khusus Established Rebound & CTO: posisi dari jalur ini membawa exit rules kustom (`targetTakeProfit=18%`, `targetTrailingDistance=2.5%`, `targetStopLoss=20%`).
 
 ### 🔄 Watchlist Retry Mechanism
 
@@ -357,5 +372,5 @@ Set via `.env`.
 
 ---
 
-*Last updated: Mei 2026 — Strategi: Capital Protection & Risk Management (Round 11-16)*
+*Last updated: Juni 2026 - MaSoul Sniper Lean Filter V85/V86, Global DTO, Capital Protection, Dynamic Cooldown, Price Monitor Optimizations*
 *Created with ❤️ by Antigravity for Amirull Azmi.*

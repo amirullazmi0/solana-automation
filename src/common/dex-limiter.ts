@@ -1,27 +1,27 @@
 import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 
-interface QueueItem<T = unknown> {
+interface QueueItem<T extends object = object> {
     url: string;
     resolve: (value: AxiosResponse<T>) => void;
     reject: (reason: Error) => void;
     config?: AxiosRequestConfig;
 }
 
-interface CacheEntry<T = unknown> {
+interface CacheEntry<T extends object = object> {
     response: AxiosResponse<T>;
     expiresAt: number;
 }
 
 export class DexLimiter {
-    private static queue: QueueItem[] = [];
+    private static queue: QueueItem<object>[] = [];
     private static processing = false;
     private static lastRequestTime = 0;
     private static readonly MIN_DELAY_MS = 500; // Jeda minimal 500ms antar request
 
     // Cache penyimpanan RAM
-    private static cache = new Map<string, CacheEntry>();
+    private static cache = new Map<string, CacheEntry<object>>();
 
-    public static async get<T = unknown>(
+    public static async get<T extends object = object>(
         url: string,
         config?: AxiosRequestConfig,
     ): Promise<AxiosResponse<T>> {
@@ -38,7 +38,7 @@ export class DexLimiter {
         return new Promise<AxiosResponse<T>>((resolve, reject) => {
             this.queue.push({
                 url,
-                resolve: resolve as (value: AxiosResponse<unknown>) => void,
+                resolve: resolve as (value: AxiosResponse<object>) => void,
                 reject,
                 config,
             });
@@ -91,7 +91,7 @@ export class DexLimiter {
         this.processing = false;
     }
 
-    private static async executeRequest(item: QueueItem): Promise<void> {
+    private static async executeRequest(item: QueueItem<object>): Promise<void> {
         const retries = 3;
         for (let attempt = 1; attempt <= retries; attempt++) {
             try {

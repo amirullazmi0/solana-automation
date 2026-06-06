@@ -8,77 +8,17 @@ import { PrismaService } from '../prisma/prisma.service';
 import { DexLimiter } from '../common/dex-limiter';
 import { CreatorProfileService } from './creator-profile.service';
 import { AIService } from '../ai/ai.service';
-
-export interface SocialLink {
-    type: string;
-    url: string;
-}
-
-export interface Website {
-    label?: string;
-    url: string;
-}
-
-export interface DexScreenerPair {
-    liquidity?: { usd?: number };
-    fdv?: number;
-    pairCreatedAt?: number;
-    priceChange?: { m5?: number; h1?: number; h6?: number; h24?: number };
-    volume?: { m5?: number; h1?: number; h24?: number };
-    txns?: {
-        m5?: { buys?: number; sells?: number };
-        h1?: { buys?: number; sells?: number };
-    };
-    info?: {
-        socials?: SocialLink[];
-        websites?: Website[];
-    };
-    baseToken?: { address?: string; symbol?: string; name?: string };
-}
-
-export interface TokenMetadata {
-    liquidity: number;
-    marketCap: number;
-    mcap?: number;
-    pairCreatedAt?: number;
-    symbol?: string;
-    volumeSurge?: number;
-    volScore?: number;
-    zScore?: number;
-    priceChange1h?: number;
-    isPumpFun?: boolean;
-    isCTO?: boolean;
-    socials?: {
-        twitter?: string;
-        telegram?: string;
-        website?: string;
-    };
-    creator?: string;
-    topHolder?: string;
-}
-
-interface RugCheckHolder {
-    address: string;
-    amount: number;
-    pct: number;
-    owner: string;
-}
-
-interface RugCheckKnownAccount {
-    name: string;
-    type: string;
-}
-
-interface RugCheckMarket {
-    lpType: string;
-    lpStatus: string;
-}
-
-interface CreatorOwnershipResult {
-    creatorPct: number | null;
-    isCTO: boolean;
-    reliable: boolean;
-}
+import {
+    CreatorOwnershipResult,
+    DexScreenerPair,
+    RugCheckApiHolder,
+    RugCheckApiResponse,
+    RugCheckHolder,
+    RugCheckMarket,
+    RugCheckResponse,
+    RugCheckRisk,
+    TokenMetadata,
+} from '../dto/analyzer.dto';
 
 @Injectable()
 export class AnalyzerService {
@@ -227,10 +167,7 @@ export class AnalyzerService {
                     },
                 );
 
-                if (
-                    aiResult.action !== 'buy' ||
-                    aiResult.cuanConvictionScore < aiThreshold
-                ) {
+                if (aiResult.action !== 'buy' || aiResult.cuanConvictionScore < aiThreshold) {
                     this.logger.debug(
                         `[${tokenMint}] AI rejected signal. Score=${aiResult.cuanConvictionScore}, Threshold=${aiThreshold}, Action=${aiResult.action}.`,
                     );
@@ -710,6 +647,87 @@ export class AnalyzerService {
         });
     }
 
+    public checkHolderConcentration(rugCheckData: RugCheckResponse): boolean {
+        try {
+            const top10Share = rugCheckData.holders
+                .filter((holder: RugCheckHolder) => !holder.isInPool && !holder.isBurned)
+                .slice(0, 10)
+                .reduce((sum: number, holder: RugCheckHolder) => sum + holder.share, 0);
+
+            if (top10Share > 20) {
+                this.logger.warn(
+                    `❌ REJECTED: Top 10 Holders menguasai ${top10Share.toFixed(2)}% supply. Terlalu pekat!`,
+                );
+                return false;
+            }
+
+            if (rugCheckData.score > 1000) {
+                this.logger.warn(
+                    `❌ REJECTED: RugCheck score ${rugCheckData.score} melewati batas 1000.`,
+                );
+                return false;
+            }
+
+            const dangerCount = rugCheckData.dangerReasons?.length || 0;
+            if (dangerCount > 0) {
+                this.logger.warn(
+                    `❌ REJECTED: RugCheck danger risks detected (${rugCheckData.dangerReasons?.join(', ')}).`,
+                );
+                return false;
+            }
+
+            return true;
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Holder concentration check failed safely: ${msg}`);
+            return false;
+        }
+    }
+
+    private toRugCheckResponse(
+        data: RugCheckApiResponse,
+        holders: RugCheckApiHolder[],
+        markets: RugCheckMarket[],
+        risks: RugCheckRisk[],
+    ): RugCheckResponse {
+        const normalizedHolders = holders.map((holder: RugCheckApiHolder): RugCheckHolder => {
+            const owner = holder.owner.toLowerCase();
+            return {
+                address: holder.address,
+                amount: Number.isFinite(holder.amount) ? holder.amount : 0,
+                share: Number.isFinite(holder.pct) ? holder.pct : 0,
+                isInPool: owner.includes('pool') || owner.includes('amm'),
+                isBurned: owner === '1111111111111111111111111111111',
+            };
+        });
+        const topHoldersPercentage = normalizedHolders
+            .filter((holder: RugCheckHolder) => !holder.isInPool && !holder.isBurned)
+            .slice(0, 10)
+            .reduce((sum: number, holder: RugCheckHolder) => sum + holder.share, 0);
+        const dangerReasons = risks
+            .filter((risk: RugCheckRisk) => risk.level === 'danger')
+            .map((risk: RugCheckRisk) => risk.name);
+
+        return {
+            mint: data.mint || '',
+            score: data.score || 0,
+            meta: {
+                topHoldersPercentage,
+                totalHolders: normalizedHolders.length,
+                lpBurned: markets.some(
+                    (market: RugCheckMarket) =>
+                        market.lpType === 'burned' || market.lpStatus === 'burned',
+                ),
+                lpLocked: markets.some(
+                    (market: RugCheckMarket) =>
+                        market.lpType === 'locked' || market.lpStatus === 'locked',
+                ),
+            },
+            holders: normalizedHolders,
+            dangerReasons,
+        };
+    }
+
     private async checkRugCheckAPI(tokenMint: string): Promise<{
         passed: boolean;
         creator?: string;
@@ -720,7 +738,7 @@ export class AnalyzerService {
         isCTO?: boolean;
     }> {
         try {
-            const response = await axios.get(
+            const response = await axios.get<RugCheckApiResponse>(
                 `https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`,
                 {
                     timeout: 5000,
@@ -731,10 +749,8 @@ export class AnalyzerService {
             if (!response.data)
                 return { passed: false, reason: 'rugcheck_no_data', permanent: false };
 
-            const topHolders = (response.data.topHolders as RugCheckHolder[]) || [];
-            const knownAccounts =
-                (response.data.knownAccounts as Record<string, RugCheckKnownAccount | undefined>) ||
-                {};
+            const topHolders = response.data.topHolders || [];
+            const knownAccounts = response.data.knownAccounts || {};
 
             // 🛡️ SAFETY & HOLDER INDEX (Anti-Rug) - Saring dompet AMM, lockers, dan alamat sistem
             const filteredHolders = topHolders.filter((h) => {
@@ -743,6 +759,28 @@ export class AnalyzerService {
                 const isSystemAccount = h.owner === '1111111111111111111111111111111';
                 return !isExcludedType && !isSystemAccount;
             });
+            const markets = response.data.markets || [];
+            const risks = response.data.risks || [];
+            const rugCheckData = this.toRugCheckResponse(
+                response.data,
+                filteredHolders,
+                markets,
+                risks,
+            );
+            if (!this.checkHolderConcentration(rugCheckData)) {
+                return {
+                    passed: false,
+                    reason:
+                        rugCheckData.score > 1000
+                            ? 'high_risk_score'
+                            : rugCheckData.dangerReasons?.length
+                              ? 'danger_risks_detected'
+                              : 'high_concentration',
+                    safetyIndex: 1 - rugCheckData.meta.topHoldersPercentage / 100,
+                    permanent: true,
+                    isCTO: false,
+                };
+            }
 
             // 🧑‍💻 CREATOR BALANCE CHECK (Anti-Dump)
             const creator = response.data.creator;
@@ -769,7 +807,7 @@ export class AnalyzerService {
             // Hitung safetyIndex menggunakan persentase (pct) langsung dari API
             const top10SumPct = filteredHolders
                 .slice(0, 10)
-                .reduce((sum: number, h: RugCheckHolder) => sum + (h.pct || 0), 0);
+                .reduce((sum: number, h: RugCheckApiHolder) => sum + (h.pct || 0), 0);
             const safetyIndex = 1 - top10SumPct / 100;
 
             const defaultSafetyIndex = isCTO ? '0.20' : '0.65';
@@ -790,7 +828,6 @@ export class AnalyzerService {
             }
 
             // 🔥 LP Safety Check: Accept burned OR locked (PumpFun uses locked mechanism)
-            const markets = (response.data.markets as RugCheckMarket[]) || [];
             const isPumpFunToken = tokenMint.toLowerCase().endsWith('pump');
             const lpSafe = markets.some(
                 (m: RugCheckMarket) =>
@@ -825,7 +862,6 @@ export class AnalyzerService {
             }
 
             // ⛔ HONEYPOT & PERMISSIONS CHECK
-            const risks = (response.data.risks as Array<{ level: string; name: string }>) || [];
             const hasHoneypotRisk = risks.some(
                 (r) =>
                     r.name.toLowerCase().includes('honeypot') ||
@@ -876,7 +912,7 @@ export class AnalyzerService {
             return {
                 passed: true,
                 creator: response.data.creator,
-                topHolder: response.data.topHolders?.[0]?.address,
+                topHolder: topHolders[0]?.address,
                 safetyIndex,
                 isCTO,
             };
@@ -896,10 +932,7 @@ export class AnalyzerService {
             const creatorKey = new PublicKey(creatorAddress);
             const mintKey = new PublicKey(tokenMint);
 
-            const creatorBalance = await this.getCreatorTokenBalanceWithRetry(
-                creatorKey,
-                mintKey,
-            );
+            const creatorBalance = await this.getCreatorTokenBalanceWithRetry(creatorKey, mintKey);
             if (creatorBalance === null) {
                 this.creatorRpcFailureCount++;
                 this.logger.warn(
@@ -950,9 +983,7 @@ export class AnalyzerService {
                 return accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount ?? 0;
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
-                this.logger.warn(
-                    `Creator balance RPC failed (attempt ${attempt}/3): ${msg}`,
-                );
+                this.logger.warn(`Creator balance RPC failed (attempt ${attempt}/3): ${msg}`);
                 if (attempt < 3) {
                     await new Promise((res) => setTimeout(res, 300 * attempt));
                 }

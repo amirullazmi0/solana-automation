@@ -4,7 +4,14 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { getMint } from '@solana/spl-token';
 import axios from 'axios';
 import * as https from 'https';
-import { DexScreenerPair, TokenMetadata } from './analyzer.service';
+import {
+    CreatorOwnershipResult,
+    DexScreenerPair,
+    RugCheckApiHolder,
+    RugCheckApiResponse,
+    RugCheckMarket,
+    TokenMetadata,
+} from '../dto/analyzer.dto';
 import { TradeService } from '../trade/trade.service';
 import { ReportingService } from '../reporting/reporting.service';
 import { ModuleRef } from '@nestjs/core';
@@ -16,29 +23,6 @@ export interface ReboundResult {
     isEstablished: boolean;
     executed: boolean;
     reason?: string;
-}
-
-interface RugCheckMarket {
-    lpType: string;
-    lpStatus: string;
-}
-
-interface RugCheckHolder {
-    address: string;
-    amount: number;
-    pct: number;
-    owner: string;
-}
-
-interface RugCheckKnownAccount {
-    name: string;
-    type: string;
-}
-
-interface CreatorOwnershipResult {
-    creatorPct: number | null;
-    isCTO: boolean;
-    reliable: boolean;
 }
 
 @Injectable()
@@ -192,7 +176,7 @@ export class EstablishedAnalyzerService {
         isCTO?: boolean;
     }> {
         try {
-            const response = await axios.get(
+            const response = await axios.get<RugCheckApiResponse>(
                 `https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`,
                 {
                     timeout: 5000,
@@ -202,10 +186,8 @@ export class EstablishedAnalyzerService {
 
             if (!response.data) return { passed: false, reason: 'no_rugcheck_data' };
 
-            const topHolders = (response.data.topHolders as RugCheckHolder[]) || [];
-            const knownAccounts =
-                (response.data.knownAccounts as Record<string, RugCheckKnownAccount | undefined>) ||
-                {};
+            const topHolders = response.data.topHolders || [];
+            const knownAccounts = response.data.knownAccounts || {};
 
             // 🛡️ SAFETY & HOLDER INDEX (Anti-Rug)
             const filteredHolders = topHolders.filter((h) => {
@@ -238,7 +220,7 @@ export class EstablishedAnalyzerService {
 
             const top10SumPct = filteredHolders
                 .slice(0, 10)
-                .reduce((sum: number, h: RugCheckHolder) => sum + (h.pct || 0), 0);
+                .reduce((sum: number, h: RugCheckApiHolder) => sum + (h.pct || 0), 0);
             const safetyIndex = 1 - top10SumPct / 100;
 
             const defaultSafetyIndex = isCTO ? '0.20' : '0.65';
@@ -252,7 +234,7 @@ export class EstablishedAnalyzerService {
                 return { passed: false, reason: 'established_high_concentration', isCTO };
             }
 
-            const markets = (response.data.markets as RugCheckMarket[]) || [];
+            const markets = response.data.markets || [];
             const lpSafe = markets.some(
                 (m: RugCheckMarket) =>
                     m.lpType === 'burned' ||
@@ -274,7 +256,7 @@ export class EstablishedAnalyzerService {
                 return { passed: false, reason: 'established_high_risk_score', isCTO };
             }
 
-            const risks = (response.data.risks as Array<{ name: string; level: string }>) || [];
+            const risks = response.data.risks || [];
             const hasHoneypotRisk = risks.some(
                 (r) =>
                     r.name.toLowerCase().includes('honeypot') ||

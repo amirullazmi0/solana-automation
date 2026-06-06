@@ -1,16 +1,16 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
-import * as TelegramBot from 'node-telegram-bot-api';
 import { ConfigService } from '@nestjs/config';
-import { PrismaService } from '../prisma/prisma.service';
+import { ModuleRef } from '@nestjs/core';
+import { Cron } from '@nestjs/schedule';
 import { Connection } from '@solana/web3.js';
 import axios from 'axios';
 import * as https from 'https';
-import { TokenMetadata } from '../analyzer/analyzer.service';
-import { ModuleRef } from '@nestjs/core';
-import { TradeService } from '../trade/trade.service';
-import { ScannerService } from '../scanner/scanner.service';
+import * as TelegramBot from 'node-telegram-bot-api';
 import { DexLimiter } from '../common/dex-limiter';
+import { TokenMetadata } from '../dto/analyzer.dto';
+import { PrismaService } from '../prisma/prisma.service';
+import { ScannerService } from '../scanner/scanner.service';
+import { TradeService } from '../trade/trade.service';
 
 @Injectable()
 export class ReportingService implements OnModuleInit {
@@ -86,7 +86,6 @@ export class ReportingService implements OnModuleInit {
             const text = msg.text;
             const incomingChatId = msg.chat.id.toString();
 
-
             if (!text) return;
 
             if (text === '/start' || text === '/help') {
@@ -111,8 +110,7 @@ export class ReportingService implements OnModuleInit {
 
     private async sendMainMenu(targetChatId?: string) {
         const message =
-            `*Solana Trend Follower Bot Active*\n\n` +
-            `Pilih menu di bawah untuk mengelola bot.`;
+            `*Solana Trend Follower Bot Active*\n\n` + `Pilih menu di bawah untuk mengelola bot.`;
 
         const options: TelegramBot.SendMessageOptions = {
             reply_markup: {
