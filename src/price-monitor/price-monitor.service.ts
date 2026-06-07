@@ -15,6 +15,7 @@ export class PriceMonitorService {
     private trailingDistancePercent: number;
     private jupiterApiKey: string;
     private stopLossPercent: number;
+    private readonly isDryRun: boolean;
     private readonly lastAlertTime = new Map<string, number>(); // Cooldown alert: tokenMint -> timestamp
     private ipCache: Record<string, string> = {};
     private readonly fallbackApiIps: Record<string, string> = {
@@ -34,12 +35,15 @@ export class PriceMonitorService {
             this.configService.get<string>('STOP_LOSS_PERCENT', '25.0'),
         );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
+        this.isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
     }
 
     private readonly processingTrades = new Set<number>();
 
     @Interval(2000)
     async monitorPrices() {
+        if (this.isDryRun) return;
+
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN', mode: 'LIVE' },
         });
@@ -119,7 +123,31 @@ export class PriceMonitorService {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`Batch price fetch failed: ${msg}`);
         }
+
+        const missingMints = mints.filter((mint) => !result[mint]);
+        for (const mint of missingMints) {
+            const dexPrice = await this.getDexScreenerPrice(mint);
+            if (dexPrice && dexPrice > 0) {
+                result[mint] = dexPrice;
+            }
+        }
+
         return result;
+    }
+
+    private async getDexScreenerPrice(tokenMint: string): Promise<number | null> {
+        try {
+            const response = await DexLimiter.get<{
+                pairs: Array<{ priceUsd?: string }>;
+            }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
+                timeout: 5000,
+                httpsAgent: this.getHttpsAgent(),
+            });
+            const price = Number.parseFloat(response.data.pairs?.[0]?.priceUsd || '');
+            return Number.isFinite(price) && price > 0 ? price : null;
+        } catch {
+            return null;
+        }
     }
 
     private async getLiquidityOnly(tokenMint: string): Promise<number | null> {
@@ -281,7 +309,8 @@ export class PriceMonitorService {
         // Kita butuh volumeSurge dari database (Watchlist) kalau ada, atau kita asumsikan dari momentum
         // Untuk sekarang kita pake multiplier kalau highestPrice naik kenceng
         let dynamicTP = baseTP;
-        if (profitPercent >= baseTP && trade.highestPrice > trade.entryPrice * 1.35) {
+        const effectiveHighestPrice = Math.max(trade.highestPrice, currentPrice);
+        if (profitPercent >= baseTP && effectiveHighestPrice > trade.entryPrice * 1.35) {
             this.logger.log(
                 `[Slot ${trade.slotNumber}] 🔥 HIGH MOMENTUM DETECTED! Increasing TP target to 50%...`,
             );
@@ -312,7 +341,7 @@ export class PriceMonitorService {
             const disablePatience =
                 this.configService.get<string>('DISABLE_SL_PATIENCE', 'false') === 'true';
 
-            // Bypass patience protocol if disabled globally or if this is a standard trade (no targetStopLoss override)
+            // Bypass patience protocol if disabled globally.
             if (disablePatience) {
                 this.logger.error(
                     `[Slot ${trade.slotNumber}] 💀 STOP LOSS TRIGGERED (${profitPercent.toFixed(2)}%). Bypassing patience protocol and executing IMMEDIATE STOP LOSS.`,
