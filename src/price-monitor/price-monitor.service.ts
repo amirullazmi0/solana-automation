@@ -16,7 +16,8 @@ export class PriceMonitorService {
     private jupiterApiKey: string;
     private stopLossPercent: number;
     private readonly lastAlertTime = new Map<string, number>(); // Cooldown alert: tokenMint -> timestamp
-    private ipCache: Record<string, string> = {
+    private ipCache: Record<string, string> = {};
+    private readonly fallbackApiIps: Record<string, string> = {
         'api.jup.ag': '18.239.105.107',
     };
 
@@ -160,10 +161,24 @@ export class PriceMonitorService {
                 this.ipCache[hostname] = ip;
                 return ip;
             }
+            const fallbackIp = this.fallbackApiIps[hostname];
+            if (fallbackIp) {
+                this.logger.warn(
+                    `[DNS] Falling back to temporary pinned IP for ${hostname}: ${fallbackIp}`,
+                );
+                return fallbackIp;
+            }
             return null;
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logger.error(`[${hostname}] DNS resolution failed: ${message}. Safety skip.`);
+            const fallbackIp = this.fallbackApiIps[hostname];
+            if (fallbackIp) {
+                this.logger.warn(
+                    `[DNS] Falling back to temporary pinned IP for ${hostname}: ${fallbackIp}`,
+                );
+                return fallbackIp;
+            }
             return null;
         }
     }

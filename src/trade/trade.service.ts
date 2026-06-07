@@ -137,7 +137,7 @@ export function evaluateBuyRisk(
 export class TradeService implements OnModuleInit {
     private readonly logger = new Logger(TradeService.name);
     private connection: Connection;
-    private wallet: Keypair;
+    private wallet: Keypair | null = null;
     private readonly sellingTrades = new Set<number>();
     private readonly decimalsCache = new Map<string, number>();
     private readonly sellRetryCounts = new Map<number, number>();
@@ -155,11 +155,13 @@ export class TradeService implements OnModuleInit {
 
     // Cache for resolved IPs
     private ipCache: Record<string, string> = {
-        'api.jup.ag': '18.239.105.107', // Jupiter Main
-        'quote-api.jup.ag': '104.26.11.233', // Jupiter Quote Fallback
-        'price.jup.ag': '104.26.10.233', // Jupiter Price API
         '1.1.1.1': '1.1.1.1',
         '8.8.8.8': '8.8.8.8',
+    };
+    private readonly fallbackApiIps: Record<string, string> = {
+        'api.jup.ag': '18.239.105.107',
+        'quote-api.jup.ag': '104.26.11.233',
+        'price.jup.ag': '104.26.10.233',
     };
 
     constructor(
@@ -171,9 +173,6 @@ export class TradeService implements OnModuleInit {
             this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
         this.connection = new Connection(rpcEndpoint, 'confirmed');
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
-        this.wallet = Keypair.fromSecretKey(
-            bs58.decode(this.configService.get<string>('PRIVATE_KEY') || ''),
-        );
 
         // CONFIG BUDGET (Updated by Amirull)
         this.totalCapital = Number.parseFloat(
@@ -222,15 +221,35 @@ export class TradeService implements OnModuleInit {
         return this.moduleRef.get(ReportingService, { strict: false });
     }
 
+    private getWallet(): Keypair {
+        if (this.wallet) return this.wallet;
+
+        const privateKeyString = this.configService.get<string>('PRIVATE_KEY') || '';
+        if (!privateKeyString || privateKeyString.includes('your-wallet-private-key')) {
+            throw new Error('PRIVATE_KEY is required for live wallet operations.');
+        }
+
+        try {
+            this.wallet = Keypair.fromSecretKey(bs58.decode(privateKeyString));
+            this.logger.log(`Wallet loaded: ${this.wallet.publicKey.toBase58()}`);
+            return this.wallet;
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            throw new Error(`Failed to decode PRIVATE_KEY: ${msg}`);
+        }
+    }
+
     async onModuleInit() {
-        if (this.wallet && this.connection) {
+        if (this.connection && !this.isDryRun) {
             try {
-                const balance = await this.connection.getBalance(this.wallet.publicKey);
+                const wallet = this.getWallet();
+                const balance = await this.connection.getBalance(wallet.publicKey);
                 const solBalance = balance / 1_000_000_000;
                 this.logger.log(`💰 Current Balance: ${solBalance.toFixed(4)} SOL`);
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
                 this.logger.error(`Failed to fetch wallet balance: ${message}`);
+                throw error;
             }
 
             // 🚀 JITO TIP ACCOUNTS: Fetch Jito tip accounts on startup
@@ -239,6 +258,8 @@ export class TradeService implements OnModuleInit {
             // 🚀 RESUME MONITORING: Pantau lagi koin yang masih nyangkut/open
             await this.startMonitoringAllTrades();
             await this.preloadOpenTradeDecimals();
+        } else if (this.isDryRun) {
+            this.logger.log('[DRY_RUN] Wallet loading skipped. Quotes/signals can run without PRIVATE_KEY.');
         }
     }
 
@@ -448,6 +469,12 @@ export class TradeService implements OnModuleInit {
             // Silence DNS errors
         }
 
+        const fallbackIp = this.fallbackApiIps[hostname];
+        if (fallbackIp) {
+            this.logger.warn(`[DNS] Falling back to temporary pinned IP for ${hostname}: ${fallbackIp}`);
+            return fallbackIp;
+        }
+
         return null;
     }
 
@@ -649,7 +676,8 @@ export class TradeService implements OnModuleInit {
                 };
             }
 
-            const balanceLamports = await this.connection.getBalance(this.wallet.publicKey);
+            const wallet = this.getWallet();
+            const balanceLamports = await this.connection.getBalance(wallet.publicKey);
             const balanceSol = balanceLamports / 1_000_000_000;
             const reserveSol = this.reserveAmount / solPrice;
             const totalRequiredSol = executionPayload.amountSol + reserveSol + 0.005;
@@ -793,7 +821,7 @@ export class TradeService implements OnModuleInit {
                 );
             } else {
                 const fetchedBalance = await this.getTokenBalance(
-                    this.wallet.publicKey.toBase58(),
+                    this.getWallet().publicKey.toBase58(),
                     trade.tokenMint,
                 );
                 if (fetchedBalance === null) {
@@ -896,10 +924,15 @@ export class TradeService implements OnModuleInit {
                         },
                     });
                 } else {
+                    const remainingEntryValueUsd =
+                        trade.entryValueUsd !== null && trade.entryValueUsd !== undefined
+                            ? trade.entryValueUsd * (1 - percentage)
+                            : undefined;
                     await this.prismaService.trade.update({
                         where: { id: tradeId },
                         data: {
                             amountInSol: trade.amountInSol * (1 - percentage),
+                            entryValueUsd: remainingEntryValueUsd,
                             partialTakeProfitAt:
                                 exitReason === 'PARTIAL_TAKE_PROFIT'
                                     ? new Date()
@@ -1205,7 +1238,7 @@ export class TradeService implements OnModuleInit {
                 `${baseUrl}/swap/v1/swap`,
                 {
                     quoteResponse: quoteData,
-                    userPublicKey: this.wallet.publicKey.toString(),
+                    userPublicKey: this.getWallet().publicKey.toString(),
                     wrapAndUnwrapSol: true,
                     dynamicComputeUnitLimit: true,
                     prioritizationFeeLamports: feeConfig,
@@ -1216,7 +1249,7 @@ export class TradeService implements OnModuleInit {
             const transaction = VersionedTransaction.deserialize(
                 Buffer.from(swapResponse.data.swapTransaction, 'base64'),
             );
-            transaction.sign([this.wallet]);
+            transaction.sign([this.getWallet()]);
 
             let txid = '';
 
@@ -1225,11 +1258,11 @@ export class TradeService implements OnModuleInit {
                 const tipLamports = Math.floor(jitoTipSol * 1_000_000_000);
 
                 const tx2Message = new TransactionMessage({
-                    payerKey: this.wallet.publicKey,
+                    payerKey: this.getWallet().publicKey,
                     recentBlockhash: transaction.message.recentBlockhash,
                     instructions: [
                         SystemProgram.transfer({
-                            fromPubkey: this.wallet.publicKey,
+                            fromPubkey: this.getWallet().publicKey,
                             toPubkey: new PublicKey(randomTipAccount),
                             lamports: tipLamports,
                         }),
@@ -1237,7 +1270,7 @@ export class TradeService implements OnModuleInit {
                 }).compileToV0Message();
 
                 const tx2 = new VersionedTransaction(tx2Message);
-                tx2.sign([this.wallet]);
+                tx2.sign([this.getWallet()]);
 
                 const tx1Base58 = bs58.encode(transaction.serialize());
                 const tx2Base58 = bs58.encode(tx2.serialize());
@@ -1316,7 +1349,7 @@ export class TradeService implements OnModuleInit {
             try {
                 const actualSwap = await this.getActualSwapDetails(
                     txid,
-                    this.wallet.publicKey.toBase58(),
+                    this.getWallet().publicKey.toBase58(),
                     side === 'BUY' ? outputMint : inputMint,
                 );
                 if (actualSwap) {
@@ -1651,7 +1684,7 @@ export class TradeService implements OnModuleInit {
         } else {
             // Manual sell for token not in DB
             const actualBalance = await this.getTokenBalance(
-                this.wallet.publicKey.toBase58(),
+                this.getWallet().publicKey.toBase58(),
                 tokenMint,
             );
             if (actualBalance === null || actualBalance <= 0)
@@ -1683,7 +1716,7 @@ export class TradeService implements OnModuleInit {
         try {
             const { PublicKey } = await import('@solana/web3.js');
             const accounts = await this.connection.getParsedTokenAccountsByOwner(
-                this.wallet.publicKey,
+                this.getWallet().publicKey,
                 { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') },
             );
 

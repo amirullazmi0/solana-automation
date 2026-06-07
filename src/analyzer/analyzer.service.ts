@@ -163,7 +163,14 @@ export class AnalyzerService {
                         sells5mCount: traction.sells5m || 0,
                         priceChange1hPct: traction.priceChange1h || 0,
                         isPumpFun: traction.isPumpFun || false,
-                        creatorHoldPct: rugResult.isCTO ? 0 : undefined,
+                        rugcheckScore: rugResult.rugcheckScore,
+                        dangerRisksCount: rugResult.dangerRisksCount,
+                        creatorHoldPct: rugResult.creatorHoldPct,
+                        top10HolderPct: rugResult.top10HolderPct,
+                        safetyIndex: rugResult.safetyIndex,
+                        volumeSurge: traction.volumeSurge,
+                        volScore: traction.volScore,
+                        zScore: traction.zScore,
                     },
                 );
 
@@ -734,6 +741,10 @@ export class AnalyzerService {
         topHolder?: string;
         reason?: string;
         safetyIndex?: number;
+        rugcheckScore?: number;
+        dangerRisksCount?: number;
+        creatorHoldPct?: number;
+        top10HolderPct?: number;
         permanent?: boolean;
         isCTO?: boolean;
     }> {
@@ -914,6 +925,10 @@ export class AnalyzerService {
                 creator: response.data.creator,
                 topHolder: topHolders[0]?.address,
                 safetyIndex,
+                rugcheckScore: score,
+                dangerRisksCount: highRisks.length,
+                creatorHoldPct: creatorPct,
+                top10HolderPct: top10SumPct,
                 isCTO,
             };
         } catch (error) {

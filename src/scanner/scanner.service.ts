@@ -30,9 +30,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
     // Cache for resolved IPs
     private ipCache: Record<string, string> = {
-        'api.dexscreener.com': '104.26.13.233', // DexScreener API
         '1.1.1.1': '1.1.1.1',
         '8.8.8.8': '8.8.8.8',
+    };
+    private readonly fallbackApiIps: Record<string, string> = {
+        'api.dexscreener.com': '104.26.13.233',
     };
 
     constructor(
@@ -808,6 +810,12 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             }
         } catch {
             // Silence DNS errors
+        }
+
+        const fallbackIp = this.fallbackApiIps[hostname];
+        if (fallbackIp) {
+            this.logger.warn(`[DNS] Falling back to temporary pinned IP for ${hostname}: ${fallbackIp}`);
+            return fallbackIp;
         }
 
         return null;

@@ -53,6 +53,41 @@ export class AIService {
         }
     }
 
+    private normalizeAnalysisResult(
+        parsed: Partial<AIAnalysisResult>,
+        thresholds: AIThresholdSnapshot,
+    ): AIAnalysisResult {
+        const score = Number(parsed.cuanConvictionScore);
+        const predictedPump = Number(parsed.predictedPumpPercentage);
+        const confidenceLevel = ['high', 'medium', 'low'].includes(
+            parsed.confidenceLevel || '',
+        )
+            ? (parsed.confidenceLevel as AIAnalysisResult['confidenceLevel'])
+            : 'low';
+        const action = parsed.action === 'buy' || parsed.action === 'skip' ? parsed.action : 'skip';
+
+        const result: AIAnalysisResult = {
+            cuanConvictionScore: Number.isFinite(score)
+                ? Math.min(Math.max(score, 0), 100)
+                : 0,
+            predictedPumpPercentage: Number.isFinite(predictedPump)
+                ? Math.max(predictedPump, 0)
+                : 0,
+            confidenceLevel,
+            reasoning:
+                typeof parsed.reasoning === 'string' && parsed.reasoning.trim().length > 0
+                    ? parsed.reasoning.trim().slice(0, 500)
+                    : 'No reasoning provided.',
+            action,
+        };
+
+        if (result.cuanConvictionScore < thresholds.aiConvictionThreshold) {
+            result.action = 'skip';
+        }
+
+        return result;
+    }
+
     private getThresholdSnapshot(): AIThresholdSnapshot {
         const disableSlPatience =
             this.configService.get<string>('DISABLE_SL_PATIENCE', 'false') === 'true';
@@ -191,6 +226,11 @@ Token Metrics:
 - RugCheck Score: ${metrics.rugcheckScore ?? 'Unknown'}
 - Danger Risks Count: ${metrics.dangerRisksCount ?? 0}
 - Creator Holding: ${metrics.creatorHoldPct !== undefined ? `${metrics.creatorHoldPct.toFixed(2)}%` : 'Unknown'}
+- Top 10 Holder Concentration: ${metrics.top10HolderPct !== undefined ? `${metrics.top10HolderPct.toFixed(2)}%` : 'Unknown'}
+- Safety Index: ${metrics.safetyIndex !== undefined ? metrics.safetyIndex.toFixed(4) : 'Unknown'}
+- Volume Surge: ${metrics.volumeSurge !== undefined ? `${metrics.volumeSurge.toFixed(2)}x` : 'Unknown'}
+- VoL Score: ${metrics.volScore !== undefined ? metrics.volScore.toFixed(4) : 'Unknown'}
+- Volume Z-Score: ${metrics.zScore !== undefined ? metrics.zScore.toFixed(2) : 'Unknown'}
 - Derived Buy Confidence: ${this.calculateBuyConfidence(metrics).toFixed(4)}
 - Derived Volume/MCap Ratio: ${this.calculateRatio(metrics.volume5mUsd, metrics.marketCapUsd).toFixed(4)}
 - Derived Volume/Liquidity Ratio: ${this.calculateRatio(metrics.volume5mUsd, metrics.liquidityUsd).toFixed(4)}
@@ -222,23 +262,8 @@ Evaluate against the live thresholds above and return the JSON decision.`;
                 throw new Error('Empty response from AI completions');
             }
 
-            const parsed = JSON.parse(content) as AIAnalysisResult;
-
-            // Validate output types to avoid typescript runtime surprises
-            const result: AIAnalysisResult = {
-                cuanConvictionScore: Number(parsed.cuanConvictionScore) || 0,
-                predictedPumpPercentage: Number(parsed.predictedPumpPercentage) || 0,
-                confidenceLevel: ['high', 'medium', 'low'].includes(parsed.confidenceLevel)
-                    ? parsed.confidenceLevel
-                    : 'low',
-                reasoning: parsed.reasoning || 'No reasoning provided.',
-                action: ['buy', 'skip'].includes(parsed.action) ? parsed.action : 'skip',
-            };
-
-            // Double check rule 1 constraint
-            if (result.cuanConvictionScore < thresholds.aiConvictionThreshold) {
-                result.action = 'skip';
-            }
+            const parsed = JSON.parse(content) as Partial<AIAnalysisResult>;
+            const result = this.normalizeAnalysisResult(parsed, thresholds);
 
             // Save to cache
             this.cache.set(tokenMint, {

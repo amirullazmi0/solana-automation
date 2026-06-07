@@ -10,6 +10,11 @@ export interface AIAnalysisMetrics {
     rugcheckScore?: number;
     dangerRisksCount?: number;
     creatorHoldPct?: number;
+    top10HolderPct?: number;
+    safetyIndex?: number;
+    volumeSurge?: number;
+    volScore?: number;
+    zScore?: number;
 }
 
 export interface AIAnalysisResult {
@@ -65,4 +70,3 @@ export interface OpenAIChatChoice {
 export interface OpenAIChatCompletionResponse {
     choices?: OpenAIChatChoice[];
 }
-
