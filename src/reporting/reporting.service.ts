@@ -17,6 +17,7 @@ export class ReportingService implements OnModuleInit {
     private readonly logger = new Logger(ReportingService.name);
     private readonly bot: TelegramBot;
     private readonly chatId: string;
+    private readonly chatIds: string[];
     private readonly connection: Connection;
     private readonly isDryRun: boolean;
     private readonly httpsAgent: https.Agent;
@@ -34,6 +35,7 @@ export class ReportingService implements OnModuleInit {
     ) {
         const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
         this.chatId = this.configService.get<string>('TELEGRAM_CHAT_ID') || '';
+        this.chatIds = this.resolveTelegramChatIds();
         this.isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
 
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
@@ -75,6 +77,20 @@ export class ReportingService implements OnModuleInit {
         });
     }
 
+    private resolveTelegramChatIds(): string[] {
+        const multiChatIds = this.configService.get<string>('TELEGRAM_CHAT_IDS') || '';
+        const configuredChatIds = multiChatIds || this.chatId;
+
+        return Array.from(
+            new Set(
+                configuredChatIds
+                    .split(',')
+                    .map((id) => id.trim())
+                    .filter(Boolean),
+            ),
+        );
+    }
+
     onModuleInit() {
         if (this.bot) {
             this.setupBotListeners();
@@ -88,11 +104,20 @@ export class ReportingService implements OnModuleInit {
 
             if (!text) return;
 
-            if (text === '/start' || text === '/help') {
+            const chatName = 'title' in msg.chat ? msg.chat.title : msg.chat.username;
+            this.logger.log(
+                `Telegram update from chat ${incomingChatId} (${msg.chat.type}${chatName ? `: ${chatName}` : ''})`,
+            );
+
+            const command = text.split(/\s+/)[0].split('@')[0].toLowerCase();
+
+            if (command === '/start' || command === '/help') {
                 await this.sendMainMenu(incomingChatId);
-            } else if (text === '/status' || text === 'Status') {
+            } else if (command === '/chatid' || command === '/id') {
+                await this.handleChatIdRequest(msg, incomingChatId);
+            } else if (command === '/status' || text.toLowerCase() === 'status') {
                 await this.handleStatusRequest(incomingChatId);
-            } else if (text === 'Watchlist') {
+            } else if (text.toLowerCase() === 'watchlist') {
                 await this.handleWatchlistRequest(incomingChatId);
             } else if (this.isSolanaAddress(text)) {
                 await this.handleTokenInput(text, incomingChatId);
@@ -106,6 +131,16 @@ export class ReportingService implements OnModuleInit {
 
     private isSolanaAddress(text: string): boolean {
         return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
+    }
+
+    private async handleChatIdRequest(msg: TelegramBot.Message, targetChatId: string) {
+        const chatName = 'title' in msg.chat ? msg.chat.title : msg.chat.username || 'private';
+        await this.sendMessage(
+            `Chat ID: \`${targetChatId}\`\nType: \`${msg.chat.type}\`\nName: \`${chatName}\``,
+            {},
+            0,
+            targetChatId,
+        );
     }
 
     private async sendMainMenu(targetChatId?: string) {
@@ -140,7 +175,7 @@ export class ReportingService implements OnModuleInit {
         }
 
         await this.sendMessage(
-            `*Menampilkan ${pendingWatchlist.length} token di Watchlist...*`,
+            `*WATCHLIST RADAR*\nMenampilkan ${pendingWatchlist.length} token yang sedang dipantau.`,
             {},
             0,
             targetChatId,
@@ -148,9 +183,31 @@ export class ReportingService implements OnModuleInit {
 
         for (const item of pendingWatchlist) {
             const symbol = item.symbol || 'UNKNOWN';
-            let msg = `*${symbol}*\n`;
-            msg += `Mint: \`${item.tokenMint}\`\n`;
-            msg += `MCap: \`$${item.mcap?.toLocaleString() || 'N/A'}\` | Surge: \`${item.volumeSurge?.toFixed(1) || 'N/A'}x\`\n`;
+            const ageSource = item.pairCreatedAt || item.createdAt;
+            const ageHours = Math.max(
+                (Date.now() - new Date(ageSource).getTime()) / (1000 * 60 * 60),
+                0,
+            );
+            const title = item.isPumpFun ? '*CTO CANDIDATE DETECTED*' : '*SECOND-WAVE RADAR*';
+            const mcapDisplay =
+                typeof item.mcap === 'number' ? `$${item.mcap.toLocaleString()}` : 'N/A';
+            const liquidityDisplay =
+                typeof item.liquidity === 'number' ? `$${item.liquidity.toLocaleString()}` : 'N/A';
+            const surgeDisplay =
+                typeof item.volumeSurge === 'number' ? `${item.volumeSurge.toFixed(2)}x` : 'N/A';
+            const volDisplay = typeof item.volScore === 'number' ? item.volScore.toFixed(4) : 'N/A';
+            const zDisplay = typeof item.zScore === 'number' ? item.zScore.toFixed(2) : 'N/A';
+
+            const msg =
+                `${title}\n` +
+                `Token: ${symbol}\n` +
+                `Mint: \`${item.tokenMint}\`\n\n` +
+                `MCap: \`${mcapDisplay}\`\n` +
+                `Liquidity: \`${liquidityDisplay}\`\n` +
+                `Surge: \`${surgeDisplay}\`\n` +
+                `VoL: \`${volDisplay}\` | Z: \`${zDisplay}\`\n` +
+                `Age: \`${ageHours.toFixed(2)}h\`\n\n` +
+                `Status: \`MONITORING...\``;
 
             const buttons: TelegramBot.InlineKeyboardButton[][] = [
                 [
@@ -159,6 +216,10 @@ export class ReportingService implements OnModuleInit {
                         text: 'DexScreener',
                         url: `https://dexscreener.com/solana/${item.tokenMint}`,
                     },
+                ],
+                [
+                    { text: 'RugCheck', url: `https://rugcheck.xyz/tokens/${item.tokenMint}` },
+                    { text: 'Solscan', url: `https://solscan.io/token/${item.tokenMint}` },
                 ],
             ];
 
@@ -664,36 +725,48 @@ export class ReportingService implements OnModuleInit {
         retryCount = 0,
         targetChatId?: string,
     ) {
-        const destinationChatId = targetChatId || this.chatId;
+        const destinationChatIds = targetChatId ? [targetChatId] : this.chatIds;
 
-        if (this.bot && destinationChatId) {
-            try {
-                await this.bot.sendMessage(destinationChatId, message, {
-                    parse_mode: 'Markdown',
-                    ...options,
-                });
-            } catch (error) {
-                const errorMsg = error instanceof Error ? error.message : String(error);
-
-                // 🔄 RETRY LOGIC: Kalau socket hang up atau timeout, coba lagi sampe 3x
-                if (
-                    retryCount < 3 &&
-                    (errorMsg.includes('socket hang up') ||
-                        errorMsg.includes('ECONNRESET') ||
-                        errorMsg.includes('ETIMEDOUT'))
-                ) {
-                    const delay = (retryCount + 1) * 2000;
-                    this.logger.warn(
-                        `Telegram send failed (${errorMsg}). Retrying in ${delay}ms... (Attempt ${retryCount + 1}/3)`,
-                    );
-                    await new Promise((res) => setTimeout(res, delay));
-                    return this.sendMessage(message, options, retryCount + 1, targetChatId);
-                }
-
-                this.logger.error(`Failed to send telegram message after retries: ${errorMsg}`);
+        if (this.bot && destinationChatIds.length > 0) {
+            for (const destinationChatId of destinationChatIds) {
+                await this.sendMessageToChat(destinationChatId, message, options, retryCount);
             }
         } else {
             this.logger.log(`[ALERT]: ${message.replace(/\n/g, ' | ')}`);
+        }
+    }
+
+    private async sendMessageToChat(
+        destinationChatId: string,
+        message: string,
+        options: TelegramBot.SendMessageOptions,
+        retryCount = 0,
+    ) {
+        try {
+            await this.bot.sendMessage(destinationChatId, message, {
+                parse_mode: 'Markdown',
+                ...options,
+            });
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+
+            if (
+                retryCount < 3 &&
+                (errorMsg.includes('socket hang up') ||
+                    errorMsg.includes('ECONNRESET') ||
+                    errorMsg.includes('ETIMEDOUT'))
+            ) {
+                const delay = (retryCount + 1) * 2000;
+                this.logger.warn(
+                    `Telegram send failed (${errorMsg}). Retrying in ${delay}ms... (Attempt ${retryCount + 1}/3)`,
+                );
+                await new Promise((res) => setTimeout(res, delay));
+                return this.sendMessageToChat(destinationChatId, message, options, retryCount + 1);
+            }
+
+            this.logger.error(
+                `Failed to send telegram message to chat ${destinationChatId} after retries: ${errorMsg}`,
+            );
         }
     }
 
