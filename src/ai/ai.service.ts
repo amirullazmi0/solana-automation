@@ -1,14 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
-
-export interface AIAnalysisResult {
-    cuanConvictionScore: number;
-    predictedPumpPercentage: number;
-    confidenceLevel: 'high' | 'medium' | 'low';
-    reasoning: string;
-    action: 'buy' | 'skip';
-}
+import {
+    AIAnalysisMetrics,
+    AIAnalysisResult,
+    AIThresholdSnapshot,
+    OpenAIChatCompletionResponse,
+} from '../dto/ai.dto';
 
 interface CacheEntry {
     result: AIAnalysisResult;
@@ -23,22 +21,81 @@ export class AIService {
 
     constructor(private readonly configService: ConfigService) {}
 
+    private getNumberConfig(key: string, fallback: number): number {
+        const value = Number.parseFloat(this.configService.get<string>(key, String(fallback)));
+        return Number.isFinite(value) ? value : fallback;
+    }
+
+    private getIntegerConfig(key: string, fallback: number): number {
+        const value = Number.parseInt(this.configService.get<string>(key, String(fallback)), 10);
+        return Number.isFinite(value) ? value : fallback;
+    }
+
+    private calculateRatio(numerator: number, denominator: number): number {
+        try {
+            if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+                return 0;
+            }
+
+            return numerator / denominator;
+        } catch {
+            return 0;
+        }
+    }
+
+    private calculateBuyConfidence(metrics: AIAnalysisMetrics): number {
+        try {
+            const totalTx = metrics.buys5mCount + metrics.sells5mCount;
+            if (totalTx <= 0) return 0;
+            return metrics.buys5mCount / totalTx;
+        } catch {
+            return 0;
+        }
+    }
+
+    private getThresholdSnapshot(): AIThresholdSnapshot {
+        const disableSlPatience =
+            this.configService.get<string>('DISABLE_SL_PATIENCE', 'false') === 'true';
+
+        return {
+            botMode: this.configService.get<string>('BOT_MODE', 'micin'),
+            dryRun: this.configService.get<string>('DRY_RUN', 'true') === 'true',
+            aiConvictionThreshold: this.getNumberConfig('AI_CONVICTION_THRESHOLD', 75),
+            minLiquidityUsd: this.getNumberConfig('MIN_LIQUIDITY_USD', 7500),
+            minVolumeUsd: this.getNumberConfig('MIN_VOLUME_USD', 500),
+            minBuyCount: this.getIntegerConfig('MIN_BUY_COUNT', 5),
+            minMarketCapUsd: this.getNumberConfig('MIN_MCAP', 5000),
+            maxMarketCapUsd: this.getNumberConfig('MAX_MCAP', 300000),
+            minAgeHours: this.getNumberConfig('MIN_AGE_HOURS', 0.02),
+            maxAgeHours: this.getNumberConfig('MAX_AGE_HOURS', 24),
+            minBuyConfidence: this.getNumberConfig('MIN_BUY_CONFIDENCE', 0.6),
+            minVolumeMarketCapRatio: this.getNumberConfig('MIN_VOLUME_MCAP_RATIO', 0.05),
+            minVolumeLiquidityRatio: this.getNumberConfig('MIN_VL_RATIO', 0),
+            minVolScore: this.getNumberConfig('ANALYZER_MIN_VOL_SCORE', 0.02),
+            minZScore: this.getNumberConfig('ANALYZER_MIN_Z_SCORE', 1.5),
+            minVolumeSurge: this.getNumberConfig('ANALYZER_MIN_VOLUME_SURGE', 1.5),
+            rugcheckMinSafetyIndex: this.getNumberConfig('RUGCHECK_MIN_SAFETY_INDEX', 0.8),
+            maxRugcheckScore: 1000,
+            takeProfitPercent: this.getNumberConfig('TAKE_PROFIT_PERCENT', 30),
+            stopLossPercent: this.getNumberConfig('STOP_LOSS_PERCENT', 25),
+            trailingDistancePercent: this.getNumberConfig('TRAILING_DISTANCE_PERCENT', 5),
+            hardCrashPercent: 55,
+            slPatienceEnabled: !disableSlPatience,
+            totalCapitalUsd: this.getNumberConfig('TOTAL_CAPITAL', 20),
+            reserveAmountUsd: this.getNumberConfig('RESERVE_AMOUNT', 8),
+            positionSizeUsd: this.getNumberConfig('POSITION_SIZE_USD', 3),
+            totalSlots: this.getIntegerConfig('TOTAL_SLOTS', 4),
+            slippageBps: this.getIntegerConfig('SLIPPAGE_BPS', 100),
+            maxPriceImpactPercent: this.getNumberConfig('MAX_PRICE_IMPACT_PCT', 15),
+            cooldownWinHours: this.getNumberConfig('COOLDOWN_WIN_HOURS', 6),
+            cooldownLossHours: this.getNumberConfig('COOLDOWN_LOSS_HOURS', 24),
+        };
+    }
+
     async analyzeToken(
         tokenMint: string,
         symbol: string,
-        metrics: {
-            ageHours: number;
-            liquidityUsd: number;
-            marketCapUsd: number;
-            volume5mUsd: number;
-            buys5mCount: number;
-            sells5mCount: number;
-            priceChange1hPct: number;
-            isPumpFun: boolean;
-            rugcheckScore?: number;
-            dangerRisksCount?: number;
-            creatorHoldPct?: number;
-        },
+        metrics: AIAnalysisMetrics,
     ): Promise<AIAnalysisResult> {
         // 1. Check cache
         const cached = this.cache.get(tokenMint);
@@ -61,14 +118,17 @@ export class AIService {
 
         const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
         const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
+        const thresholds = this.getThresholdSnapshot();
 
         this.logger.log(
             `🧠 Calling AI Model (${model}) to analyze token $${symbol} (${tokenMint})...`,
         );
 
         try {
-            const systemPrompt = `You are an expert Solana on-chain analyst and quantitative memecoin trader. Your job is to evaluate if a token is highly likely to pump ("cuan") or if it is a rug/scam/dump.
-Analyze the provided metrics and return a JSON object with the following fields:
+            const systemPrompt = `You are MaSoul Sniper's AI Conviction Engine, an expert Solana on-chain analyst and quantitative memecoin trader.
+You are NOT the primary filter. The deterministic NestJS filters already ran before this call. Your job is the final sanity-check and conviction score using the live .env thresholds below.
+
+Return a JSON object with exactly these fields:
 {
   "cuanConvictionScore": <number between 0 and 100 representing your conviction level>,
   "predictedPumpPercentage": <estimated percentage pump potential, e.g. 20, 50, 150>,
@@ -76,11 +136,46 @@ Analyze the provided metrics and return a JSON object with the following fields:
   "reasoning": "<brief indonesian explanation of why it is cuan or skip, max 2 sentences>",
   "action": "buy" | "skip"
 }
-Rules:
-1. "action" must only be "buy" if "cuanConvictionScore" is >= 75. Otherwise, "action" must be "skip".
-2. If liquidity is low (< $7500) or RugCheck danger risks are high, conviction must be very low.
-3. Be highly objective. Most memecoins are scams. Only rate high if volume, buy/sell ratio, and support consolidation look solid.
-4. Output MUST be a valid JSON object matching the schema. Do not output markdown wrappers.`;
+Live .env thresholds and mode:
+- BOT_MODE=${thresholds.botMode}
+- DRY_RUN=${thresholds.dryRun}
+- AI_CONVICTION_THRESHOLD=${thresholds.aiConvictionThreshold}
+- MIN_LIQUIDITY_USD=${thresholds.minLiquidityUsd}
+- MIN_VOLUME_USD=${thresholds.minVolumeUsd}
+- MIN_BUY_COUNT=${thresholds.minBuyCount}
+- MIN_MCAP=${thresholds.minMarketCapUsd}
+- MAX_MCAP=${thresholds.maxMarketCapUsd}
+- MIN_AGE_HOURS=${thresholds.minAgeHours}
+- MAX_AGE_HOURS=${thresholds.maxAgeHours}
+- MIN_BUY_CONFIDENCE=${thresholds.minBuyConfidence}
+- MIN_VOLUME_MCAP_RATIO=${thresholds.minVolumeMarketCapRatio}
+- MIN_VL_RATIO=${thresholds.minVolumeLiquidityRatio}
+- ANALYZER_MIN_VOL_SCORE=${thresholds.minVolScore}
+- ANALYZER_MIN_Z_SCORE=${thresholds.minZScore}
+- ANALYZER_MIN_VOLUME_SURGE=${thresholds.minVolumeSurge}
+- RUGCHECK_MIN_SAFETY_INDEX=${thresholds.rugcheckMinSafetyIndex}
+- MAX_RUGCHECK_SCORE=${thresholds.maxRugcheckScore}
+- TAKE_PROFIT_PERCENT=${thresholds.takeProfitPercent}
+- STOP_LOSS_PERCENT=${thresholds.stopLossPercent}
+- TRAILING_DISTANCE_PERCENT=${thresholds.trailingDistancePercent}
+- HARD_CRASH_PERCENT=${thresholds.hardCrashPercent}
+- SL_PATIENCE_ENABLED=${thresholds.slPatienceEnabled}
+- TOTAL_CAPITAL=${thresholds.totalCapitalUsd}
+- RESERVE_AMOUNT=${thresholds.reserveAmountUsd}
+- POSITION_SIZE_USD=${thresholds.positionSizeUsd}
+- TOTAL_SLOTS=${thresholds.totalSlots}
+- SLIPPAGE_BPS=${thresholds.slippageBps}
+- MAX_PRICE_IMPACT_PCT=${thresholds.maxPriceImpactPercent}
+- COOLDOWN_WIN_HOURS=${thresholds.cooldownWinHours}
+- COOLDOWN_LOSS_HOURS=${thresholds.cooldownLossHours}
+
+Decision rules:
+1. "action" must only be "buy" if "cuanConvictionScore" is >= AI_CONVICTION_THRESHOLD. Otherwise use "skip".
+2. If liquidity, volume, buy count, market cap, age, or buy confidence are below the live thresholds, strongly penalize conviction even if momentum looks attractive.
+3. If RugCheck score is above ${thresholds.maxRugcheckScore}, danger risks count is above 0, or creator holding is above 5%, conviction must be very low.
+4. For DRY_RUN=true, still judge as if this were a real trade. Do not become more permissive because it is simulation mode.
+5. Prefer "buy" only when volume, buyer dominance, liquidity, market cap, age, and risk profile are all coherent with BOT_MODE=${thresholds.botMode}.
+6. Be highly objective. Most memecoins are scams. Output only valid JSON; no markdown wrappers.`;
 
             const userPrompt = `Token Symbol: $${symbol}
 Mint Address: ${tokenMint}
@@ -96,10 +191,13 @@ Token Metrics:
 - RugCheck Score: ${metrics.rugcheckScore ?? 'Unknown'}
 - Danger Risks Count: ${metrics.dangerRisksCount ?? 0}
 - Creator Holding: ${metrics.creatorHoldPct !== undefined ? `${metrics.creatorHoldPct.toFixed(2)}%` : 'Unknown'}
+- Derived Buy Confidence: ${this.calculateBuyConfidence(metrics).toFixed(4)}
+- Derived Volume/MCap Ratio: ${this.calculateRatio(metrics.volume5mUsd, metrics.marketCapUsd).toFixed(4)}
+- Derived Volume/Liquidity Ratio: ${this.calculateRatio(metrics.volume5mUsd, metrics.liquidityUsd).toFixed(4)}
 
-Please evaluate.`;
+Evaluate against the live thresholds above and return the JSON decision.`;
 
-            const response = await axios.post(
+            const response = await axios.post<OpenAIChatCompletionResponse>(
                 `${baseUrl}/chat/completions`,
                 {
                     model,
@@ -119,7 +217,7 @@ Please evaluate.`;
                 },
             );
 
-            const content = response.data?.choices?.[0]?.message?.content;
+            const content = response.data.choices?.[0]?.message?.content;
             if (!content) {
                 throw new Error('Empty response from AI completions');
             }
@@ -138,7 +236,7 @@ Please evaluate.`;
             };
 
             // Double check rule 1 constraint
-            if (result.cuanConvictionScore < 75) {
+            if (result.cuanConvictionScore < thresholds.aiConvictionThreshold) {
                 result.action = 'skip';
             }
 
