@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, Res, HttpStatus, Logger } from '@nestjs/common';
+import { Controller, Get, Param, Query, Res, HttpStatus, Logger, Headers } from '@nestjs/common';
 import { AppService } from './app.service';
 import { TradeService } from './trade/trade.service';
 import { AnalyzerService } from './analyzer/analyzer.service';
@@ -30,14 +30,14 @@ export class AppController {
     async manualBuy(
         @Param('mint') tokenMint: string,
         @Query('force') force: string,
-        @Query('key') apiKey: string,
+        @Headers('x-api-key') apiKey: string,
         @Res() res: Response,
     ) {
         try {
             // 🛡️ API KEY GUARD: Prevent unauthorized access
             if (!this.apiSecretKey || apiKey !== this.apiSecretKey) {
                 return res.status(HttpStatus.UNAUTHORIZED).json({
-                    message: 'Unauthorized. Provide valid API key via ?key=YOUR_KEY',
+                    message: 'Unauthorized. Provide valid API key via x-api-key header',
                 });
             }
 
