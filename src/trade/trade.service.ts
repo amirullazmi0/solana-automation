@@ -1250,12 +1250,16 @@ export class TradeService implements OnModuleInit {
                 Buffer.from(swapResponse.data.swapTransaction, 'base64'),
             );
             transaction.sign([this.getWallet()]);
+            const confirmationBlockhash = transaction.message.recentBlockhash;
+            const swapLastValidBlockHeight = Number(swapResponse.data?.lastValidBlockHeight);
+            const hasSwapLastValidBlockHeight =
+                Number.isFinite(swapLastValidBlockHeight) && swapLastValidBlockHeight > 0;
+            const jitoTipLamports = useJito ? Math.floor(jitoTipSol * 1_000_000_000) : 0;
 
             let txid = '';
 
             if (useJito) {
                 const randomTipAccount = await this.getJitoTipAccount();
-                const tipLamports = Math.floor(jitoTipSol * 1_000_000_000);
 
                 const tx2Message = new TransactionMessage({
                     payerKey: this.getWallet().publicKey,
@@ -1264,7 +1268,7 @@ export class TradeService implements OnModuleInit {
                         SystemProgram.transfer({
                             fromPubkey: this.getWallet().publicKey,
                             toPubkey: new PublicKey(randomTipAccount),
-                            lamports: tipLamports,
+                            lamports: jitoTipLamports,
                         }),
                     ],
                 }).compileToV0Message();
@@ -1286,7 +1290,7 @@ export class TradeService implements OnModuleInit {
                             jsonrpc: '2.0',
                             id: 1,
                             method: 'sendBundle',
-                            params: [[tx2Base58, tx1Base58]],
+                            params: [[tx1Base58, tx2Base58]],
                         },
                         { headers: { 'Content-Type': 'application/json' } },
                     );
@@ -1322,12 +1326,15 @@ export class TradeService implements OnModuleInit {
 
             this.logger.log(`[Jupiter] Transaction sent: ${txid}. Waiting confirmation...`);
 
-            const latestBlockhash = await this.connection.getLatestBlockhash('confirmed');
+            const fallbackBlockhash = hasSwapLastValidBlockHeight
+                ? null
+                : await this.connection.getLatestBlockhash('confirmed');
             const confirmation = await this.connection.confirmTransaction(
                 {
                     signature: txid,
-                    blockhash: latestBlockhash.blockhash,
-                    lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+                    blockhash: fallbackBlockhash?.blockhash || confirmationBlockhash,
+                    lastValidBlockHeight:
+                        fallbackBlockhash?.lastValidBlockHeight || swapLastValidBlockHeight,
                 },
                 'confirmed',
             );
@@ -1351,6 +1358,7 @@ export class TradeService implements OnModuleInit {
                     txid,
                     this.getWallet().publicKey.toBase58(),
                     side === 'BUY' ? outputMint : inputMint,
+                    jitoTipLamports,
                 );
                 if (actualSwap) {
                     const solPrice = await this.getSolPrice();
@@ -1424,6 +1432,7 @@ export class TradeService implements OnModuleInit {
         txHash: string,
         wallet: string,
         tokenMint: string,
+        bundleTipLamports = 0,
     ): Promise<{
         solChange: number;
         tokenChange: number;
@@ -1470,23 +1479,17 @@ export class TradeService implements OnModuleInit {
 
         const networkFeeLamports = tx.meta?.fee || 0;
         const rentDeltaLamports = this.calculateRentDelta(tx, walletIndex);
-        const useJito = this.configService.get<string>('USE_JITO') === 'true';
-        const jitoTipLamports = useJito
-            ? Math.floor(
-                  Number.parseFloat(this.configService.get<string>('JITO_TIP_SOL') || '0.0001') *
-                      1_000_000_000,
-              )
-            : 0;
         const { cleanSolAmount, totalFeesSol } = calculateCleanSwapSolAmount(
             rawSolDeltaLamports,
             networkFeeLamports,
             rentDeltaLamports,
-            jitoTipLamports,
+            0,
         );
+        const totalFeesWithBundleTipSol = totalFeesSol + bundleTipLamports / 1_000_000_000;
 
         if (cleanSolAmount === null) {
             this.logger.error(
-                `[SwapDetails] Invalid clean SOL amount. raw=${rawSolDeltaLamports}, feesSol=${totalFeesSol}. Falling back to quote price.`,
+                `[SwapDetails] Invalid clean SOL amount. raw=${rawSolDeltaLamports}, feesSol=${totalFeesWithBundleTipSol}. Falling back to quote price.`,
             );
         }
 
@@ -1494,7 +1497,7 @@ export class TradeService implements OnModuleInit {
             solChange,
             tokenChange,
             cleanSolAmount,
-            totalFeesSol,
+            totalFeesSol: totalFeesWithBundleTipSol,
         };
     }
 
