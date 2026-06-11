@@ -372,5 +372,67 @@ Set via `.env`.
 
 ---
 
+
+---
+
+## Implemented Telegram Features
+
+The current codebase now includes a chat-driven Telegram control plane.
+
+### Wallet and Access Model
+- Each Telegram chat gets its own generated Solana wallet.
+- Wallets are created automatically with `Keypair.generate()`.
+- The raw secret is stored encrypted in the database with AES-256-GCM.
+- `PRIVATE_KEY` is no longer used in the runtime flow.
+- `APP_MODE=development` limits access to the allowlisted chat IDs in `TELEGRAM_CHAT_IDS`.
+- `APP_MODE=production` opens the bot to all chats.
+
+### Chat Settings
+- Per-chat settings are stored in the database.
+- Settings include:
+  - `totalSlots`
+  - `positionSizeUsd`
+  - `slippageOnSol`
+  - `dryRun`
+- Telegram settings now expose buttons for:
+  - total slots
+  - position size presets
+  - slippage presets
+  - `dryRun true`
+  - `dryRun false`
+
+### Telegram UX
+- `/start` creates or loads the wallet for that chat.
+- Main menu buttons:
+  - `Balance`
+  - `Portfolio`
+  - `Settings`
+  - `Win Rate`
+  - `Watchlist`
+- Portfolio cards now include:
+  - `Buy`
+  - `Sell`
+  - `Pump.fun`
+  - `DexScreener`
+- Pasting a mint address in chat shows token details and the same action buttons.
+- Buy menu presets:
+  - `$5`
+  - `$10`
+  - `$15`
+  - `$20`
+- Sell menu presets:
+  - `Sell all`
+  - `75%`
+  - `50%`
+  - `25%`
+- Telegram-facing text is now in English.
+- Button labels include small emoji markers for readability.
+
+### Dry Run Behavior
+- Telegram `dryRun` is stored per chat and controls that chat's buy/sell execution.
+- `DRY_RUN` in `.env` is still used by other services as the global simulation switch.
+- `DRY_RUN=true` keeps signals, portfolio, balance, watchlist, and settings available.
+- Live swaps are skipped when dry run is enabled.
+- `DRY_RUN=false` enables live execution.
 *Last updated: Juni 2026 - MaSoul Sniper Lean Filter V85/V86, Global DTO, Capital Protection, Dynamic Cooldown, Price Monitor Optimizations*
 *Created with ❤️ by Antigravity for Amirull Azmi.*
