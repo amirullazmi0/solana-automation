@@ -94,7 +94,7 @@ export class ReportingService implements OnModuleInit {
             );
 
             const command = text.split(/\s+/)[0].split('@')[0].toLowerCase();
-            const normalizedText = text.trim().toLowerCase();
+            const normalizedText = this.normalizeActionText(text);
 
             if (!this.telegramWorkspace.isChatAllowed(incomingChatId)) {
                 await this.sendMessage(
@@ -120,11 +120,23 @@ export class ReportingService implements OnModuleInit {
                     await this.handleChatIdRequest(msg, incomingChatId);
                 } else if (command === '/balance' || normalizedText === 'balance') {
                     await this.handleBalanceRequest(incomingChatId);
-                } else if (command === '/porto' || normalizedText === 'porto') {
+                } else if (
+                    command === '/porto' ||
+                    normalizedText === 'porto' ||
+                    normalizedText === 'portfolio'
+                ) {
                     await this.handlePortoRequest(incomingChatId);
-                } else if (command === '/setting' || normalizedText === 'setting') {
+                } else if (
+                    command === '/setting' ||
+                    normalizedText === 'setting' ||
+                    normalizedText === 'settings'
+                ) {
                     await this.handleSettingsRequest(incomingChatId);
-                } else if (command === '/winrate' || normalizedText === 'winrate') {
+                } else if (
+                    command === '/winrate' ||
+                    normalizedText === 'winrate' ||
+                    normalizedText === 'winrate'
+                ) {
                     await this.handleWinRateRequest(incomingChatId);
                 } else if (command === '/status' || normalizedText === 'status') {
                     await this.handleStatusRequest(incomingChatId);
@@ -152,6 +164,15 @@ export class ReportingService implements OnModuleInit {
 
     private isSolanaAddress(text: string): boolean {
         return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
+    }
+
+    private normalizeActionText(text: string): string {
+        return text
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
     private async handleChatIdRequest(msg: TelegramBot.Message, targetChatId: string) {
