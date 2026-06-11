@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+Ôªøimport { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
 import { Cron } from '@nestjs/schedule';
@@ -331,7 +331,7 @@ export class ReportingService implements OnModuleInit {
     }
 
     private async sendBuyMenu(mint: string, targetChatId?: string) {
-        const message = `*Choose Buy Amount ($USD):*\nToken: \`${mint}\``;
+        const message = `*Choose Buy Amount ($USD):*\nToken: \`${mint}\`\n\nQuick presets for this position.`;
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
             [
                 { text: '$5', callback_data: `buy_exec:${mint}|5` },
@@ -352,17 +352,16 @@ export class ReportingService implements OnModuleInit {
             targetChatId,
         );
     }
-
     private async sendSellMenu(mint: string, targetChatId?: string) {
-        const message = `*Choose Sell Percentage:*\nToken: \`${mint}\``;
+        const message = `*Choose Sell Percentage:*\nToken: \`${mint}\`\n\nSelect the exit size.`;
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
             [
-                { text: '25%', callback_data: `sell_exec:${mint}|0.25` },
-                { text: '50%', callback_data: `sell_exec:${mint}|0.5` },
+                { text: 'Sell all', callback_data: `sell_exec:${mint}|1.0` },
+                { text: '75%', callback_data: `sell_exec:${mint}|0.75` },
             ],
             [
-                { text: '75%', callback_data: `sell_exec:${mint}|0.75` },
-                { text: '100%', callback_data: `sell_exec:${mint}|1.0` },
+                { text: '50%', callback_data: `sell_exec:${mint}|0.5` },
+                { text: '25%', callback_data: `sell_exec:${mint}|0.25` },
             ],
         ];
 
@@ -375,7 +374,6 @@ export class ReportingService implements OnModuleInit {
             targetChatId,
         );
     }
-
     private async handleBalanceRequest(targetChatId: string) {
         const tradeService = this.moduleRef.get(TradeService, { strict: false });
         const { publicKey, balanceSol, balanceUsd } = await tradeService.getWalletBalanceForChat(
@@ -400,16 +398,34 @@ export class ReportingService implements OnModuleInit {
             return;
         }
 
-        const lines = holdings.map(
-            (h) => `‚Ä¢ ${h.symbol || 'UNKNOWN'}: \`${h.balance.toFixed(4)}\` (${h.mint})`,
-        );
+        await this.sendMessage('*PORTFOLIO*\nShowing ' + holdings.length + ' tracked token(s).', {}, 0, targetChatId);
 
-        await this.sendMessage(
-            `*PORTO*\n${lines.join('\n')}`,
-            {},
-            0,
-            targetChatId,
-        );
+        for (const holding of holdings) {
+            const message =
+                '*' + (holding.symbol || 'UNKNOWN') + '*\n' +
+                'Mint: `' + holding.mint + '`\n' +
+                'Balance: `' + holding.balance.toFixed(4) + '`';
+
+            const buttons: TelegramBot.InlineKeyboardButton[][] = [
+                [
+                    { text: 'Buy', callback_data: 'buy_menu:' + holding.mint },
+                    { text: 'Sell', callback_data: 'sell_menu:' + holding.mint },
+                ],
+                [
+                    { text: 'Pump.fun', url: 'https://pump.fun/coin/' + holding.mint },
+                    { text: 'DexScreener', url: 'https://dexscreener.com/solana/' + holding.mint },
+                ],
+            ];
+
+            await this.sendMessage(
+                message,
+                {
+                    reply_markup: { inline_keyboard: buttons },
+                },
+                0,
+                targetChatId,
+            );
+        }
     }
 
     private async handleWinRateRequest(targetChatId: string) {
@@ -431,16 +447,16 @@ export class ReportingService implements OnModuleInit {
     private async handleSettingsRequest(targetChatId: string) {
         const settings = await this.telegramWorkspace.getChatSettings(targetChatId);
         const message =
-            `\u2699\uFE0F *SETTINGS*\n` +
+            `‚öôÔ∏è SETTINGS\n` +
             `Tune risk and entry size for this chat.\n\n` +
-            `\uD83E\uDDE9 *Current values*\n` +
-            `ï Total slots: \`${settings.totalSlots}\`  \n` +
+            `Current values\n` +
+            `- Total slots: \`${settings.totalSlots}\`\n` +
             `  Max open positions allowed at the same time.\n` +
-            `ï Position size: \`${settings.positionSizeUsd.toFixed(2)}\`  \n` +
+            `- Position size: \`$${settings.positionSizeUsd.toFixed(2)}\`\n` +
             `  Default USD amount used per auto-buy entry.\n` +
-            `ï Slippage on SOL: \`${(settings.slippageOnSol * 100).toFixed(2)}%\`  \n` +
+            `- Slippage on SOL: \`${(settings.slippageOnSol * 100).toFixed(2)}%\`\n` +
             `  Price tolerance used when swapping.\n` +
-            `ï Dry run: \`${settings.dryRun ? 'true' : 'false'}\`  \n` +
+            `- Dry run: \`${settings.dryRun ? 'true' : 'false'}\`\n` +
             `  When true, the bot sends signals only and skips live swaps.\n\n` +
             `Choose a preset below.`;
 
@@ -482,7 +498,6 @@ export class ReportingService implements OnModuleInit {
             targetChatId,
         );
     }
-
     private async handleSettingsCallback(
         section: string,
         value: string,
@@ -1064,6 +1079,11 @@ export class ReportingService implements OnModuleInit {
         return null;
     }
 }
+
+
+
+
+
 
 
 
