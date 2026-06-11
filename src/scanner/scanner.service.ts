@@ -659,7 +659,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     }
 
                     if (result.safe) {
-                        const isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
+                        const isDryRun = true;
 
                         if (isDryRun) {
                             this.logger.log(

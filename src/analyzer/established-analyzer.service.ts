@@ -551,7 +551,7 @@ export class EstablishedAnalyzerService {
                 isCTO: rugResult.isCTO,
             };
 
-            const isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
+            const isDryRun = true;
             if (isDryRun) {
                 await this.reportingService.sendBuySignalAlert(tokenMint, metadata, {
                     strategy: 'Established Rebound & CTO',

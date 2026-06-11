@@ -94,7 +94,7 @@ export class AIService {
 
         return {
             botMode: this.configService.get<string>('BOT_MODE', 'micin'),
-            dryRun: this.configService.get<string>('DRY_RUN', 'true') === 'true',
+            dryRun: true,
             aiConvictionThreshold: this.getNumberConfig('AI_CONVICTION_THRESHOLD', 75),
             minLiquidityUsd: this.getNumberConfig('MIN_LIQUIDITY_USD', 7500),
             minVolumeUsd: this.getNumberConfig('MIN_VOLUME_USD', 500),

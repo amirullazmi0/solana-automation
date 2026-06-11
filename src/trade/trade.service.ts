@@ -150,7 +150,6 @@ export class TradeService implements OnModuleInit {
     private readonly positionSizeUSD: number;
     private readonly slippageBps: number;
     private readonly jupiterApiKey: string;
-    private readonly isDryRun: boolean;
     private readonly httpsAgent: https.Agent;
 
     // Cache for resolved IPs
@@ -191,7 +190,6 @@ export class TradeService implements OnModuleInit {
             this.configService.get<string>('SLIPPAGE_BPS', '100'),
             10,
         );
-        this.isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
 
         // Inisialisasi DNS Hardening HTTPS Agent dengan keepAlive
         this.httpsAgent = new https.Agent({
@@ -231,7 +229,7 @@ export class TradeService implements OnModuleInit {
     }
 
     async onModuleInit() {
-        if (this.connection && !this.isDryRun) {
+        if (this.connection) {
             try {
                 const connectedWallets = await this.telegramWorkspace.getConnectedWalletCount();
                 this.logger.log(
@@ -249,8 +247,6 @@ export class TradeService implements OnModuleInit {
             // 🚀 RESUME MONITORING: Pantau lagi koin yang masih nyangkut/open
             await this.startMonitoringAllTrades();
             await this.preloadOpenTradeDecimals();
-        } else if (this.isDryRun) {
-            this.logger.log('[DRY_RUN] Chat-generated wallets available; live swaps remain disabled.');
         }
     }
 
@@ -478,8 +474,8 @@ export class TradeService implements OnModuleInit {
             ? await this.telegramWorkspace.getChatSettings(telegramChatId)
             : null;
         const effectiveDryRun = telegramChatId
-            ? chatSettings?.dryRun ?? this.isDryRun
-            : this.isDryRun;
+            ? chatSettings?.dryRun ?? true
+            : true;
         const effectiveTotalSlots = chatSettings?.totalSlots ?? this.totalSlots;
         const effectivePositionSizeUSD =
             chatSettings?.positionSizeUsd ?? this.positionSizeUSD;
@@ -682,6 +678,7 @@ export class TradeService implements OnModuleInit {
                 options?.customSlippageBps || effectiveSlippageBps,
                 priorityFeeLamports,
                 wallet,
+                effectiveDryRun,
             );
 
         if (success && entryPrice > 0) {
@@ -746,6 +743,7 @@ export class TradeService implements OnModuleInit {
                     tokensReceived: actualTokens,
                     solPrice,
                 },
+                effectiveDryRun,
             );
 
             // PriceMonitorService otomatis akan mendeteksi trade baru dari DB
@@ -785,7 +783,12 @@ export class TradeService implements OnModuleInit {
         try {
             // 1. DAPETIN SALDO ASLI ATAU SIMULASI
             let actualBalance = 0;
-            if (this.isDryRun) {
+            const tradeSettings = trade.telegramChatId
+                ? await this.telegramWorkspace.getChatSettingsByChatDbId(trade.telegramChatId)
+                : null;
+            const tradeDryRun = tradeSettings?.dryRun ?? true;
+
+            if (tradeDryRun) {
                 const solPrice = await this.getSolPrice();
                 actualBalance = (trade.amountInSol * solPrice) / trade.entryPrice;
                 this.logger.debug(
@@ -884,6 +887,7 @@ export class TradeService implements OnModuleInit {
                 sellSlippage,
                 sellPriorityFee,
                 activeWallet,
+                tradeDryRun,
             );
 
             if (success) {
@@ -995,6 +999,7 @@ export class TradeService implements OnModuleInit {
                         usdSpent: totalUsdSpent,
                         usdReceived: totalUsdReceived,
                     },
+                    tradeDryRun,
                 );
                 return true;
             }
@@ -1073,6 +1078,9 @@ export class TradeService implements OnModuleInit {
                 currentPrice,
                 0,
                 'PRICE_ANOMALY_ADMIN_REVIEW',
+                undefined,
+                undefined,
+                true,
             );
             return;
         }
@@ -1095,6 +1103,7 @@ export class TradeService implements OnModuleInit {
         customSlippageBps?: number,
         priorityFeeLamports?: number,
         wallet?: Keypair,
+        dryRun = false,
     ): Promise<{
         success: boolean;
         entryPrice: number;
@@ -1195,7 +1204,7 @@ export class TradeService implements OnModuleInit {
             }
 
             // 🤖 DRY RUN MODE: Skip actual swap execution, just return simulated success with quote price
-            if (this.isDryRun) {
+            if (dryRun) {
                 this.logger.log(
                     `[DRY RUN] 🤖 Simulated ${side} Quote obtained: $${price.toFixed(8)}. Skipping real transaction.`,
                 );
@@ -1419,6 +1428,7 @@ export class TradeService implements OnModuleInit {
                     customSlippageBps,
                     priorityFeeLamports,
                     activeWallet,
+                    dryRun,
                 );
             }
             return { success: false, entryPrice: 0, error: message, txHash: undefined };
@@ -1722,6 +1732,7 @@ export class TradeService implements OnModuleInit {
                 undefined,
                 undefined,
                 wallet,
+                chatSettings?.dryRun ?? true,
             );
 
             if (success) {

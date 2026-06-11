@@ -18,7 +18,6 @@ export class ReportingService implements OnModuleInit {
     private readonly logger = new Logger(ReportingService.name);
     private readonly bot: TelegramBot;
     private readonly connection: Connection;
-    private readonly isDryRun: boolean;
     private readonly httpsAgent: https.Agent;
 
     // Cache for resolved IPs
@@ -34,7 +33,6 @@ export class ReportingService implements OnModuleInit {
         private readonly telegramWorkspace: TelegramWorkspaceService,
     ) {
         const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
-        this.isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
 
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
         if (rpcEndpoint) {
@@ -724,9 +722,10 @@ export class ReportingService implements OnModuleInit {
             tokensReceived?: number;
             solPrice?: number;
         },
+        isDryRun = true,
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
-        const prefix = this.isDryRun ? '🤖 [SIMULASI] ' : '🚀 ';
+        const prefix = isDryRun ? '🤖 [SIMULASI] ' : '🚀 ';
         const strategyDisplay = strategy ? `\n⚡ *Strategy:* \`${strategy}\`` : '';
 
         let solDetails = '';
@@ -804,12 +803,13 @@ export class ReportingService implements OnModuleInit {
             usdSpent?: number;
             usdReceived?: number;
         },
+        isDryRun = true,
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
         const isSuccess = netProfitPercent >= 0;
         const emoji = isSuccess ? '💰' : '🛑';
         const profitEmoji = isSuccess ? '🟢' : '🔴';
-        const prefix = this.isDryRun ? '🤖 [SIMULASI] ' : '';
+        const prefix = isDryRun ? '🤖 [SIMULASI] ' : '';
 
         let detailedStats = '';
         if (details) {

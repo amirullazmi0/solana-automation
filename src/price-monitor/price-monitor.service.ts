@@ -35,7 +35,7 @@ export class PriceMonitorService {
             this.configService.get<string>('STOP_LOSS_PERCENT', '25.0'),
         );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
-        this.isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
+        this.isDryRun = true;
     }
 
     private readonly processingTrades = new Set<number>();

@@ -205,6 +205,20 @@ export class TelegramWorkspaceService {
         return this.ensureDefaultSettings(chat.id);
     }
 
+    async getChatSettingsByChatDbId(chatDbId: number): Promise<TelegramChatSetting> {
+        const chat = await this.prismaService.telegramChat.findUnique({
+            where: { id: chatDbId },
+            include: { settings: true },
+        });
+
+        if (!chat) {
+            throw new Error(`Telegram chat record ${chatDbId} is not registered.`);
+        }
+
+        if (chat.settings) return chat.settings;
+        return this.ensureDefaultSettings(chat.id);
+    }
+
     async updateChatSettings(
         chatId: string,
         updates: Partial<
@@ -282,7 +296,7 @@ export class TelegramWorkspaceService {
     }
 
     private getDefaultDryRun(): boolean {
-        return this.configService.get<string>('DRY_RUN') === 'true';
+        return true;
     }
 
     private encryptSecretKey(secretKey: Uint8Array): {

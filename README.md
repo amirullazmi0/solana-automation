@@ -365,8 +365,8 @@ caprover deploy --default
 |------------------|----------------------|------------|
 | `BOT_MODE=whale` | DexScreener only | Polling koin mapan ($50K-$300K MCap) tanpa WebSocket |
 | `BOT_MODE=micin` | PumpPortal WS + DexScreener | Menangkap koin baru migrate dari Pump.fun secara instan via WebSocket |
-| `DRY_RUN=true` | Mainnet Quotes + Database Simulation | Menjalankan seluruh filter live, namun mencegat eksekusi asli tepat sebelum penandatanganan dompet. Aman untuk uji coba tanpa risiko kehilangan modal. Di Telegram ditandai dengan `🤖 [SIMULASI]`. |
-| `DRY_RUN=false` | Live Wallet Execution | Transaksi nyata di blockchain Solana menggunakan saldo asli. |
+| `dryRun=true` | Signal-only mode | Telegram chat-level fallback. Signals still work, live swaps are skipped. |
+| `dryRun=false` | Live Wallet Execution | Live swaps are allowed for that chat. |
 
 Set via `.env`.
 
@@ -430,9 +430,9 @@ The current codebase now includes a chat-driven Telegram control plane.
 
 ### Dry Run Behavior
 - Telegram `dryRun` is stored per chat and controls that chat's buy/sell execution.
-- `DRY_RUN` in `.env` is still used by other services as the global simulation switch.
-- `DRY_RUN=true` keeps signals, portfolio, balance, watchlist, and settings available.
+- There is no longer a `DRY_RUN` env dependency in the runtime flow.
+- Outside a chat context, the system falls back to safe simulation mode.
 - Live swaps are skipped when dry run is enabled.
-- `DRY_RUN=false` enables live execution.
+- `dryRun=false` enables live execution for that specific chat.
 *Last updated: Juni 2026 - MaSoul Sniper Lean Filter V85/V86, Global DTO, Capital Protection, Dynamic Cooldown, Price Monitor Optimizations*
 *Created with ❤️ by Antigravity for Amirull Azmi.*
