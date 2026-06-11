@@ -135,6 +135,7 @@ export class ReportingService implements OnModuleInit {
                 } else if (
                     command === '/winrate' ||
                     normalizedText === 'winrate' ||
+                    normalizedText === 'win rate' ||
                     normalizedText === 'winrate'
                 ) {
                     await this.handleWinRateRequest(incomingChatId);
@@ -148,12 +149,7 @@ export class ReportingService implements OnModuleInit {
             } catch (error) {
                 const msgText = error instanceof Error ? error.message : String(error);
                 this.logger.error(`Telegram command failed: ${msgText}`);
-                await this.sendMessage(
-                    `*Error:* ${msgText}`,
-                    {},
-                    0,
-                    incomingChatId,
-                );
+                await this.sendMessage(`*Error:* ${msgText}`, {}, 0, incomingChatId);
             }
         });
 
@@ -199,7 +195,7 @@ export class ReportingService implements OnModuleInit {
 
     private async sendMainMenu(targetChatId?: string, chatLabel?: string) {
         const message =
-            `🚀 *Solana Trend Follower Bot Active*\n` +
+            `🚀 *Your Msoulmation Bot Active*\n` +
             `${chatLabel ? `\`${chatLabel}\`\n\n` : '\n'}` +
             `Pick a section below.`;
 
@@ -406,9 +402,8 @@ export class ReportingService implements OnModuleInit {
     }
     private async handleBalanceRequest(targetChatId: string) {
         const tradeService = this.moduleRef.get(TradeService, { strict: false });
-        const { publicKey, balanceSol, balanceUsd } = await tradeService.getWalletBalanceForChat(
-            targetChatId,
-        );
+        const { publicKey, balanceSol, balanceUsd } =
+            await tradeService.getWalletBalanceForChat(targetChatId);
 
         const message =
             `💼 *WALLET BALANCE*\n` +
@@ -428,13 +423,24 @@ export class ReportingService implements OnModuleInit {
             return;
         }
 
-        await this.sendMessage('📊 *PORTFOLIO*\nShowing ' + holdings.length + ' tracked token(s).', {}, 0, targetChatId);
+        await this.sendMessage(
+            '📊 *PORTFOLIO*\nShowing ' + holdings.length + ' tracked token(s).',
+            {},
+            0,
+            targetChatId,
+        );
 
         for (const holding of holdings) {
             const message =
-                '🪙 *' + (holding.symbol || 'UNKNOWN') + '*\n' +
-                'Mint: `' + holding.mint + '`\n' +
-                'Balance: `' + holding.balance.toFixed(4) + '`';
+                '🪙 *' +
+                (holding.symbol || 'UNKNOWN') +
+                '*\n' +
+                'Mint: `' +
+                holding.mint +
+                '`\n' +
+                'Balance: `' +
+                holding.balance.toFixed(4) +
+                '`';
 
             const buttons: TelegramBot.InlineKeyboardButton[][] = [
                 [
@@ -528,11 +534,7 @@ export class ReportingService implements OnModuleInit {
             targetChatId,
         );
     }
-    private async handleSettingsCallback(
-        section: string,
-        value: string,
-        targetChatId: string,
-    ) {
+    private async handleSettingsCallback(section: string, value: string, targetChatId: string) {
         const updates: {
             totalSlots?: number;
             positionSizeUsd?: number;
@@ -1109,12 +1111,3 @@ export class ReportingService implements OnModuleInit {
         return null;
     }
 }
-
-
-
-
-
-
-
-
-
