@@ -178,9 +178,9 @@ export class ReportingService implements OnModuleInit {
 
     private async sendMainMenu(targetChatId?: string, chatLabel?: string) {
         const message =
-            `*Solana Trend Follower Bot Active*\n` +
+            `🚀 *Solana Trend Follower Bot Active*\n` +
             `${chatLabel ? `\`${chatLabel}\`\n\n` : '\n'}` +
-            `Use the menu below to manage the bot.`;
+            `Pick a section below.`;
 
         const options: TelegramBot.SendMessageOptions = {
             reply_markup: {
@@ -205,7 +205,7 @@ export class ReportingService implements OnModuleInit {
 
         if (pendingWatchlist.length === 0) {
             await this.sendMessage(
-                '*Watchlist empty.* No tokens are being tracked right now.',
+                '👀 *Watchlist empty.* No tokens are being tracked right now.',
                 {},
                 0,
                 targetChatId,
@@ -214,7 +214,7 @@ export class ReportingService implements OnModuleInit {
         }
 
         await this.sendMessage(
-            `*WATCHLIST RADAR*\nShowing ${pendingWatchlist.length} tracked tokens.`,
+            `🔭 *WATCHLIST RADAR*\nShowing ${pendingWatchlist.length} tracked tokens.`,
             {},
             0,
             targetChatId,
@@ -227,7 +227,7 @@ export class ReportingService implements OnModuleInit {
                 (Date.now() - new Date(ageSource).getTime()) / (1000 * 60 * 60),
                 0,
             );
-            const title = item.isPumpFun ? '*CTO CANDIDATE DETECTED*' : '*SECOND-WAVE RADAR*';
+            const title = item.isPumpFun ? '🔥 *CTO CANDIDATE DETECTED*' : '🌊 *SECOND-WAVE RADAR*';
             const mcapDisplay =
                 typeof item.mcap === 'number' ? `$${item.mcap.toLocaleString()}` : 'N/A';
             const liquidityDisplay =
@@ -276,14 +276,14 @@ export class ReportingService implements OnModuleInit {
     private async handleTokenInput(mint: string, targetChatId?: string) {
         const symbol = await this.fetchTokenSymbolFromDex(mint);
         const message =
-            `*Token Detected: ${symbol}*\n` +
+            `🪙 *Token Detected: ${symbol}*\n` +
             `Mint: \`${mint}\`\n\n` +
             `What would you like to do with this token?`;
 
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
             [
-                { text: 'Buy', callback_data: `buy_menu:${mint}` },
-                { text: 'Sell', callback_data: `sell_menu:${mint}` },
+                { text: '🟢 Buy', callback_data: `buy_menu:${mint}` },
+                { text: '🔴 Sell', callback_data: `sell_menu:${mint}` },
             ],
             [
                 { text: 'Pump.fun', url: `https://pump.fun/coin/${mint}` },
@@ -332,15 +332,15 @@ export class ReportingService implements OnModuleInit {
     }
 
     private async sendBuyMenu(mint: string, targetChatId?: string) {
-        const message = `*Choose Buy Amount ($USD):*\nToken: \`${mint}\`\n\nQuick presets for this position.`;
+        const message = `🟢 *Choose Buy Amount ($USD):*\nToken: \`${mint}\`\n\nQuick presets for this position.`;
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
             [
-                { text: '$5', callback_data: `buy_exec:${mint}|5` },
-                { text: '$10', callback_data: `buy_exec:${mint}|10` },
+                { text: '💵 $5', callback_data: `buy_exec:${mint}|5` },
+                { text: '💵 $10', callback_data: `buy_exec:${mint}|10` },
             ],
             [
-                { text: '$15', callback_data: `buy_exec:${mint}|15` },
-                { text: '$20', callback_data: `buy_exec:${mint}|20` },
+                { text: '💵 $15', callback_data: `buy_exec:${mint}|15` },
+                { text: '💵 $20', callback_data: `buy_exec:${mint}|20` },
             ],
             [
                 { text: 'Pump.fun', url: `https://pump.fun/coin/${mint}` },
@@ -358,10 +358,10 @@ export class ReportingService implements OnModuleInit {
         );
     }
     private async sendSellMenu(mint: string, targetChatId?: string) {
-        const message = `*Choose Sell Percentage:*\nToken: \`${mint}\`\n\nSelect the exit size.`;
+        const message = `🔴 *Choose Sell Percentage:*\nToken: \`${mint}\`\n\nSelect the exit size.`;
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
             [
-                { text: 'Sell all', callback_data: `sell_exec:${mint}|1.0` },
+                { text: '🚪 Sell all', callback_data: `sell_exec:${mint}|1.0` },
                 { text: '75%', callback_data: `sell_exec:${mint}|0.75` },
             ],
             [
@@ -390,7 +390,7 @@ export class ReportingService implements OnModuleInit {
         );
 
         const message =
-            `*WALLET BALANCE*\n` +
+            `💼 *WALLET BALANCE*\n` +
             `Address: \`${publicKey}\`\n` +
             `SOL: \`${balanceSol.toFixed(4)}\`\n` +
             `USD: \`$${balanceUsd.toFixed(2)}\``;
@@ -403,15 +403,15 @@ export class ReportingService implements OnModuleInit {
         const holdings = await tradeService.getWalletHoldingsForChat(targetChatId);
 
         if (holdings.length === 0) {
-            await this.sendMessage('*Portfolio is empty.*', {}, 0, targetChatId);
+            await this.sendMessage('📭 *Portfolio is empty.*', {}, 0, targetChatId);
             return;
         }
 
-        await this.sendMessage('*PORTFOLIO*\nShowing ' + holdings.length + ' tracked token(s).', {}, 0, targetChatId);
+        await this.sendMessage('📊 *PORTFOLIO*\nShowing ' + holdings.length + ' tracked token(s).', {}, 0, targetChatId);
 
         for (const holding of holdings) {
             const message =
-                '*' + (holding.symbol || 'UNKNOWN') + '*\n' +
+                '🪙 *' + (holding.symbol || 'UNKNOWN') + '*\n' +
                 'Mint: `' + holding.mint + '`\n' +
                 'Balance: `' + holding.balance.toFixed(4) + '`';
 
@@ -442,7 +442,7 @@ export class ReportingService implements OnModuleInit {
         const stats = await tradeService.getWinRateForChat(targetChatId);
 
         await this.sendMessage(
-            `*WINRATE*\n` +
+            `📈 *WINRATE*\n` +
                 `Trades: \`${stats.total}\`\n` +
                 `Wins: \`${stats.wins}\`\n` +
                 `Losses: \`${stats.losses}\`\n` +
@@ -459,13 +459,13 @@ export class ReportingService implements OnModuleInit {
             `⚙️ SETTINGS\n` +
             `Tune risk and entry size for this chat.\n\n` +
             `Current values\n` +
-            `- Total slots: \`${settings.totalSlots}\`\n` +
+            `- Total slots: \`${settings.totalSlots}\` 🧩\n` +
             `  Max open positions allowed at the same time.\n` +
-            `- Position size: \`$${settings.positionSizeUsd.toFixed(2)}\`\n` +
+            `- Position size: \`$${settings.positionSizeUsd.toFixed(2)}\` 💵\n` +
             `  Default USD amount used per auto-buy entry.\n` +
-            `- Slippage on SOL: \`${(settings.slippageOnSol * 100).toFixed(2)}%\`\n` +
+            `- Slippage on SOL: \`${(settings.slippageOnSol * 100).toFixed(2)}%\` 🌐\n` +
             `  Price tolerance used when swapping.\n` +
-            `- Dry run: \`${settings.dryRun ? 'true' : 'false'}\`\n` +
+            `- Dry run: \`${settings.dryRun ? 'true' : 'false'}\` 🧪\n` +
             `  When true, the bot sends signals only and skips live swaps.\n\n` +
             `Choose a preset below.`;
 
