@@ -9,6 +9,7 @@ import * as TelegramBot from 'node-telegram-bot-api';
 import { DexLimiter } from '../common/dex-limiter';
 import { TokenMetadata } from '../dto/analyzer.dto';
 import { PrismaService } from '../prisma/prisma.service';
+import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 import { ScannerService } from '../scanner/scanner.service';
 import { TradeService } from '../trade/trade.service';
 
@@ -16,8 +17,6 @@ import { TradeService } from '../trade/trade.service';
 export class ReportingService implements OnModuleInit {
     private readonly logger = new Logger(ReportingService.name);
     private readonly bot: TelegramBot;
-    private readonly chatId: string;
-    private readonly chatIds: string[];
     private readonly connection: Connection;
     private readonly isDryRun: boolean;
     private readonly httpsAgent: https.Agent;
@@ -32,10 +31,9 @@ export class ReportingService implements OnModuleInit {
         private readonly configService: ConfigService,
         private readonly prismaService: PrismaService,
         private readonly moduleRef: ModuleRef,
+        private readonly telegramWorkspace: TelegramWorkspaceService,
     ) {
         const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
-        this.chatId = this.configService.get<string>('TELEGRAM_CHAT_ID') || '';
-        this.chatIds = this.resolveTelegramChatIds();
         this.isDryRun = this.configService.get<string>('DRY_RUN') === 'true';
 
         const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
@@ -77,20 +75,6 @@ export class ReportingService implements OnModuleInit {
         });
     }
 
-    private resolveTelegramChatIds(): string[] {
-        const multiChatIds = this.configService.get<string>('TELEGRAM_CHAT_IDS') || '';
-        const configuredChatIds = multiChatIds || this.chatId;
-
-        return Array.from(
-            new Set(
-                configuredChatIds
-                    .split(',')
-                    .map((id) => id.trim())
-                    .filter(Boolean),
-            ),
-        );
-    }
-
     onModuleInit() {
         if (this.bot) {
             this.setupBotListeners();
@@ -110,17 +94,54 @@ export class ReportingService implements OnModuleInit {
             );
 
             const command = text.split(/\s+/)[0].split('@')[0].toLowerCase();
+            const normalizedText = text.trim().toLowerCase();
 
-            if (command === '/start' || command === '/help') {
-                await this.sendMainMenu(incomingChatId);
-            } else if (command === '/chatid' || command === '/id') {
-                await this.handleChatIdRequest(msg, incomingChatId);
-            } else if (command === '/status' || text.toLowerCase() === 'status') {
-                await this.handleStatusRequest(incomingChatId);
-            } else if (text.toLowerCase() === 'watchlist') {
-                await this.handleWatchlistRequest(incomingChatId);
-            } else if (this.isSolanaAddress(text)) {
-                await this.handleTokenInput(text, incomingChatId);
+            if (!this.telegramWorkspace.isChatAllowed(incomingChatId)) {
+                await this.sendMessage(
+                    '*Access denied.* Chat ini belum di-whitelist untuk mode development.',
+                    {},
+                    0,
+                    incomingChatId,
+                );
+                return;
+            }
+
+            await this.telegramWorkspace.upsertTelegramChat({
+                id: incomingChatId,
+                type: msg.chat.type,
+                title: 'title' in msg.chat ? msg.chat.title || null : null,
+                username: msg.chat.username || null,
+            });
+
+            try {
+                if (command === '/start' || command === '/help') {
+                    await this.handleStartFlow(msg, incomingChatId);
+                } else if (command === '/chatid' || command === '/id') {
+                    await this.handleChatIdRequest(msg, incomingChatId);
+                } else if (command === '/balance' || normalizedText === 'balance') {
+                    await this.handleBalanceRequest(incomingChatId);
+                } else if (command === '/porto' || normalizedText === 'porto') {
+                    await this.handlePortoRequest(incomingChatId);
+                } else if (command === '/setting' || normalizedText === 'setting') {
+                    await this.handleSettingsRequest(incomingChatId);
+                } else if (command === '/winrate' || normalizedText === 'winrate') {
+                    await this.handleWinRateRequest(incomingChatId);
+                } else if (command === '/status' || normalizedText === 'status') {
+                    await this.handleStatusRequest(incomingChatId);
+                } else if (normalizedText === 'watchlist') {
+                    await this.handleWatchlistRequest(incomingChatId);
+                } else if (this.isSolanaAddress(text)) {
+                    await this.handleTokenInput(text, incomingChatId);
+                }
+            } catch (error) {
+                const msgText = error instanceof Error ? error.message : String(error);
+                this.logger.error(`Telegram command failed: ${msgText}`);
+                await this.sendMessage(
+                    `*Error:* ${msgText}`,
+                    {},
+                    0,
+                    incomingChatId,
+                );
             }
         });
 
@@ -143,13 +164,31 @@ export class ReportingService implements OnModuleInit {
         );
     }
 
-    private async sendMainMenu(targetChatId?: string) {
+    private async handleStartFlow(msg: TelegramBot.Message, targetChatId: string) {
+        const walletResult = await this.telegramWorkspace.ensureWalletForChat(targetChatId);
+        const publicKey = walletResult.keypair.publicKey.toBase58();
+        const chatLabel = 'title' in msg.chat ? msg.chat.title || 'Unnamed chat' : 'private chat';
+        const walletMessage = walletResult.created
+            ? `*Wallet connected in this chat.*\n\nAddress: \`${publicKey}\`\nTop up SOL to this address before trading.`
+            : `*Wallet already connected in this chat.*\n\nAddress: \`${publicKey}\``;
+
+        await this.sendMessage(walletMessage, {}, 0, targetChatId);
+        await this.sendMainMenu(targetChatId, chatLabel);
+    }
+
+    private async sendMainMenu(targetChatId?: string, chatLabel?: string) {
         const message =
-            `*Solana Trend Follower Bot Active*\n\n` + `Pilih menu di bawah untuk mengelola bot.`;
+            `*Solana Trend Follower Bot Active*\n` +
+            `${chatLabel ? `\`${chatLabel}\`\n\n` : '\n'}` +
+            `Pilih menu di bawah untuk mengelola bot.`;
 
         const options: TelegramBot.SendMessageOptions = {
             reply_markup: {
-                keyboard: [[{ text: 'Status' }], [{ text: 'Watchlist' }]],
+                keyboard: [
+                    [{ text: 'Balance' }, { text: 'Porto' }],
+                    [{ text: 'Setting' }, { text: 'Winrate' }],
+                    [{ text: 'Watchlist' }],
+                ],
                 resize_keyboard: true,
             },
         };
@@ -267,6 +306,10 @@ export class ReportingService implements OnModuleInit {
         if (!data) return;
 
         const targetChatId = query.message?.chat.id.toString();
+        if (!targetChatId) {
+            await this.bot.answerCallbackQuery(query.id);
+            return;
+        }
         const [action, payload] = data.split(':');
 
         if (action === 'buy_menu') {
@@ -279,6 +322,9 @@ export class ReportingService implements OnModuleInit {
         } else if (action === 'sell_exec') {
             const [mint, percent] = payload.split('|');
             await this.executeManualSell(mint, Number.parseFloat(percent), targetChatId);
+        } else if (action === 'settings') {
+            const [section, value] = payload.split('|');
+            await this.handleSettingsCallback(section, value, targetChatId);
         }
 
         await this.bot.answerCallbackQuery(query.id);
@@ -330,11 +376,123 @@ export class ReportingService implements OnModuleInit {
         );
     }
 
+    private async handleBalanceRequest(targetChatId: string) {
+        const tradeService = this.moduleRef.get(TradeService, { strict: false });
+        const { publicKey, balanceSol, balanceUsd } = await tradeService.getWalletBalanceForChat(
+            targetChatId,
+        );
+
+        const message =
+            `*WALLET BALANCE*\n` +
+            `Address: \`${publicKey}\`\n` +
+            `SOL: \`${balanceSol.toFixed(4)}\`\n` +
+            `USD: \`$${balanceUsd.toFixed(2)}\``;
+
+        await this.sendMessage(message, {}, 0, targetChatId);
+    }
+
+    private async handlePortoRequest(targetChatId: string) {
+        const tradeService = this.moduleRef.get(TradeService, { strict: false });
+        const holdings = await tradeService.getWalletHoldingsForChat(targetChatId);
+
+        if (holdings.length === 0) {
+            await this.sendMessage('*Portfolio kosong.*', {}, 0, targetChatId);
+            return;
+        }
+
+        const lines = holdings.map(
+            (h) => `• ${h.symbol || 'UNKNOWN'}: \`${h.balance.toFixed(4)}\` (${h.mint})`,
+        );
+
+        await this.sendMessage(
+            `*PORTO*\n${lines.join('\n')}`,
+            {},
+            0,
+            targetChatId,
+        );
+    }
+
+    private async handleWinRateRequest(targetChatId: string) {
+        const tradeService = this.moduleRef.get(TradeService, { strict: false });
+        const stats = await tradeService.getWinRateForChat(targetChatId);
+
+        await this.sendMessage(
+            `*WINRATE*\n` +
+                `Trades: \`${stats.total}\`\n` +
+                `Wins: \`${stats.wins}\`\n` +
+                `Losses: \`${stats.losses}\`\n` +
+                `Win rate: \`${stats.winRate.toFixed(2)}%\``,
+            {},
+            0,
+            targetChatId,
+        );
+    }
+
+    private async handleSettingsRequest(targetChatId: string) {
+        const settings = await this.telegramWorkspace.getChatSettings(targetChatId);
+        const message =
+            `*SETTINGS*\n` +
+            `Total slots: \`${settings.totalSlots}\`\n` +
+            `Position size: \`$${settings.positionSizeUsd.toFixed(2)}\`\n` +
+            `Slippage on SOL: \`${settings.slippageOnSol.toFixed(3)}\``;
+
+        const buttons: TelegramBot.InlineKeyboardButton[][] = [
+            [1, 2, 3, 4].map((slot) => ({
+                text: `Slots ${slot}`,
+                callback_data: `settings:slots|${slot}`,
+            })),
+            [5, 10, 15, 20, 50, 100].map((amount) => ({
+                text: `$${amount}`,
+                callback_data: `settings:position|${amount}`,
+            })),
+            [0.005, 0.01, 0.02, 0.03].map((slippage) => ({
+                text: `${(slippage * 100).toFixed(1)}%`,
+                callback_data: `settings:slippage|${slippage}`,
+            })),
+        ];
+
+        await this.sendMessage(
+            message,
+            {
+                reply_markup: { inline_keyboard: buttons },
+            },
+            0,
+            targetChatId,
+        );
+    }
+
+    private async handleSettingsCallback(
+        section: string,
+        value: string,
+        targetChatId: string,
+    ) {
+        const updates: {
+            totalSlots?: number;
+            positionSizeUsd?: number;
+            slippageOnSol?: number;
+        } = {};
+
+        if (section === 'slots') {
+            updates.totalSlots = Number.parseInt(value, 10);
+        } else if (section === 'position') {
+            updates.positionSizeUsd = Number.parseFloat(value);
+        } else if (section === 'slippage') {
+            updates.slippageOnSol = Number.parseFloat(value);
+        }
+
+        if (Object.keys(updates).length === 0) {
+            return;
+        }
+
+        await this.telegramWorkspace.updateChatSettings(targetChatId, updates);
+        await this.handleSettingsRequest(targetChatId);
+    }
+
     private async executeManualBuy(mint: string, amount: number, targetChatId?: string) {
         await this.sendMessage(`*Memproses Buy $${amount}...*`, {}, 0, targetChatId);
         try {
             const tradeService = this.moduleRef.get(TradeService, { strict: false });
-            const result = await tradeService.handleManualBuy(mint, amount);
+            const result = await tradeService.handleManualBuy(mint, amount, targetChatId);
             if (result.success) {
                 await this.sendMessage(`*Success:* ${result.message}`, {}, 0, targetChatId);
             } else {
@@ -355,7 +513,7 @@ export class ReportingService implements OnModuleInit {
         );
         try {
             const tradeService = this.moduleRef.get(TradeService, { strict: false });
-            const result = await tradeService.handleManualSell(mint, percent);
+            const result = await tradeService.handleManualSell(mint, percent, targetChatId);
             if (result.success) {
                 await this.sendMessage(`*Success:* ${result.message}`, {}, 0, targetChatId);
             } else {
@@ -725,7 +883,9 @@ export class ReportingService implements OnModuleInit {
         retryCount = 0,
         targetChatId?: string,
     ) {
-        const destinationChatIds = targetChatId ? [targetChatId] : this.chatIds;
+        const destinationChatIds = targetChatId
+            ? [targetChatId]
+            : await this.telegramWorkspace.getActiveChatIds();
 
         if (this.bot && destinationChatIds.length > 0) {
             for (const destinationChatId of destinationChatIds) {

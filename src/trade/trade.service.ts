@@ -18,6 +18,7 @@ import { DexLimiter } from '../common/dex-limiter';
 import { TokenMetadata, TradeExecutionPayload } from '../dto/analyzer.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
+import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 
 export const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -137,7 +138,6 @@ export function evaluateBuyRisk(
 export class TradeService implements OnModuleInit {
     private readonly logger = new Logger(TradeService.name);
     private connection: Connection;
-    private wallet: Keypair | null = null;
     private readonly sellingTrades = new Set<number>();
     private readonly decimalsCache = new Map<string, number>();
     private readonly sellRetryCounts = new Map<number, number>();
@@ -168,6 +168,7 @@ export class TradeService implements OnModuleInit {
         private readonly configService: ConfigService,
         private readonly prismaService: PrismaService,
         private readonly moduleRef: ModuleRef,
+        private readonly telegramWorkspace: TelegramWorkspaceService,
     ) {
         const rpcEndpoint =
             this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
@@ -221,34 +222,24 @@ export class TradeService implements OnModuleInit {
         return this.moduleRef.get(ReportingService, { strict: false });
     }
 
-    private getWallet(): Keypair {
-        if (this.wallet) return this.wallet;
-
-        const privateKeyString = this.configService.get<string>('PRIVATE_KEY') || '';
-        if (!privateKeyString || privateKeyString.includes('your-wallet-private-key')) {
-            throw new Error('PRIVATE_KEY is required for live wallet operations.');
+    private async getWallet(chatId: string): Promise<Keypair> {
+        if (!chatId) {
+            throw new Error('Chat ID is required for live wallet operations.');
         }
 
-        try {
-            this.wallet = Keypair.fromSecretKey(bs58.decode(privateKeyString));
-            this.logger.log(`Wallet loaded: ${this.wallet.publicKey.toBase58()}`);
-            return this.wallet;
-        } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            throw new Error(`Failed to decode PRIVATE_KEY: ${msg}`);
-        }
+        return this.telegramWorkspace.getWalletKeypair(chatId);
     }
 
     async onModuleInit() {
         if (this.connection && !this.isDryRun) {
             try {
-                const wallet = this.getWallet();
-                const balance = await this.connection.getBalance(wallet.publicKey);
-                const solBalance = balance / 1_000_000_000;
-                this.logger.log(`💰 Current Balance: ${solBalance.toFixed(4)} SOL`);
+                const connectedWallets = await this.telegramWorkspace.getConnectedWalletCount();
+                this.logger.log(
+                    `[Init] Chat-generated wallet mode active. Connected wallets: ${connectedWallets}`,
+                );
             } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
-                this.logger.error(`Failed to fetch wallet balance: ${message}`);
+                this.logger.error(`Failed to initialize chat wallet mode: ${message}`);
                 throw error;
             }
 
@@ -259,7 +250,7 @@ export class TradeService implements OnModuleInit {
             await this.startMonitoringAllTrades();
             await this.preloadOpenTradeDecimals();
         } else if (this.isDryRun) {
-            this.logger.log('[DRY_RUN] Wallet loading skipped. Quotes/signals can run without PRIVATE_KEY.');
+            this.logger.log('[DRY_RUN] Chat-generated wallets available; live swaps remain disabled.');
         }
     }
 
@@ -413,25 +404,6 @@ export class TradeService implements OnModuleInit {
         return { dailyRealizedPnlUsd, consecutiveLosses, totalRealizedPnlUsd };
     }
 
-    private setupWalletAndConnection() {
-        const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
-        if (rpcEndpoint) {
-            this.connection = new Connection(rpcEndpoint, 'confirmed');
-        }
-
-        const privateKeyString = this.configService.get<string>('PRIVATE_KEY');
-        if (privateKeyString) {
-            try {
-                const secretKey = bs58.decode(privateKeyString);
-                this.wallet = Keypair.fromSecretKey(secretKey);
-                this.logger.log(`Wallet loaded: ${this.wallet.publicKey.toBase58()}`);
-            } catch (error) {
-                const msg = error instanceof Error ? error.message : String(error);
-                this.logger.error(`Failed to decode private key: ${msg}`);
-            }
-        }
-    }
-
     /**
      * Helper to resolve DNS using Google DNS-over-HTTPS if standard lookup fails
      */
@@ -489,59 +461,47 @@ export class TradeService implements OnModuleInit {
             targetStopLoss?: number;
             targetTrailingDistance?: number;
         },
+        telegramChatId?: string,
     ): Promise<{ success: boolean; message: string }> {
         // DRY_RUN should not mutate trading state in DB. Use it as signal-only mode.
         if (this.isDryRun) {
-            const buyAmountUSD = customAmountUSD || this.positionSizeUSD;
-            const solPrice = await this.getSolPrice();
-            const amountInSol = buyAmountUSD / solPrice;
-            const amountInLamports = Math.floor(amountInSol * 1_000_000_000);
-            const priorityFeeLamports = options?.priorityFeeSol
-                ? Math.floor(options.priorityFeeSol * 1_000_000_000)
-                : undefined;
-
-            const { success, entryPrice, error, actualSol, actualTokens } =
-                await this.executeJupiterSwap(
-                    WRAPPED_SOL_MINT,
-                    tokenMint,
-                    amountInLamports,
-                    'BUY',
-                    buyAmountUSD,
-                    0,
-                    options?.customSlippageBps,
-                    priorityFeeLamports,
-                );
-
-            if (success && entryPrice > 0) {
-                const symbol = await this.fetchTokenSymbol(tokenMint);
-                const strategyName = options?.targetTakeProfit
-                    ? '🔥 Established Rebound & CTO (TP 18%, TSL 2.5%, Hard SL 20%)'
-                    : 'Standard Second-Wave';
-                await this.reportingService.sendBuyAlert(
-                    tokenMint,
-                    entryPrice,
-                    0,
-                    symbol,
-                    metadata?.socials,
-                    strategyName,
-                    {
-                        solSpent: actualSol || amountInSol,
-                        tokensReceived: actualTokens,
-                        solPrice,
-                    },
-                );
-                return { success: true, message: `[DRY_RUN] Signal emitted for ${symbol}` };
-            }
-
+            const symbol = await this.fetchTokenSymbol(tokenMint);
             return {
-                success: false,
-                message: `[DRY_RUN] Quote failed: ${error || 'Unknown error'}`,
+                success: true,
+                message: `[DRY_RUN] Signal only. No live swap executed for ${symbol}.`,
             };
         }
 
+        if (!telegramChatId) {
+            return { success: false, message: 'Live trading requires a registered Telegram chat.' };
+        }
+
+        const chatRecord = telegramChatId
+            ? await this.telegramWorkspace.getChatById(telegramChatId)
+            : null;
+        if (!chatRecord) {
+            return { success: false, message: 'Telegram chat not registered. Send /start first.' };
+        }
+
+        const chatSettings = telegramChatId
+            ? await this.telegramWorkspace.getChatSettings(telegramChatId)
+            : null;
+        const effectiveTotalSlots = chatSettings?.totalSlots ?? this.totalSlots;
+        const effectivePositionSizeUSD =
+            chatSettings?.positionSizeUsd ?? this.positionSizeUSD;
+        const effectiveSlippageBps = chatSettings
+            ? Math.max(1, Math.round(chatSettings.slippageOnSol * 10000))
+            : this.slippageBps;
+        const wallet = await this.getWallet(telegramChatId);
+        const tradeChatDbId = chatRecord?.id;
+
         // 1. Cek apakah sudah punya koin ini (OPEN) atau sedang dalam cooldown
         const recentTrade = await this.prismaService.trade.findFirst({
-            where: { tokenMint, mode: 'LIVE' },
+            where: {
+                tokenMint,
+                mode: 'LIVE',
+                ...(tradeChatDbId ? { telegramChatId: tradeChatDbId } : {}),
+            },
             orderBy: { createdAt: 'desc' },
         });
 
@@ -570,14 +530,22 @@ export class TradeService implements OnModuleInit {
         }
 
         const openTradesCount = await this.prismaService.trade.count({
-            where: { status: 'OPEN', mode: 'LIVE' },
+            where: {
+                status: 'OPEN',
+                mode: 'LIVE',
+                ...(tradeChatDbId ? { telegramChatId: tradeChatDbId } : {}),
+            },
         });
-        if (openTradesCount >= this.totalSlots && !customAmountUSD) {
+        if (openTradesCount >= effectiveTotalSlots && !customAmountUSD) {
             return { success: false, message: 'All trading slots are full.' };
         }
 
         const openTrades = await this.prismaService.trade.findMany({
-            where: { status: 'OPEN', mode: 'LIVE' },
+            where: {
+                status: 'OPEN',
+                mode: 'LIVE',
+                ...(tradeChatDbId ? { telegramChatId: tradeChatDbId } : {}),
+            },
             select: { slotNumber: true },
         });
 
@@ -591,8 +559,8 @@ export class TradeService implements OnModuleInit {
         }
 
         // Use custom amount if provided, otherwise use config
-        const buyAmountUSD = customAmountUSD || this.positionSizeUSD;
-        const committedCapitalUsd = openTradesCount * this.positionSizeUSD + buyAmountUSD;
+        const buyAmountUSD = customAmountUSD || effectivePositionSizeUSD;
+        const committedCapitalUsd = openTradesCount * effectivePositionSizeUSD + buyAmountUSD;
         const spendableCapitalUsd = Math.max(this.totalCapital - this.reserveAmount, 0);
         if (!customAmountUSD && committedCapitalUsd > spendableCapitalUsd) {
             return {
@@ -658,7 +626,7 @@ export class TradeService implements OnModuleInit {
         const executionPayload: TradeExecutionPayload = {
             tokenMint,
             amountSol: amountInSol,
-            slippage: options?.customSlippageBps || this.slippageBps,
+            slippage: options?.customSlippageBps || effectiveSlippageBps,
             priorityFee: priorityFeeLamports || 0,
             skipPreflight: false,
         };
@@ -676,7 +644,7 @@ export class TradeService implements OnModuleInit {
                 };
             }
 
-            const wallet = this.getWallet();
+            const wallet = await this.getWallet(telegramChatId);
             const balanceLamports = await this.connection.getBalance(wallet.publicKey);
             const balanceSol = balanceLamports / 1_000_000_000;
             const reserveSol = this.reserveAmount / solPrice;
@@ -709,8 +677,9 @@ export class TradeService implements OnModuleInit {
                 'BUY',
                 buyAmountUSD,
                 0,
-                options?.customSlippageBps,
+                options?.customSlippageBps || effectiveSlippageBps,
                 priorityFeeLamports,
+                wallet,
             );
 
         if (success && entryPrice > 0) {
@@ -751,6 +720,7 @@ export class TradeService implements OnModuleInit {
                     targetTakeProfit: options?.targetTakeProfit,
                     targetStopLoss: options?.targetStopLoss,
                     targetTrailingDistance: options?.targetTrailingDistance,
+                    telegramChatId: tradeChatDbId || null,
                 },
             });
             await this.updateTradeAuditFields(createdTrade.id, {
@@ -820,8 +790,17 @@ export class TradeService implements OnModuleInit {
                     `[Slot ${trade.slotNumber}] 🤖 DRY RUN: Simulated token balance: ${actualBalance}`,
                 );
             } else {
+                if (!trade.telegramChatId) {
+                    this.logger.error(
+                        `[Slot ${trade.slotNumber}] Legacy live trade is not bound to a Telegram wallet. Aborting sell.`,
+                    );
+                    return false;
+                }
+                const wallet = await this.telegramWorkspace.getWalletKeypairByChatDbId(
+                    trade.telegramChatId,
+                );
                 const fetchedBalance = await this.getTokenBalance(
-                    this.getWallet().publicKey.toBase58(),
+                    wallet.publicKey.toBase58(),
                     trade.tokenMint,
                 );
                 if (fetchedBalance === null) {
@@ -875,6 +854,15 @@ export class TradeService implements OnModuleInit {
 
             // 🚀 Panic Gas Accel: Hajar priority fee tinggi (0.0005 SOL = 500,000 lamports) biar instan masuk block pertama
             const sellPriorityFee = isUrgent ? 500_000 : undefined;
+            if (!trade.telegramChatId) {
+                this.logger.error(
+                    `[Trade ${tradeId}] Legacy live trade is not bound to a Telegram wallet. Skipping sell.`,
+                );
+                return false;
+            }
+            const activeWallet = await this.telegramWorkspace.getWalletKeypairByChatDbId(
+                trade.telegramChatId,
+            );
 
             const {
                 success,
@@ -893,6 +881,7 @@ export class TradeService implements OnModuleInit {
                 0,
                 sellSlippage,
                 sellPriorityFee,
+                activeWallet,
             );
 
             if (success) {
@@ -1103,6 +1092,7 @@ export class TradeService implements OnModuleInit {
         retryCount = 0,
         customSlippageBps?: number,
         priorityFeeLamports?: number,
+        wallet?: Keypair,
     ): Promise<{
         success: boolean;
         entryPrice: number;
@@ -1116,6 +1106,10 @@ export class TradeService implements OnModuleInit {
             this.configService.get<string>('TRADE_MAX_RETRIES', '5'),
             10,
         );
+        if (!wallet) {
+            throw new Error('Live swap execution requires a chat wallet.');
+        }
+        const activeWallet = wallet;
         try {
             // Jurus Pamungkas: Pakai Paid Endpoint & API Key
             const hostname = 'api.jup.ag';
@@ -1238,7 +1232,7 @@ export class TradeService implements OnModuleInit {
                 `${baseUrl}/swap/v1/swap`,
                 {
                     quoteResponse: quoteData,
-                    userPublicKey: this.getWallet().publicKey.toString(),
+                    userPublicKey: activeWallet.publicKey.toString(),
                     wrapAndUnwrapSol: true,
                     dynamicComputeUnitLimit: true,
                     prioritizationFeeLamports: feeConfig,
@@ -1249,7 +1243,7 @@ export class TradeService implements OnModuleInit {
             const transaction = VersionedTransaction.deserialize(
                 Buffer.from(swapResponse.data.swapTransaction, 'base64'),
             );
-            transaction.sign([this.getWallet()]);
+            transaction.sign([activeWallet]);
             const confirmationBlockhash = transaction.message.recentBlockhash;
             const swapLastValidBlockHeight = Number(swapResponse.data?.lastValidBlockHeight);
             const hasSwapLastValidBlockHeight =
@@ -1262,11 +1256,11 @@ export class TradeService implements OnModuleInit {
                 const randomTipAccount = await this.getJitoTipAccount();
 
                 const tx2Message = new TransactionMessage({
-                    payerKey: this.getWallet().publicKey,
+                    payerKey: activeWallet.publicKey,
                     recentBlockhash: transaction.message.recentBlockhash,
                     instructions: [
                         SystemProgram.transfer({
-                            fromPubkey: this.getWallet().publicKey,
+                            fromPubkey: activeWallet.publicKey,
                             toPubkey: new PublicKey(randomTipAccount),
                             lamports: jitoTipLamports,
                         }),
@@ -1274,7 +1268,7 @@ export class TradeService implements OnModuleInit {
                 }).compileToV0Message();
 
                 const tx2 = new VersionedTransaction(tx2Message);
-                tx2.sign([this.getWallet()]);
+                tx2.sign([activeWallet]);
 
                 const tx1Base58 = bs58.encode(transaction.serialize());
                 const tx2Base58 = bs58.encode(tx2.serialize());
@@ -1356,7 +1350,7 @@ export class TradeService implements OnModuleInit {
             try {
                 const actualSwap = await this.getActualSwapDetails(
                     txid,
-                    this.getWallet().publicKey.toBase58(),
+                    activeWallet.publicKey.toBase58(),
                     side === 'BUY' ? outputMint : inputMint,
                     jitoTipLamports,
                 );
@@ -1422,6 +1416,7 @@ export class TradeService implements OnModuleInit {
                     retryCount + 1,
                     customSlippageBps,
                     priorityFeeLamports,
+                    activeWallet,
                 );
             }
             return { success: false, entryPrice: 0, error: message, txHash: undefined };
@@ -1660,17 +1655,25 @@ export class TradeService implements OnModuleInit {
     async handleManualBuy(
         tokenMint: string,
         amountUSD: number,
+        chatId?: string,
     ): Promise<{ success: boolean; message: string }> {
         this.logger.log(`[Manual Buy] Initiating buy for ${tokenMint} with $${amountUSD}`);
-        return this.attemptBuy(tokenMint, undefined, amountUSD);
+        return this.attemptBuy(tokenMint, undefined, amountUSD, undefined, chatId);
     }
 
     async handleManualSell(
         tokenMint: string,
         percentage: number,
+        chatId?: string,
     ): Promise<{ success: boolean; message: string }> {
+        const chatRecord = chatId ? await this.telegramWorkspace.getChatById(chatId) : null;
         const trade = await this.prismaService.trade.findFirst({
-            where: { tokenMint, status: 'OPEN', mode: 'LIVE' },
+            where: {
+                tokenMint,
+                status: 'OPEN',
+                mode: 'LIVE',
+                ...(chatRecord?.id ? { telegramChatId: chatRecord.id } : {}),
+            },
         });
 
         const currentPrice = await this.reportingService.fetchCurrentPrice(tokenMint);
@@ -1686,10 +1689,11 @@ export class TradeService implements OnModuleInit {
             };
         } else {
             // Manual sell for token not in DB
-            const actualBalance = await this.getTokenBalance(
-                this.getWallet().publicKey.toBase58(),
-                tokenMint,
-            );
+            if (!chatId) {
+                return { success: false, message: 'Chat wallet is required for manual sell.' };
+            }
+            const wallet = await this.getWallet(chatId);
+            const actualBalance = await this.getTokenBalance(wallet.publicKey.toBase58(), tokenMint);
             if (actualBalance === null || actualBalance <= 0)
                 return { success: false, message: 'Zero or invalid balance in wallet.' };
 
@@ -1703,6 +1707,11 @@ export class TradeService implements OnModuleInit {
                 WRAPPED_SOL_MINT,
                 amountInLamports,
                 'SELL',
+                undefined,
+                0,
+                undefined,
+                undefined,
+                wallet,
             );
 
             if (success) {
@@ -1715,11 +1724,17 @@ export class TradeService implements OnModuleInit {
         }
     }
 
-    async getWalletHoldings(): Promise<Array<{ mint: string; symbol: string; balance: number }>> {
+    async getWalletHoldings(
+        walletAddress: string,
+    ): Promise<Array<{ mint: string; symbol: string; balance: number }>> {
         try {
             const { PublicKey } = await import('@solana/web3.js');
+            if (!walletAddress) {
+                throw new Error('Wallet address is required to inspect holdings.');
+            }
+            const resolvedWalletAddress = walletAddress;
             const accounts = await this.connection.getParsedTokenAccountsByOwner(
-                this.getWallet().publicKey,
+                new PublicKey(resolvedWalletAddress),
                 { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') },
             );
 
@@ -1752,5 +1767,49 @@ export class TradeService implements OnModuleInit {
             this.logger.error(`Failed to fetch wallet holdings: ${msg}`);
             return [];
         }
+    }
+
+    async getWalletHoldingsForChat(chatId: string): Promise<
+        Array<{ mint: string; symbol: string; balance: number }>
+    > {
+        const wallet = await this.getWallet(chatId);
+        return this.getWalletHoldings(wallet.publicKey.toBase58());
+    }
+
+    async getWalletBalanceForChat(
+        chatId: string,
+    ): Promise<{ publicKey: string; balanceSol: number; balanceUsd: number }> {
+        const wallet = await this.getWallet(chatId);
+        const balanceLamports = await this.connection.getBalance(wallet.publicKey);
+        const balanceSol = balanceLamports / 1_000_000_000;
+        const solPrice = await this.getSolPrice();
+        return {
+            publicKey: wallet.publicKey.toBase58(),
+            balanceSol,
+            balanceUsd: balanceSol * solPrice,
+        };
+    }
+
+    async getWinRateForChat(chatId: string): Promise<{
+        total: number;
+        wins: number;
+        losses: number;
+        winRate: number;
+    }> {
+        const chatRecord = await this.telegramWorkspace.getChatById(chatId);
+        if (!chatRecord) {
+            return { total: 0, wins: 0, losses: 0, winRate: 0 };
+        }
+
+        const trades = await this.prismaService.trade.findMany({
+            where: { telegramChatId: chatRecord.id, status: 'CLOSED', mode: 'LIVE' },
+            select: { profitUsd: true },
+        });
+        const total = trades.length;
+        const wins = trades.filter((trade) => (trade.profitUsd || 0) > 0).length;
+        const losses = total - wins;
+        const winRate = total > 0 ? (wins / total) * 100 : 0;
+
+        return { total, wins, losses, winRate };
     }
 }

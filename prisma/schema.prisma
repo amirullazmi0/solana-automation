@@ -17,8 +17,64 @@ enum TradeMode {
   PAPER
 }
 
+enum TelegramChatType {
+  PRIVATE
+  GROUP
+  SUPERGROUP
+  CHANNEL
+}
+
+enum TelegramChatStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+model TelegramChat {
+  id          Int                 @id @default(autoincrement())
+  chatId      String              @unique
+  chatType    TelegramChatType
+  title       String?
+  username    String?
+  status      TelegramChatStatus   @default(ACTIVE)
+  lastSeenAt  DateTime             @default(now())
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  walletVault TelegramWalletVault?
+  settings    TelegramChatSetting?
+  trades      Trade[]
+
+  @@index([status, chatType])
+  @@index([lastSeenAt])
+}
+
+model TelegramWalletVault {
+  id                  Int           @id @default(autoincrement())
+  telegramChatId      Int           @unique
+  publicKey           String        @unique
+  encryptedSecretKey  String
+  initializationVector String
+  authTag             String
+  keyVersion          Int           @default(1)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  chat                TelegramChat  @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+}
+
+model TelegramChatSetting {
+  id               Int          @id @default(autoincrement())
+  telegramChatId   Int          @unique
+  totalSlots       Int          @default(2)
+  positionSizeUsd  Float        @default(5)
+  slippageOnSol    Float        @default(0.005)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  chat             TelegramChat  @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+}
+
 model Trade {
   id                      Int         @id @default(autoincrement())
+  telegramChatId          Int?
   tokenMint               String
   symbol                  String?     @default("UNKNOWN")
   slotNumber              Int
@@ -50,10 +106,12 @@ model Trade {
   targetTakeProfit        Float?
   targetStopLoss          Float?
   targetTrailingDistance  Float?
+  telegramChat            TelegramChat? @relation(fields: [telegramChatId], references: [id], onDelete: SetNull)
 
   @@index([status])
   @@index([mode, status])
   @@index([tokenMint, createdAt])
+  @@index([telegramChatId, status, mode])
 }
 
 enum WatchlistStatus {

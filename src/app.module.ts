@@ -10,6 +10,7 @@ import { ScannerModule } from './scanner/scanner.module';
 import { TradeModule } from './trade/trade.module';
 import { PriceMonitorModule } from './price-monitor/price-monitor.module';
 import { AIModule } from './ai/ai.module';
+import { TelegramModule } from './telegram/telegram.module';
 
 @Module({
     imports: [
@@ -19,6 +20,7 @@ import { AIModule } from './ai/ai.module';
         }),
         ScheduleModule.forRoot(),
         PrismaModule,
+        TelegramModule,
         ReportingModule,
         AnalyzerModule,
         ScannerModule,
