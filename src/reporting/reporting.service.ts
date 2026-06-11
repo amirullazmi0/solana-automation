@@ -491,7 +491,7 @@ export class ReportingService implements OnModuleInit {
             `- Slippage on SOL: \`${(settings.slippageOnSol * 100).toFixed(2)}%\` 🌐\n` +
             `  Price tolerance used when swapping.\n` +
             `- Dry run: \`${settings.dryRun ? 'true' : 'false'}\` 🧪\n` +
-            `  When true, the bot sends signals only and skips live swaps.\n\n` +
+            `  When true, automatic swaps are skipped.\n\n` +
             `Choose a preset below.`;
 
         const buttons: TelegramBot.InlineKeyboardButton[][] = [

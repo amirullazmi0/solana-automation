@@ -758,6 +758,7 @@ export class TradeService implements OnModuleInit {
         currentPrice: number,
         exitReason: string,
         percentage: number = 1.0,
+        forceLive = false,
     ): Promise<boolean> {
         const baseTrade = await this.prismaService.trade.findUnique({
             where: { id: tradeId },
@@ -786,7 +787,7 @@ export class TradeService implements OnModuleInit {
             const tradeSettings = trade.telegramChatId
                 ? await this.telegramWorkspace.getChatSettingsByChatDbId(trade.telegramChatId)
                 : null;
-            const tradeDryRun = tradeSettings?.dryRun ?? true;
+            const tradeDryRun = forceLive ? false : tradeSettings?.dryRun ?? true;
 
             if (tradeDryRun) {
                 const solPrice = await this.getSolPrice();
@@ -1056,7 +1057,7 @@ export class TradeService implements OnModuleInit {
 
         this.logger.warn(`[Trade ${tradeId}] Queueing sell retry ${retryCount}/3 in ${delayMs}ms.`);
         setTimeout(() => {
-            void this.executeSell(tradeId, currentPrice, exitReason, percentage);
+                void this.executeSell(tradeId, currentPrice, exitReason, percentage);
         }, delayMs);
     }
 
@@ -1089,7 +1090,7 @@ export class TradeService implements OnModuleInit {
             `[Trade ${tradeId}] Queueing price anomaly retry ${retryCount}/3 in 60000ms.`,
         );
         setTimeout(() => {
-            void this.executeSell(tradeId, currentPrice, exitReason, percentage);
+                void this.executeSell(tradeId, currentPrice, exitReason, percentage);
         }, 60_000);
     }
 
@@ -1679,14 +1680,6 @@ export class TradeService implements OnModuleInit {
         chatId?: string,
     ): Promise<{ success: boolean; message: string }> {
         const chatRecord = chatId ? await this.telegramWorkspace.getChatById(chatId) : null;
-        const chatSettings = chatId ? await this.telegramWorkspace.getChatSettings(chatId) : null;
-        if (chatSettings?.dryRun) {
-            const symbol = await this.fetchTokenSymbol(tokenMint);
-            return {
-                success: true,
-                message: `[DRY_RUN] Signal only. No live sell executed for ${symbol}.`,
-            };
-        }
         const trade = await this.prismaService.trade.findFirst({
             where: {
                 tokenMint,
@@ -1702,7 +1695,7 @@ export class TradeService implements OnModuleInit {
         }
 
         if (trade) {
-            await this.executeSell(trade.id, currentPrice, 'MANUAL_SELL', percentage);
+            await this.executeSell(trade.id, currentPrice, 'MANUAL_SELL', percentage, true);
             return {
                 success: true,
                 message: `Sell order for ${(percentage * 100).toFixed(0)}% executed.`,
@@ -1732,7 +1725,7 @@ export class TradeService implements OnModuleInit {
                 undefined,
                 undefined,
                 wallet,
-                chatSettings?.dryRun ?? true,
+                false,
             );
 
             if (success) {
