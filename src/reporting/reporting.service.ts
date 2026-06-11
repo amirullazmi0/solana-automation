@@ -286,9 +286,10 @@ export class ReportingService implements OnModuleInit {
                 { text: 'Sell', callback_data: `sell_menu:${mint}` },
             ],
             [
-                { text: 'RugCheck', url: `https://rugcheck.xyz/tokens/${mint}` },
+                { text: 'Pump.fun', url: `https://pump.fun/coin/${mint}` },
                 { text: 'DexScreener', url: `https://dexscreener.com/solana/${mint}` },
             ],
+            [{ text: 'RugCheck', url: `https://rugcheck.xyz/tokens/${mint}` }],
         ];
 
         await this.sendMessage(
@@ -341,6 +342,10 @@ export class ReportingService implements OnModuleInit {
                 { text: '$15', callback_data: `buy_exec:${mint}|15` },
                 { text: '$20', callback_data: `buy_exec:${mint}|20` },
             ],
+            [
+                { text: 'Pump.fun', url: `https://pump.fun/coin/${mint}` },
+                { text: 'DexScreener', url: `https://dexscreener.com/solana/${mint}` },
+            ],
         ];
 
         await this.sendMessage(
@@ -362,6 +367,10 @@ export class ReportingService implements OnModuleInit {
             [
                 { text: '50%', callback_data: `sell_exec:${mint}|0.5` },
                 { text: '25%', callback_data: `sell_exec:${mint}|0.25` },
+            ],
+            [
+                { text: 'Pump.fun', url: `https://pump.fun/coin/${mint}` },
+                { text: 'DexScreener', url: `https://dexscreener.com/solana/${mint}` },
             ],
         ];
 
