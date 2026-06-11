@@ -207,7 +207,9 @@ export class TelegramWorkspaceService {
 
     async updateChatSettings(
         chatId: string,
-        updates: Partial<Pick<TelegramChatSetting, 'totalSlots' | 'positionSizeUsd' | 'slippageOnSol'>>,
+        updates: Partial<
+            Pick<TelegramChatSetting, 'totalSlots' | 'positionSizeUsd' | 'slippageOnSol' | 'dryRun'>
+        >,
     ): Promise<TelegramChatSetting> {
         const chat = await this.prismaService.telegramChat.findUnique({
             where: { chatId },
@@ -225,6 +227,7 @@ export class TelegramWorkspaceService {
                 totalSlots: updates.totalSlots ?? 2,
                 positionSizeUsd: updates.positionSizeUsd ?? 5,
                 slippageOnSol: updates.slippageOnSol ?? 0.005,
+                dryRun: updates.dryRun ?? this.getDefaultDryRun(),
             },
             update: {
                 ...updates,
@@ -244,6 +247,7 @@ export class TelegramWorkspaceService {
                 totalSlots: 2,
                 positionSizeUsd: 5,
                 slippageOnSol: 0.005,
+                dryRun: this.getDefaultDryRun(),
             },
             update: {},
         });
@@ -275,6 +279,10 @@ export class TelegramWorkspaceService {
         }
 
         return createHash('sha256').update(rawKey).digest();
+    }
+
+    private getDefaultDryRun(): boolean {
+        return this.configService.get<string>('DRY_RUN') === 'true';
     }
 
     private encryptSecretKey(secretKey: Uint8Array): {

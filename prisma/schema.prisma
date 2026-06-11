@@ -67,6 +67,7 @@ model TelegramChatSetting {
   totalSlots       Int          @default(2)
   positionSizeUsd  Float        @default(5)
   slippageOnSol    Float        @default(0.005)
+  dryRun           Boolean      @default(true)
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
   chat             TelegramChat  @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)

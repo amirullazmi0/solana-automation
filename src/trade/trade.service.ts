@@ -463,15 +463,6 @@ export class TradeService implements OnModuleInit {
         },
         telegramChatId?: string,
     ): Promise<{ success: boolean; message: string }> {
-        // DRY_RUN should not mutate trading state in DB. Use it as signal-only mode.
-        if (this.isDryRun) {
-            const symbol = await this.fetchTokenSymbol(tokenMint);
-            return {
-                success: true,
-                message: `[DRY_RUN] Signal only. No live swap executed for ${symbol}.`,
-            };
-        }
-
         if (!telegramChatId) {
             return { success: false, message: 'Live trading requires a registered Telegram chat.' };
         }
@@ -486,6 +477,9 @@ export class TradeService implements OnModuleInit {
         const chatSettings = telegramChatId
             ? await this.telegramWorkspace.getChatSettings(telegramChatId)
             : null;
+        const effectiveDryRun = telegramChatId
+            ? chatSettings?.dryRun ?? this.isDryRun
+            : this.isDryRun;
         const effectiveTotalSlots = chatSettings?.totalSlots ?? this.totalSlots;
         const effectivePositionSizeUSD =
             chatSettings?.positionSizeUsd ?? this.positionSizeUSD;
@@ -494,6 +488,14 @@ export class TradeService implements OnModuleInit {
             : this.slippageBps;
         const wallet = await this.getWallet(telegramChatId);
         const tradeChatDbId = chatRecord?.id;
+
+        if (effectiveDryRun) {
+            const symbol = await this.fetchTokenSymbol(tokenMint);
+            return {
+                success: true,
+                message: `[DRY_RUN] Signal only. No live swap executed for ${symbol}.`,
+            };
+        }
 
         // 1. Cek apakah sudah punya koin ini (OPEN) atau sedang dalam cooldown
         const recentTrade = await this.prismaService.trade.findFirst({
@@ -1667,6 +1669,14 @@ export class TradeService implements OnModuleInit {
         chatId?: string,
     ): Promise<{ success: boolean; message: string }> {
         const chatRecord = chatId ? await this.telegramWorkspace.getChatById(chatId) : null;
+        const chatSettings = chatId ? await this.telegramWorkspace.getChatSettings(chatId) : null;
+        if (chatSettings?.dryRun) {
+            const symbol = await this.fetchTokenSymbol(tokenMint);
+            return {
+                success: true,
+                message: `[DRY_RUN] Signal only. No live sell executed for ${symbol}.`,
+            };
+        }
         const trade = await this.prismaService.trade.findFirst({
             where: {
                 tokenMint,
