@@ -473,9 +473,8 @@ export class TradeService implements OnModuleInit {
         const chatSettings = telegramChatId
             ? await this.telegramWorkspace.getChatSettings(telegramChatId)
             : null;
-        const effectiveDryRun = telegramChatId
-            ? chatSettings?.dryRun ?? true
-            : true;
+        const isManualBuy = customAmountUSD !== undefined;
+        const effectiveDryRun = isManualBuy ? false : chatSettings?.dryRun ?? true;
         const effectiveTotalSlots = chatSettings?.totalSlots ?? this.totalSlots;
         const effectivePositionSizeUSD =
             chatSettings?.positionSizeUsd ?? this.positionSizeUSD;
