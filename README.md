@@ -429,10 +429,10 @@ The current codebase now includes a chat-driven Telegram control plane.
 - Button labels include small emoji markers for readability.
 
 ### Dry Run Behavior
-- Telegram `dryRun` is stored per chat and controls that chat's buy/sell execution.
+- Telegram `dryRun` is stored per chat and controls automatic execution from scanner / signal flows.
 - There is no longer a `DRY_RUN` env dependency in the runtime flow.
 - Outside a chat context, the system falls back to safe simulation mode.
-- Live swaps are skipped when dry run is enabled.
-- `dryRun=false` enables live execution for that specific chat.
+- Manual Telegram `Buy` / `Sell` actions stay live.
+- `dryRun=false` enables live execution for automatic trades for that specific chat.
 *Last updated: Juni 2026 - MaSoul Sniper Lean Filter V85/V86, Global DTO, Capital Protection, Dynamic Cooldown, Price Monitor Optimizations*
 *Created with ❤️ by Antigravity for Amirull Azmi.*
