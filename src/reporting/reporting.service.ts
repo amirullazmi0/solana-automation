@@ -350,6 +350,7 @@ export class ReportingService implements OnModuleInit {
         const message = `🟢 *Choose Buy Amount ($USD):*\nToken: \`${mint}\`\n\nQuick presets for this position.`;
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
             [
+                { text: '💵 $2', callback_data: `buy_exec:${mint}|5` },
                 { text: '💵 $5', callback_data: `buy_exec:${mint}|5` },
                 { text: '💵 $10', callback_data: `buy_exec:${mint}|10` },
             ],
