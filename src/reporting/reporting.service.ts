@@ -503,6 +503,7 @@ export class ReportingService implements OnModuleInit {
                 { text: '4 slots', callback_data: 'settings:slots|4' },
             ],
             [
+                { text: '$2 / entry', callback_data: 'settings:position|2' },
                 { text: '$5 / entry', callback_data: 'settings:position|5' },
                 { text: '$10 / entry', callback_data: 'settings:position|10' },
                 { text: '$15 / entry', callback_data: 'settings:position|15' },
