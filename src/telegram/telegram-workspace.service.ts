@@ -95,6 +95,16 @@ export class TelegramWorkspaceService {
         });
     }
 
+    async getChatByDbId(chatDbId: number) {
+        return this.prismaService.telegramChat.findUnique({
+            where: { id: chatDbId },
+            include: {
+                walletVault: true,
+                settings: true,
+            },
+        });
+    }
+
     async getActiveChatIds(): Promise<string[]> {
         const rows = await this.prismaService.telegramChat.findMany({
             where: { status: 'ACTIVE' },

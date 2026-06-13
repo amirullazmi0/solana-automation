@@ -725,6 +725,7 @@ export class ReportingService implements OnModuleInit {
             solPrice?: number;
         },
         isDryRun = true,
+        targetChatId?: string,
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
         const prefix = isDryRun ? '🤖 [SIMULASI] ' : '🚀 ';
@@ -769,7 +770,7 @@ export class ReportingService implements OnModuleInit {
             },
         };
 
-        await this.sendMessage(message, options);
+        await this.sendMessage(message, options, 0, targetChatId);
     }
 
     async sendTrailingAlert(
@@ -806,6 +807,7 @@ export class ReportingService implements OnModuleInit {
             usdReceived?: number;
         },
         isDryRun = true,
+        targetChatId?: string,
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
         const isSuccess = netProfitPercent >= 0;
@@ -854,9 +856,14 @@ export class ReportingService implements OnModuleInit {
             { text: '🔍 Solscan', url: `https://solscan.io/token/${tokenMint}` },
         ];
 
-        await this.sendMessage(message, {
-            reply_markup: { inline_keyboard: [buttons] },
-        });
+        await this.sendMessage(
+            message,
+            {
+                reply_markup: { inline_keyboard: [buttons] },
+            },
+            0,
+            targetChatId,
+        );
     }
 
     async sendBuySignalAlert(
@@ -868,6 +875,7 @@ export class ReportingService implements OnModuleInit {
             targetTrailingDistance?: number;
             targetStopLoss?: number;
         },
+        targetChatId?: string,
     ) {
         const displaySymbol = metadata?.symbol || 'UNKNOWN';
         const strategy =
@@ -907,9 +915,7 @@ export class ReportingService implements OnModuleInit {
             ],
         ].filter((row) => row.length > 0);
 
-        await this.sendMessage(message, {
-            reply_markup: { inline_keyboard: buttons },
-        });
+        await this.sendMessage(message, { reply_markup: { inline_keyboard: buttons } }, 0, targetChatId);
     }
 
     async sendWatchlistNotification(

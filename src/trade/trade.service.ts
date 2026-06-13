@@ -483,6 +483,7 @@ export class TradeService implements OnModuleInit {
             : this.slippageBps;
         const wallet = await this.getWallet(telegramChatId);
         const tradeChatDbId = chatRecord?.id;
+        const targetChatId = chatRecord?.chatId;
 
         if (effectiveDryRun) {
             const symbol = await this.fetchTokenSymbol(tokenMint);
@@ -743,6 +744,7 @@ export class TradeService implements OnModuleInit {
                     solPrice,
                 },
                 effectiveDryRun,
+                targetChatId,
             );
 
             // PriceMonitorService otomatis akan mendeteksi trade baru dari DB
@@ -787,6 +789,10 @@ export class TradeService implements OnModuleInit {
                 ? await this.telegramWorkspace.getChatSettingsByChatDbId(trade.telegramChatId)
                 : null;
             const tradeDryRun = forceLive ? false : tradeSettings?.dryRun ?? true;
+            const targetChat = trade.telegramChatId
+                ? await this.telegramWorkspace.getChatByDbId(trade.telegramChatId)
+                : null;
+            const targetChatId = targetChat?.chatId;
 
             if (tradeDryRun) {
                 const solPrice = await this.getSolPrice();
@@ -1000,6 +1006,7 @@ export class TradeService implements OnModuleInit {
                         usdReceived: totalUsdReceived,
                     },
                     tradeDryRun,
+                    targetChatId,
                 );
                 return true;
             }

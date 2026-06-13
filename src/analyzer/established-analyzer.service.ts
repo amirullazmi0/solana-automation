@@ -551,34 +551,55 @@ export class EstablishedAnalyzerService {
                 isCTO: rugResult.isCTO,
             };
 
-            const isDryRun = true;
-            if (isDryRun) {
-                await this.reportingService.sendBuySignalAlert(tokenMint, metadata, {
-                    strategy: 'Established Rebound & CTO',
-                    targetTakeProfit: 18.0,
-                    targetTrailingDistance: 2.5,
-                    targetStopLoss: 20.0,
-                });
-                return {
-                    isEstablished: true,
-                    executed: false,
-                    reason: 'signal_only',
-                };
-            }
-
-            // Eksekusi Swap Jupiter V6 dengan Pengaturan Keluar Ketat
-            const buyResult = await this.tradeService.attemptBuy(tokenMint, metadata, undefined, {
-                customSlippageBps: 300, // Slippage 3%
-                priorityFeeSol: 0.0001, // 0.0001 SOL Jito tip / Priority fee
-                targetTakeProfit: 18.0, // TP 18% (antara 15% - 20%)
-                targetTrailingDistance: 2.5, // Trailing stop 2.5% (antara 2% - 3%)
-                targetStopLoss: 20.0, // Hard stop loss 20%
+            const activeChats = await this.prismaService.telegramChat.findMany({
+                where: { status: 'ACTIVE' },
+                include: { settings: true },
+                orderBy: { updatedAt: 'desc' },
             });
+
+            let liveBuyExecuted = false;
+            let signalOnlySent = false;
+
+            for (const chat of activeChats) {
+                const chatDryRun = chat.settings?.dryRun ?? true;
+
+                if (chatDryRun) {
+                    signalOnlySent = true;
+                    await this.reportingService.sendBuySignalAlert(
+                        tokenMint,
+                        metadata,
+                        {
+                            strategy: 'Established Rebound & CTO',
+                            targetTakeProfit: 18.0,
+                            targetTrailingDistance: 2.5,
+                            targetStopLoss: 20.0,
+                        },
+                        chat.chatId,
+                    );
+                    continue;
+                }
+
+                const buyResult = await this.tradeService.attemptBuy(tokenMint, metadata, undefined, {
+                    customSlippageBps: 300, // Slippage 3%
+                    priorityFeeSol: 0.0001, // 0.0001 SOL Jito tip / Priority fee
+                    targetTakeProfit: 18.0, // TP 18% (antara 15% - 20%)
+                    targetTrailingDistance: 2.5, // Trailing stop 2.5% (antara 2% - 3%)
+                    targetStopLoss: 20.0, // Hard stop loss 20%
+                }, chat.chatId);
+
+                if (buyResult.success) {
+                    liveBuyExecuted = true;
+                } else {
+                    this.logger.warn(
+                        `[${tokenMint}] Auto-buy failed for chat ${chat.chatId}: ${buyResult.message}`,
+                    );
+                }
+            }
 
             return {
                 isEstablished: true,
-                executed: buyResult.success,
-                reason: buyResult.success ? undefined : buyResult.message,
+                executed: liveBuyExecuted,
+                reason: liveBuyExecuted ? undefined : signalOnlySent ? 'signal_only' : 'auto_buy_failed',
             };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);

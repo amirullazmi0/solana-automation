@@ -659,35 +659,57 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     }
 
                     if (result.safe) {
-                        const isDryRun = true;
+                        const activeChats = await this.prismaService.telegramChat.findMany({
+                            where: { status: 'ACTIVE' },
+                            include: { settings: true },
+                            orderBy: { updatedAt: 'desc' },
+                        });
 
-                        if (isDryRun) {
+                        let liveBuyExecuted = false;
+                        let signalOnlySent = false;
+
+                        for (const chat of activeChats) {
+                            const chatDryRun = chat.settings?.dryRun ?? true;
+
+                            if (chatDryRun) {
+                                signalOnlySent = true;
+                                this.logger.log(
+                                    `[${tokenMint}] MUST BUY signal detected for chat ${chat.chatId}. Dry run enabled, sending signal only.`,
+                                );
+                                await this.reportingService.sendBuySignalAlert(
+                                    tokenMint,
+                                    result.metadata,
+                                    undefined,
+                                    chat.chatId,
+                                );
+                                continue;
+                            }
+
                             this.logger.log(
-                                `[${tokenMint}] MUST BUY signal detected. DRY_RUN enabled, sending Telegram signal only.`,
+                                `[${tokenMint}] Auto-buy enabled for chat ${chat.chatId}. Attempting to buy...`,
                             );
-                            await this.reportingService.sendBuySignalAlert(
+                            const buyResult = await this.tradeService.attemptBuy(
                                 tokenMint,
                                 result.metadata,
+                                undefined,
+                                undefined,
+                                chat.chatId,
                             );
-                            await this.updateWatchlistByMint(tokenMint, {
-                                status: 'FAILED',
-                                reason: 'signal_only',
-                            });
-                            this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
-                            return;
+
+                            if (buyResult.success) {
+                                liveBuyExecuted = true;
+                            } else {
+                                this.logger.warn(
+                                    `[${tokenMint}] Auto-buy failed for chat ${chat.chatId}: ${buyResult.message}`,
+                                );
+                            }
                         }
 
-                        this.logger.log(
-                            `[${tokenMint}] 🚀 Traction detected! Attempting to buy...`,
-                        );
-                        const buyResult = await this.tradeService.attemptBuy(
-                            tokenMint,
-                            result.metadata,
-                        );
-
-                        if (buyResult.success) {
-                            await this.updateWatchlistByMint(tokenMint, { status: 'TRADED' });
-                        }
+                        await this.updateWatchlistByMint(tokenMint, {
+                            status: liveBuyExecuted ? 'TRADED' : 'FAILED',
+                            reason: liveBuyExecuted ? undefined : signalOnlySent ? 'signal_only' : 'auto_buy_failed',
+                        });
+                        this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
                         return;
                     }
 
