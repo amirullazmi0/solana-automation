@@ -485,8 +485,13 @@ export class TradeService implements OnModuleInit {
         const tradeChatDbId = chatRecord?.id;
         const targetChatId = chatRecord?.chatId;
 
+        this.logger.log(
+            `[BuyTrace] token=${tokenMint} chat=${telegramChatId} manual=${isManualBuy} dryRun=${effectiveDryRun} slots=${effectiveTotalSlots} positionUsd=${effectivePositionSizeUSD.toFixed(2)}`,
+        );
+
         if (effectiveDryRun) {
             const symbol = await this.fetchTokenSymbol(tokenMint);
+            this.logger.log(`[BuyTrace] Dry-run exit for token=${tokenMint} chat=${telegramChatId}`);
             return {
                 success: true,
                 message: `[DRY_RUN] Signal only. No live swap executed for ${symbol}.`,
@@ -506,6 +511,7 @@ export class TradeService implements OnModuleInit {
         if (recentTrade && !customAmountUSD) {
             // Jika manual buy (ada customAmount), abaikan cooldown
             if (recentTrade.status === 'OPEN') {
+                this.logger.warn(`[BuyTrace] Blocked by already-open trade token=${tokenMint} chat=${telegramChatId}`);
                 return { success: false, message: `Already holding ${tokenMint}` };
             }
             const winCooldownHours = Number.parseInt(
@@ -523,6 +529,7 @@ export class TradeService implements OnModuleInit {
 
             if (Date.now() < cooldownExpiredAt) {
                 const msg = `Token ${tokenMint} is in cooldown until ${new Date(cooldownExpiredAt).toISOString()} (Last outcome: ${isWin ? 'WIN' : 'LOSS'}, Cooldown: ${cooldownHours}h). Skip.`;
+                this.logger.warn(`[BuyTrace] Blocked by cooldown token=${tokenMint} chat=${telegramChatId}: ${msg}`);
                 return { success: false, message: msg };
             }
         }
@@ -535,6 +542,9 @@ export class TradeService implements OnModuleInit {
             },
         });
         if (openTradesCount >= effectiveTotalSlots && !customAmountUSD) {
+            this.logger.warn(
+                `[BuyTrace] Blocked by slot limit token=${tokenMint} chat=${telegramChatId} openTrades=${openTradesCount} slots=${effectiveTotalSlots}`,
+            );
             return { success: false, message: 'All trading slots are full.' };
         }
 
@@ -561,6 +571,9 @@ export class TradeService implements OnModuleInit {
         const committedCapitalUsd = openTradesCount * effectivePositionSizeUSD + buyAmountUSD;
         const spendableCapitalUsd = Math.max(this.totalCapital - this.reserveAmount, 0);
         if (!customAmountUSD && committedCapitalUsd > spendableCapitalUsd) {
+            this.logger.warn(
+                `[BuyTrace] Blocked by capital guard token=${tokenMint} chat=${telegramChatId} committed=${committedCapitalUsd.toFixed(2)} spendable=${spendableCapitalUsd.toFixed(2)}`,
+            );
             return {
                 success: false,
                 message: `Capital guard blocked buy. Committed after buy would be $${committedCapitalUsd.toFixed(2)}, spendable cap is $${spendableCapitalUsd.toFixed(2)}.`,
@@ -636,6 +649,9 @@ export class TradeService implements OnModuleInit {
                 !Number.isFinite(executionPayload.amountSol) ||
                 executionPayload.amountSol <= 0
             ) {
+                this.logger.warn(
+                    `[BuyTrace] Blocked by invalid price/amount token=${tokenMint} chat=${telegramChatId} solPrice=${solPrice} amountSol=${executionPayload.amountSol}`,
+                );
                 return {
                     success: false,
                     message: 'Capital guard blocked buy. Invalid SOL price or buy amount.',
@@ -652,11 +668,13 @@ export class TradeService implements OnModuleInit {
             if (balanceAfterBuy < reserveSol || balanceSol < totalRequiredSol) {
                 const msg = `Insufficient SOL balance. Have: ${balanceSol.toFixed(4)} SOL, Need: ${totalRequiredSol.toFixed(4)} SOL (Position: ${executionPayload.amountSol.toFixed(4)} SOL, Reserve: ${reserveSol.toFixed(4)} SOL + Fees). Aborting buy to prevent trapped tokens or wasted fees.`;
                 this.logger.warn(`[Slot ${slotToUse}] ${msg}`);
+                this.logger.warn(`[BuyTrace] Blocked by balance token=${tokenMint} chat=${telegramChatId} wallet=${wallet.publicKey.toBase58()} balanceSol=${balanceSol.toFixed(6)}`);
                 return { success: false, message: msg };
             }
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`[Slot ${slotToUse}] Capital protection check failed: ${msg}`);
+            this.logger.error(`[BuyTrace] Capital protection exception token=${tokenMint} chat=${telegramChatId}: ${msg}`);
             return {
                 success: false,
                 message: `Capital protection check failed: ${msg}`,
@@ -728,6 +746,9 @@ export class TradeService implements OnModuleInit {
                 totalFeesSol: totalFeesSol || 0,
             });
             this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
+            this.logger.log(
+                `[BuyTrace] Success token=${tokenMint} chat=${telegramChatId} slot=${slotToUse} tx=${txHash || 'n/a'}`,
+            );
             const strategyName = options?.targetTakeProfit
                 ? 'Established Rebound & CTO (TP 18%, TSL 2.5%, Hard SL 20%)'
                 : 'Standard Second-Wave';
@@ -751,6 +772,7 @@ export class TradeService implements OnModuleInit {
             return { success: true, message: `Successfully bought ${symbol} at slot ${slotToUse}` };
         }
 
+        this.logger.warn(`[BuyTrace] Swap failed token=${tokenMint} chat=${telegramChatId}: ${error || 'Unknown error'}`);
         return { success: false, message: `Swap failed: ${error || 'Unknown error'}` };
     }
 

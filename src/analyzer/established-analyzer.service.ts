@@ -553,7 +553,7 @@ export class EstablishedAnalyzerService {
 
             const activeChats = await this.prismaService.telegramChat.findMany({
                 where: { status: 'ACTIVE' },
-                include: { settings: true },
+                include: { settings: true, walletVault: true },
                 orderBy: { updatedAt: 'desc' },
             });
 
@@ -562,6 +562,9 @@ export class EstablishedAnalyzerService {
 
             for (const chat of activeChats) {
                 const chatDryRun = chat.settings?.dryRun ?? true;
+                this.logger.log(
+                    `[AutoBuyTrace] token=${tokenMint} chat=${chat.chatId} dryRun=${chatDryRun} wallet=${chat.walletVault?.publicKey || 'n/a'}`,
+                );
 
                 if (chatDryRun) {
                     signalOnlySent = true;
@@ -586,6 +589,10 @@ export class EstablishedAnalyzerService {
                     targetTrailingDistance: 2.5, // Trailing stop 2.5% (antara 2% - 3%)
                     targetStopLoss: 20.0, // Hard stop loss 20%
                 }, chat.chatId);
+
+                this.logger.log(
+                    `[AutoBuyTrace] result token=${tokenMint} chat=${chat.chatId} success=${buyResult.success} message=${buyResult.message}`,
+                );
 
                 if (buyResult.success) {
                     liveBuyExecuted = true;

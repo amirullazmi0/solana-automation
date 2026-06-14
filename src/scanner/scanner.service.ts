@@ -661,7 +661,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     if (result.safe) {
                         const activeChats = await this.prismaService.telegramChat.findMany({
                             where: { status: 'ACTIVE' },
-                            include: { settings: true },
+                            include: { settings: true, walletVault: true },
                             orderBy: { updatedAt: 'desc' },
                         });
 
@@ -670,6 +670,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
                         for (const chat of activeChats) {
                             const chatDryRun = chat.settings?.dryRun ?? true;
+                            this.logger.log(
+                                `[AutoBuyTrace] token=${tokenMint} chat=${chat.chatId} dryRun=${chatDryRun} wallet=${chat.walletVault?.publicKey || 'n/a'}`,
+                            );
 
                             if (chatDryRun) {
                                 signalOnlySent = true;
@@ -694,6 +697,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                 undefined,
                                 undefined,
                                 chat.chatId,
+                            );
+
+                            this.logger.log(
+                                `[AutoBuyTrace] result token=${tokenMint} chat=${chat.chatId} success=${buyResult.success} message=${buyResult.message}`,
                             );
 
                             if (buyResult.success) {
