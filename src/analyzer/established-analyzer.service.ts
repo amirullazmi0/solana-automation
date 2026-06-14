@@ -577,6 +577,7 @@ export class EstablishedAnalyzerService {
                             targetTrailingDistance: 2.5,
                             targetStopLoss: 20.0,
                         },
+                        true,
                         chat.chatId,
                     );
                     continue;

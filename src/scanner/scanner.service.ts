@@ -683,6 +683,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                     tokenMint,
                                     result.metadata,
                                     undefined,
+                                    true,
                                     chat.chatId,
                                 );
                                 continue;

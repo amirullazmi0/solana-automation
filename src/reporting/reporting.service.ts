@@ -875,6 +875,7 @@ export class ReportingService implements OnModuleInit {
             targetTrailingDistance?: number;
             targetStopLoss?: number;
         },
+        isDryRun = true,
         targetChatId?: string,
     ) {
         const displaySymbol = metadata?.symbol || 'UNKNOWN';
@@ -883,9 +884,15 @@ export class ReportingService implements OnModuleInit {
         const exitPlan = options
             ? `\nTarget: TP ${options.targetTakeProfit}% | TSL ${options.targetTrailingDistance}% | SL ${options.targetStopLoss}%`
             : '';
+        const header = isDryRun
+            ? '*MUST BUY SIGNAL - NO AUTO BUY*'
+            : '*MUST BUY SIGNAL - LIVE BUY ENABLED*';
+        const modeLine = isDryRun
+            ? 'Mode: `Signal only. Bot did not execute swap.`'
+            : 'Mode: `Live execution enabled for this chat.`';
 
         const message =
-            `*MUST BUY SIGNAL - NO AUTO BUY*\n` +
+            `${header}\n` +
             `Token: ${displaySymbol}\n` +
             `Mint: \`${tokenMint}\`\n` +
             `Strategy: \`${strategy}\`${exitPlan}\n\n` +
@@ -893,7 +900,7 @@ export class ReportingService implements OnModuleInit {
             `Liquidity: \`$${(metadata?.liquidity || 0).toLocaleString()}\`\n` +
             `Surge: \`${metadata?.volumeSurge?.toFixed(2) || 'N/A'}x\`\n` +
             `VoL: \`${metadata?.volScore?.toFixed(4) || 'N/A'}\` | Z: \`${metadata?.zScore?.toFixed(2) || 'N/A'}\`\n\n` +
-            `Mode: \`Signal only. Bot did not execute swap.\``;
+            `${modeLine}`;
 
         const socialButtons: TelegramBot.InlineKeyboardButton[] = [];
         if (metadata?.socials?.twitter) {
