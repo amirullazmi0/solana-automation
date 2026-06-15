@@ -692,6 +692,13 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             this.logger.log(
                                 `[${tokenMint}] Auto-buy enabled for chat ${chat.chatId}. Attempting to buy...`,
                             );
+                            await this.reportingService.sendBuySignalAlert(
+                                tokenMint,
+                                result.metadata,
+                                undefined,
+                                false,
+                                chat.chatId,
+                            );
                             const buyResult = await this.tradeService.attemptBuy(
                                 tokenMint,
                                 result.metadata,

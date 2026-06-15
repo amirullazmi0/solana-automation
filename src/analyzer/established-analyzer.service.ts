@@ -583,6 +583,19 @@ export class EstablishedAnalyzerService {
                     continue;
                 }
 
+                await this.reportingService.sendBuySignalAlert(
+                    tokenMint,
+                    metadata,
+                    {
+                        strategy: 'Established Rebound & CTO',
+                        targetTakeProfit: 18.0,
+                        targetTrailingDistance: 2.5,
+                        targetStopLoss: 20.0,
+                    },
+                    false,
+                    chat.chatId,
+                );
+
                 const buyResult = await this.tradeService.attemptBuy(tokenMint, metadata, undefined, {
                     customSlippageBps: 300, // Slippage 3%
                     priorityFeeSol: 0.0001, // 0.0001 SOL Jito tip / Priority fee
