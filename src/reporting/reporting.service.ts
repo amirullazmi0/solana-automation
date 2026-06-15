@@ -589,6 +589,11 @@ export class ReportingService implements OnModuleInit {
         }
 
         const trimmed = text.trim();
+        if (trimmed.startsWith('/')) {
+            this.pendingWithdrawAddress.delete(targetChatId);
+            return false;
+        }
+
         if (!this.isSolanaAddress(trimmed)) {
             await this.sendMessage(
                 '⚠️ Please send a valid Solana address.',
