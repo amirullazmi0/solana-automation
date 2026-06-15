@@ -30,6 +30,17 @@ enum TelegramChatStatus {
   BLOCKED
 }
 
+enum WithdrawalAmountMode {
+  PERCENT
+  USD
+}
+
+enum WithdrawalStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
 model TelegramChat {
   id          Int                 @id @default(autoincrement())
   chatId      String              @unique
@@ -43,6 +54,7 @@ model TelegramChat {
   walletVault TelegramWalletVault?
   settings    TelegramChatSetting?
   trades      Trade[]
+  withdrawals TelegramWithdrawal[]
 
   @@index([status, chatType])
   @@index([lastSeenAt])
@@ -71,6 +83,26 @@ model TelegramChatSetting {
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
   chat             TelegramChat  @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+}
+
+model TelegramWithdrawal {
+  id                  Int                 @id @default(autoincrement())
+  telegramChatId      Int
+  destinationAddress  String
+  amountMode          WithdrawalAmountMode
+  requestedAmount     Float
+  amountTransferredSol Float?
+  balanceBeforeSol    Float?
+  balanceAfterSol     Float?
+  status              WithdrawalStatus     @default(PENDING)
+  txHash              String?
+  errorMessage        String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  chat                TelegramChat        @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+
+  @@index([telegramChatId, createdAt])
+  @@index([telegramChatId, status])
 }
 
 model Trade {

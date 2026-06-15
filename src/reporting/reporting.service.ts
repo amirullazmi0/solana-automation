@@ -19,6 +19,7 @@ export class ReportingService implements OnModuleInit {
     private readonly bot: TelegramBot;
     private readonly connection: Connection;
     private readonly httpsAgent: https.Agent;
+    private readonly pendingWithdrawAddress = new Map<string, string>();
 
     // Cache for resolved IPs
     private ipCache: Record<string, string> = {
@@ -112,6 +113,10 @@ export class ReportingService implements OnModuleInit {
             });
 
             try {
+                if (await this.handlePendingWithdrawAddressInput(incomingChatId, text)) {
+                    return;
+                }
+
                 if (command === '/start' || command === '/help') {
                     await this.handleStartFlow(msg, incomingChatId);
                 } else if (command === '/chatid' || command === '/id') {
@@ -341,6 +346,9 @@ export class ReportingService implements OnModuleInit {
         } else if (action === 'settings') {
             const [section, value] = payload.split('|');
             await this.handleSettingsCallback(section, value, targetChatId);
+        } else if (action === 'withdraw') {
+            const [mode, value] = payload.split('|');
+            await this.handleWithdrawCallback(mode, value, targetChatId);
         }
 
         await this.bot.answerCallbackQuery(query.id);
@@ -523,6 +531,7 @@ export class ReportingService implements OnModuleInit {
                 { text: 'dryRun true', callback_data: 'settings:dryrun|true' },
                 { text: 'dryRun false', callback_data: 'settings:dryrun|false' },
             ],
+            [{ text: '💸 Send Solana to Address', callback_data: 'settings:sendsol|start' }],
         ];
 
         await this.sendMessage(
@@ -550,6 +559,17 @@ export class ReportingService implements OnModuleInit {
             updates.slippageOnSol = Number.parseFloat(value);
         } else if (section === 'dryrun') {
             updates.dryRun = value === 'true';
+        } else if (section === 'sendsol') {
+            if (value === 'start') {
+                this.pendingWithdrawAddress.set(targetChatId, '');
+                await this.sendMessage(
+                    '💸 *Send Solana to Address*\n\nSend the destination Solana address in the next message.',
+                    {},
+                    0,
+                    targetChatId,
+                );
+                return;
+            }
         }
 
         if (Object.keys(updates).length === 0) {
@@ -558,6 +578,101 @@ export class ReportingService implements OnModuleInit {
 
         await this.telegramWorkspace.updateChatSettings(targetChatId, updates);
         await this.handleSettingsRequest(targetChatId);
+    }
+
+    private async handlePendingWithdrawAddressInput(
+        targetChatId: string,
+        text: string,
+    ): Promise<boolean> {
+        if (!this.pendingWithdrawAddress.has(targetChatId)) {
+            return false;
+        }
+
+        const trimmed = text.trim();
+        if (!this.isSolanaAddress(trimmed)) {
+            await this.sendMessage(
+                '⚠️ Please send a valid Solana address.',
+                {},
+                0,
+                targetChatId,
+            );
+            return true;
+        }
+
+        this.pendingWithdrawAddress.set(targetChatId, trimmed);
+        await this.sendWithdrawMenu(trimmed, targetChatId);
+        return true;
+    }
+
+    private async sendWithdrawMenu(destinationAddress: string, targetChatId: string) {
+        const tradeService = this.moduleRef.get(TradeService, { strict: false });
+        const balance = await tradeService.getWalletBalanceForChat(targetChatId);
+        const spendableUsd = Math.max(balance.balanceUsd - 0.75, 0);
+        const presetUsd = (pct: number) => Math.max(spendableUsd * pct, 0);
+
+        const message =
+            `💸 *Send Solana to Address*\n` +
+            `Destination: \`${destinationAddress}\`\n\n` +
+            `Choose an amount preset below.`;
+
+        const buttons: TelegramBot.InlineKeyboardButton[][] = [
+            [
+                { text: `$${presetUsd(0.2).toFixed(2)}`, callback_data: `withdraw:usd|${presetUsd(0.2).toFixed(2)}` },
+                { text: `$${presetUsd(0.5).toFixed(2)}`, callback_data: `withdraw:usd|${presetUsd(0.5).toFixed(2)}` },
+                { text: `$${presetUsd(0.8).toFixed(2)}`, callback_data: `withdraw:usd|${presetUsd(0.8).toFixed(2)}` },
+                { text: `$${presetUsd(1.0).toFixed(2)}`, callback_data: `withdraw:usd|${presetUsd(1.0).toFixed(2)}` },
+            ],
+            [
+                { text: '$10', callback_data: 'withdraw:usd|10' },
+                { text: '$20', callback_data: 'withdraw:usd|20' },
+                { text: '$50', callback_data: 'withdraw:usd|50' },
+                { text: '$100', callback_data: 'withdraw:usd|100' },
+            ],
+            [{ text: '❌ Cancel', callback_data: 'withdraw:cancel|1' }],
+        ];
+
+        await this.sendMessage(
+            message,
+            { reply_markup: { inline_keyboard: buttons } },
+            0,
+            targetChatId,
+        );
+    }
+
+    private async handleWithdrawCallback(mode: string, value: string, targetChatId: string) {
+        if (mode === 'cancel') {
+            this.pendingWithdrawAddress.delete(targetChatId);
+            await this.sendMessage('❌ Withdraw flow cancelled.', {}, 0, targetChatId);
+            return;
+        }
+
+        const destinationAddress = this.pendingWithdrawAddress.get(targetChatId);
+        if (!destinationAddress) {
+            await this.sendMessage(
+                '⚠️ No destination address found. Start withdraw flow again.',
+                {},
+                0,
+                targetChatId,
+            );
+            return;
+        }
+
+        const tradeService = this.moduleRef.get(TradeService, { strict: false });
+        const amountMode = mode === 'percent' ? 'percent' : 'usd';
+        const amountValue = Number.parseFloat(value);
+        const result = await tradeService.sendSolanaToAddress(
+            targetChatId,
+            destinationAddress,
+            amountMode,
+            amountValue,
+        );
+
+        if (result.success) {
+            this.pendingWithdrawAddress.delete(targetChatId);
+            await this.sendMessage(`✅ *Success:* ${result.message}`, {}, 0, targetChatId);
+        } else {
+            await this.sendMessage(`❌ *Failed:* ${result.message}`, {}, 0, targetChatId);
+        }
     }
 
     private async executeManualBuy(mint: string, amount: number, targetChatId?: string) {

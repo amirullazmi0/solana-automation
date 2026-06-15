@@ -8,6 +8,7 @@ import {
     ParsedTransactionWithMeta,
     PublicKey,
     SystemProgram,
+    Transaction,
     TransactionMessage,
     VersionedTransaction,
 } from '@solana/web3.js';
@@ -1766,6 +1767,148 @@ export class TradeService implements OnModuleInit {
         }
     }
 
+    async sendSolanaToAddress(
+        chatId: string,
+        destinationAddress: string,
+        amountMode: 'percent' | 'usd',
+        amountValue: number,
+    ): Promise<{ success: boolean; message: string }> {
+        if (!chatId) {
+            return { success: false, message: 'Chat ID is required for SOL transfer.' };
+        }
+
+        const chatRecord = await this.telegramWorkspace.getChatById(chatId);
+        if (!chatRecord) {
+            return { success: false, message: 'Telegram chat not registered. Send /start first.' };
+        }
+
+        if (!destinationAddress || !this.isValidSolanaAddress(destinationAddress)) {
+            return { success: false, message: 'Invalid destination Solana address.' };
+        }
+
+        if (!Number.isFinite(amountValue) || amountValue <= 0) {
+            return { success: false, message: 'Invalid transfer amount.' };
+        }
+
+        const wallet = await this.getWallet(chatId);
+        const recipient = new PublicKey(destinationAddress);
+        const balanceLamports = await this.connection.getBalance(wallet.publicKey);
+        const balanceSol = balanceLamports / 1_000_000_000;
+        const reserveSol = 0.005;
+        const spendableSol = Math.max(balanceSol - reserveSol, 0);
+        const solPrice = amountMode === 'usd' ? await this.getSolPrice() : null;
+        const transferSol =
+            amountMode === 'percent'
+                ? spendableSol * amountValue
+                : amountValue / (solPrice || 150);
+
+        if (!Number.isFinite(transferSol) || transferSol <= 0) {
+            return { success: false, message: 'Calculated transfer amount is invalid.' };
+        }
+
+        if (transferSol > spendableSol) {
+            return {
+                success: false,
+                message: `Insufficient SOL balance. Have ${balanceSol.toFixed(4)} SOL, spendable after reserve is ${spendableSol.toFixed(4)} SOL.`,
+            };
+        }
+
+        const lamports = Math.floor(transferSol * 1_000_000_000);
+        if (lamports <= 0) {
+            return { success: false, message: 'Transfer amount rounds down to zero.' };
+        }
+
+        const withdrawal = await this.prismaService.telegramWithdrawal.create({
+            data: {
+                telegramChatId: chatRecord.id,
+                destinationAddress,
+                amountMode: amountMode === 'percent' ? 'PERCENT' : 'USD',
+                requestedAmount: amountValue,
+                amountTransferredSol: transferSol,
+                balanceBeforeSol: balanceSol,
+                status: 'PENDING',
+            },
+        });
+
+        try {
+            const blockhash = await this.connection.getLatestBlockhash('confirmed');
+            const transaction = new Transaction().add(
+                SystemProgram.transfer({
+                    fromPubkey: wallet.publicKey,
+                    toPubkey: recipient,
+                    lamports,
+                }),
+            );
+            transaction.feePayer = wallet.publicKey;
+            transaction.recentBlockhash = blockhash.blockhash;
+            transaction.sign(wallet);
+
+            const txid = await this.connection.sendRawTransaction(transaction.serialize(), {
+                skipPreflight: false,
+                preflightCommitment: 'confirmed',
+                maxRetries: 3,
+            });
+
+            const confirmation = await this.connection.confirmTransaction(
+                {
+                    signature: txid,
+                    blockhash: blockhash.blockhash,
+                    lastValidBlockHeight: blockhash.lastValidBlockHeight,
+                },
+                'confirmed',
+            );
+
+            if (confirmation.value.err) {
+                await this.prismaService.telegramWithdrawal.update({
+                    where: { id: withdrawal.id },
+                    data: {
+                        status: 'FAILED',
+                        errorMessage: `Transfer failed: ${JSON.stringify(confirmation.value.err)}`,
+                        balanceAfterSol: await this.connection
+                            .getBalance(wallet.publicKey)
+                            .then((lamportsAfter) => lamportsAfter / 1_000_000_000),
+                    },
+                });
+                return {
+                    success: false,
+                    message: `Transfer failed: ${JSON.stringify(confirmation.value.err)}`,
+                };
+            }
+
+            const balanceAfterSol = await this.connection
+                .getBalance(wallet.publicKey)
+                .then((lamportsAfter) => lamportsAfter / 1_000_000_000);
+            await this.prismaService.telegramWithdrawal.update({
+                where: { id: withdrawal.id },
+                data: {
+                    status: 'SUCCESS',
+                    txHash: txid,
+                    balanceAfterSol,
+                },
+            });
+
+            return {
+                success: true,
+                message: `Sent ${transferSol.toFixed(4)} SOL to ${destinationAddress}. Tx: ${txid}`,
+            };
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`[SOL Transfer] Failed for chat ${chatId}: ${msg}`);
+            await this.prismaService.telegramWithdrawal.update({
+                where: { id: withdrawal.id },
+                data: {
+                    status: 'FAILED',
+                    errorMessage: msg,
+                    balanceAfterSol: await this.connection
+                        .getBalance(wallet.publicKey)
+                        .then((lamportsAfter) => lamportsAfter / 1_000_000_000)
+                        .catch(() => null),
+                },
+            });
+            return { success: false, message: `Transfer failed: ${msg}` };
+        }
+    }
+
     async getWalletHoldings(
         walletAddress: string,
     ): Promise<Array<{ mint: string; symbol: string; balance: number }>> {
@@ -1808,6 +1951,15 @@ export class TradeService implements OnModuleInit {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`Failed to fetch wallet holdings: ${msg}`);
             return [];
+        }
+    }
+
+    private isValidSolanaAddress(address: string): boolean {
+        try {
+            new PublicKey(address);
+            return true;
+        } catch {
+            return false;
         }
     }
 
