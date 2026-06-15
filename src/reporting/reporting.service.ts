@@ -146,6 +146,8 @@ export class ReportingService implements OnModuleInit {
                     await this.handleStatusRequest(incomingChatId);
                 } else if (normalizedText === 'watchlist') {
                     await this.handleWatchlistRequest(incomingChatId);
+                } else if (command === '/withdraw' || normalizedText === 'withdraw') {
+                    await this.handleWithdrawStart(incomingChatId);
                 } else if (this.isSolanaAddress(text)) {
                     await this.handleTokenInput(text, incomingChatId);
                 }
@@ -207,7 +209,7 @@ export class ReportingService implements OnModuleInit {
                 keyboard: [
                     [{ text: '\uD83D\uDCBC Balance' }, { text: '\uD83D\uDCC8 Portfolio' }],
                     [{ text: '\u2699\uFE0F Settings' }, { text: '\uD83D\uDCC8 Win Rate' }],
-                    [{ text: '\uD83D\uDC40 Watchlist' }],
+                    [{ text: '\uD83D\uDC40 Watchlist' }, { text: '\uD83D\uDCB8 Withdraw' }],
                 ],
                 resize_keyboard: true,
             },
@@ -531,7 +533,6 @@ export class ReportingService implements OnModuleInit {
                 { text: 'dryRun true', callback_data: 'settings:dryrun|true' },
                 { text: 'dryRun false', callback_data: 'settings:dryrun|false' },
             ],
-            [{ text: '💸 Send Solana to Address', callback_data: 'settings:sendsol|start' }],
         ];
 
         await this.sendMessage(
@@ -559,17 +560,6 @@ export class ReportingService implements OnModuleInit {
             updates.slippageOnSol = Number.parseFloat(value);
         } else if (section === 'dryrun') {
             updates.dryRun = value === 'true';
-        } else if (section === 'sendsol') {
-            if (value === 'start') {
-                this.pendingWithdrawAddress.set(targetChatId, '');
-                await this.sendMessage(
-                    '💸 *Send Solana to Address*\n\nSend the destination Solana address in the next message.',
-                    {},
-                    0,
-                    targetChatId,
-                );
-                return;
-            }
         }
 
         if (Object.keys(updates).length === 0) {
@@ -578,6 +568,16 @@ export class ReportingService implements OnModuleInit {
 
         await this.telegramWorkspace.updateChatSettings(targetChatId, updates);
         await this.handleSettingsRequest(targetChatId);
+    }
+
+    private async handleWithdrawStart(targetChatId: string) {
+        this.pendingWithdrawAddress.set(targetChatId, '');
+        await this.sendMessage(
+            '💸 *Send Solana to Address*\n\nSend the destination Solana address in the next message.',
+            {},
+            0,
+            targetChatId,
+        );
     }
 
     private async handlePendingWithdrawAddressInput(
