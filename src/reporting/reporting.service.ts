@@ -1065,6 +1065,67 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(message, { reply_markup: { inline_keyboard: buttons } }, 0, targetChatId);
     }
 
+    async sendSwapResultReport(params: {
+        side: 'BUY' | 'SELL';
+        tokenMint: string;
+        symbol?: string;
+        success: boolean;
+        amountUsd?: number;
+        amountSol?: number;
+        txHash?: string;
+        error?: string;
+        dryRun?: boolean;
+        targetChatId?: string;
+        details?: string;
+    }) {
+        const {
+            side,
+            tokenMint,
+            symbol,
+            success,
+            amountUsd,
+            amountSol,
+            txHash,
+            error,
+            dryRun = false,
+            targetChatId,
+            details,
+        } = params;
+
+        const displaySymbol = symbol || 'UNKNOWN';
+        const actionLabel = side === 'BUY' ? 'BUY' : 'SELL';
+        const header = success
+            ? `✅ *SWAP ${actionLabel} SUCCESS*`
+            : `❌ *SWAP ${actionLabel} FAILED*`;
+        const modePrefix = dryRun ? '🤖 [SIMULASI] ' : '🚀 ';
+
+        const usdLine =
+            amountUsd !== undefined ? `💵 *USD Value:* \`$${amountUsd.toFixed(2)}\`\n` : '';
+        const solLine =
+            amountSol !== undefined ? `💎 *SOL Value:* \`${amountSol.toFixed(4)} SOL\`\n` : '';
+        const txLine = txHash ? `🔗 *Tx:* \`${txHash}\`\n` : '';
+        const errorLine = !success && error ? `⚠️ *Error:* \`${error}\`\n` : '';
+        const detailsLine = details ? `${details}\n` : '';
+
+        const message =
+            `${modePrefix}${header}\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `💎 *Token:* ${displaySymbol}\n` +
+            `🆔 *Mint:* \`${tokenMint}\`\n` +
+            `📌 *Side:* \`${actionLabel}\`\n` +
+            usdLine +
+            solLine +
+            txLine +
+            errorLine +
+            detailsLine +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            (success
+                ? 'Status: `Swap executed successfully.`'
+                : 'Status: `Swap failed. No live trade was opened.`');
+
+        await this.sendMessage(message, {}, 0, targetChatId);
+    }
+
     async sendWatchlistNotification(
         tokenMint: string,
         mcap: number,

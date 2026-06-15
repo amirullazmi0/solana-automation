@@ -571,6 +571,7 @@ export class TradeService implements OnModuleInit {
         const buyAmountUSD = customAmountUSD || effectivePositionSizeUSD;
         const committedCapitalUsd = openTradesCount * effectivePositionSizeUSD + buyAmountUSD;
         const spendableCapitalUsd = Math.max(this.totalCapital - this.reserveAmount, 0);
+        const reportSymbol = metadata?.symbol || 'UNKNOWN';
         if (!customAmountUSD && committedCapitalUsd > spendableCapitalUsd) {
             this.logger.warn(
                 `[BuyTrace] Blocked by capital guard token=${tokenMint} chat=${telegramChatId} committed=${committedCapitalUsd.toFixed(2)} spendable=${spendableCapitalUsd.toFixed(2)}`,
@@ -769,11 +770,38 @@ export class TradeService implements OnModuleInit {
                 targetChatId,
             );
 
+            if (!isManualBuy) {
+                await this.reportingService.sendSwapResultReport({
+                    side: 'BUY',
+                    tokenMint,
+                    symbol,
+                    success: true,
+                    amountUsd: buyAmountUSD,
+                    amountSol: finalAmountInSol,
+                    txHash,
+                    dryRun: effectiveDryRun,
+                    targetChatId,
+                });
+            }
+
             // PriceMonitorService otomatis akan mendeteksi trade baru dari DB
             return { success: true, message: `Successfully bought ${symbol} at slot ${slotToUse}` };
         }
 
         this.logger.warn(`[BuyTrace] Swap failed token=${tokenMint} chat=${telegramChatId}: ${error || 'Unknown error'}`);
+        if (!isManualBuy) {
+            await this.reportingService.sendSwapResultReport({
+                side: 'BUY',
+                tokenMint,
+                symbol: reportSymbol,
+                success: false,
+                amountUsd: buyAmountUSD,
+                amountSol: amountInSol,
+                error: error || 'Unknown error',
+                dryRun: effectiveDryRun,
+                targetChatId,
+            });
+        }
         return { success: false, message: `Swap failed: ${error || 'Unknown error'}` };
     }
 
@@ -805,17 +833,20 @@ export class TradeService implements OnModuleInit {
         }
         this.sellingTrades.add(tradeId);
 
+        let tradeDryRun = forceLive ? false : true;
+        let targetChatId: string | undefined;
+
         try {
             // 1. DAPETIN SALDO ASLI ATAU SIMULASI
             let actualBalance = 0;
             const tradeSettings = trade.telegramChatId
                 ? await this.telegramWorkspace.getChatSettingsByChatDbId(trade.telegramChatId)
                 : null;
-            const tradeDryRun = forceLive ? false : tradeSettings?.dryRun ?? true;
+            tradeDryRun = forceLive ? false : tradeSettings?.dryRun ?? true;
             const targetChat = trade.telegramChatId
                 ? await this.telegramWorkspace.getChatByDbId(trade.telegramChatId)
                 : null;
-            const targetChatId = targetChat?.chatId;
+            targetChatId = targetChat?.chatId;
 
             if (tradeDryRun) {
                 const solPrice = await this.getSolPrice();
@@ -1031,6 +1062,20 @@ export class TradeService implements OnModuleInit {
                     tradeDryRun,
                     targetChatId,
                 );
+                if (!forceLive) {
+                    await this.reportingService.sendSwapResultReport({
+                        side: 'SELL',
+                        tokenMint: trade.tokenMint,
+                        symbol: trade.symbol || undefined,
+                        success: true,
+                        amountUsd: exitValueUsd,
+                        amountSol: finalSolReceived,
+                        txHash,
+                        dryRun: tradeDryRun,
+                        targetChatId,
+                        details: `Exit reason: ${exitReason.replace(/_/g, ' ')}`,
+                    });
+                }
                 return true;
             }
 
@@ -1041,11 +1086,36 @@ export class TradeService implements OnModuleInit {
             if (error?.startsWith('price_anomaly')) {
                 this.queuePriceAnomalyRetry(tradeId, currentPrice, exitReason, percentage);
             }
+            if (!forceLive) {
+                await this.reportingService.sendSwapResultReport({
+                    side: 'SELL',
+                    tokenMint: trade.tokenMint,
+                    symbol: trade.symbol || undefined,
+                    success: false,
+                    amountUsd: sellAmount * currentPrice,
+                    error: error || 'Unknown error',
+                    dryRun: tradeDryRun,
+                    targetChatId,
+                    details: `Exit reason: ${exitReason.replace(/_/g, ' ')}`,
+                });
+            }
             return false;
         } catch (error) {
             this.logger.error(
                 `[Slot ${trade.slotNumber}] ❌ SELL CRITICAL ERROR: ${error instanceof Error ? error.message : String(error)}`,
             );
+            if (!forceLive) {
+                await this.reportingService.sendSwapResultReport({
+                    side: 'SELL',
+                    tokenMint: trade.tokenMint,
+                    symbol: trade.symbol || undefined,
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+                    dryRun: tradeDryRun,
+                    targetChatId,
+                    details: `Exit reason: ${exitReason.replace(/_/g, ' ')}`,
+                });
+            }
             return false;
         } finally {
             this.sellingTrades.delete(tradeId);
