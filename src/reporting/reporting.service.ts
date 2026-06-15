@@ -113,7 +113,7 @@ export class ReportingService implements OnModuleInit {
             });
 
             try {
-                if (await this.handlePendingWithdrawAddressInput(incomingChatId, text)) {
+                if (await this.handlePendingWithdrawAddressInput(incomingChatId, text, command, normalizedText)) {
                     return;
                 }
 
@@ -583,17 +583,37 @@ export class ReportingService implements OnModuleInit {
     private async handlePendingWithdrawAddressInput(
         targetChatId: string,
         text: string,
+        command?: string,
+        normalizedText?: string,
     ): Promise<boolean> {
         if (!this.pendingWithdrawAddress.has(targetChatId)) {
             return false;
         }
 
-        const trimmed = text.trim();
-        if (trimmed.startsWith('/')) {
+        const textCommand = (command || text.split(/\s+/)[0].split('@')[0].toLowerCase()).trim();
+        const actionText = (normalizedText || this.normalizeActionText(text)).trim();
+
+        const isNavigationText =
+            textCommand.startsWith('/') ||
+            [
+                'balance',
+                'porto',
+                'portfolio',
+                'setting',
+                'settings',
+                'winrate',
+                'win rate',
+                'status',
+                'watchlist',
+                'withdraw',
+            ].includes(actionText);
+
+        if (isNavigationText) {
             this.pendingWithdrawAddress.delete(targetChatId);
             return false;
         }
 
+        const trimmed = text.trim();
         if (!this.isSolanaAddress(trimmed)) {
             await this.sendMessage(
                 '⚠️ Please send a valid Solana address.',
