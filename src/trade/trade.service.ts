@@ -1316,7 +1316,8 @@ export class TradeService implements OnModuleInit {
             }
 
             // ⛽ DYNAMIC FEES: Naikin gas tiap kali gagal (Auto-Multiplier + Retry Bonus)
-            const useJito = this.configService.get<string>('USE_JITO') === 'true';
+            const useJitoConfigured = this.configService.get<string>('USE_JITO') === 'true';
+            const useJito = useJitoConfigured && retryCount === 0;
             const jitoBlockEngineUrl =
                 this.configService.get<string>('JITO_BLOCK_ENGINE_URL') ||
                 'https://mainnet.block-engine.jito.wtf/api/v1/bundles';
@@ -1337,6 +1338,8 @@ export class TradeService implements OnModuleInit {
             if (useJito) {
                 feeConfig = 0; // Jito relies on bundle tip, not priority fee
                 this.logger.debug(`[Jupiter] 🚀 Using Jito MEV. Jupiter priority fee set to 0.`);
+            } else if (useJitoConfigured && retryCount > 0) {
+                this.logger.warn('[Jupiter] Falling back to direct send on retry to avoid bundle expiry.');
             }
 
             const swapResponse = await axios.post(
