@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
 import { TradeService } from '../trade/trade.service';
 import { DexLimiter } from '../common/dex-limiter';
+import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 
 @Injectable()
 export class PriceMonitorService {
@@ -15,7 +16,6 @@ export class PriceMonitorService {
     private trailingDistancePercent: number;
     private jupiterApiKey: string;
     private stopLossPercent: number;
-    private readonly isDryRun: boolean;
     private readonly lastAlertTime = new Map<string, number>(); // Cooldown alert: tokenMint -> timestamp
     private ipCache: Record<string, string> = {};
     private readonly fallbackApiIps: Record<string, string> = {
@@ -26,6 +26,7 @@ export class PriceMonitorService {
         private readonly configService: ConfigService,
         private readonly prismaService: PrismaService,
         private readonly tradeService: TradeService,
+        private readonly telegramWorkspace: TelegramWorkspaceService,
         private readonly reportingService: ReportingService,
     ) {
         this.trailingDistancePercent = parseFloat(
@@ -35,15 +36,12 @@ export class PriceMonitorService {
             this.configService.get<string>('STOP_LOSS_PERCENT', '25.0'),
         );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
-        this.isDryRun = true;
     }
 
     private readonly processingTrades = new Set<number>();
 
     @Interval(2000)
     async monitorPrices() {
-        if (this.isDryRun) return;
-
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN', mode: 'LIVE' },
         });
@@ -56,6 +54,18 @@ export class PriceMonitorService {
 
         for (const trade of openTrades) {
             if (this.processingTrades.has(trade.id)) continue;
+
+            if (trade.telegramChatId) {
+                const chatSettings = await this.telegramWorkspace.getChatSettingsByChatDbId(
+                    trade.telegramChatId,
+                );
+                if (chatSettings?.dryRun ?? true) {
+                    this.logger.debug(
+                        `[Slot ${trade.slotNumber}] Skipping auto-sell for dry-run chat ${trade.telegramChatId}.`,
+                    );
+                    continue;
+                }
+            }
 
             const currentPrice = priceMap[trade.tokenMint];
             if (!currentPrice || currentPrice <= 0) continue;

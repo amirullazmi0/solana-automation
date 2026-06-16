@@ -2091,6 +2091,96 @@ export class TradeService implements OnModuleInit {
         );
     }
 
+    async getPortfolioForChat(chatId: string): Promise<
+        Array<{
+            mint: string;
+            symbol: string;
+            balance: number;
+            entryPriceUsd?: number;
+            currentPriceUsd?: number;
+            valueUsd?: number;
+            pnlUsd?: number;
+            pnlPercent?: number;
+            source: 'ON_CHAIN' | 'DB';
+        }>
+    > {
+        const wallet = await this.getWallet(chatId);
+        const [onChainHoldings, chatRecord] = await Promise.all([
+            this.getWalletHoldings(wallet.publicKey.toBase58()),
+            this.telegramWorkspace.getChatById(chatId),
+        ]);
+
+        const portfolioByMint = new Map<
+            string,
+            {
+                mint: string;
+                symbol: string;
+                balance: number;
+                entryPriceUsd?: number;
+                currentPriceUsd?: number;
+                valueUsd?: number;
+                pnlUsd?: number;
+                pnlPercent?: number;
+                source: 'ON_CHAIN' | 'DB';
+            }
+        >();
+
+        for (const holding of onChainHoldings) {
+            portfolioByMint.set(holding.mint, {
+                mint: holding.mint,
+                symbol: holding.symbol,
+                balance: holding.balance,
+                source: 'ON_CHAIN',
+            });
+        }
+
+        if (chatRecord?.id) {
+            const openTrades = await this.prismaService.trade.findMany({
+                where: {
+                    telegramChatId: chatRecord.id,
+                    status: 'OPEN',
+                    mode: 'LIVE',
+                },
+                orderBy: { updatedAt: 'desc' },
+            });
+
+            for (const trade of openTrades) {
+                const currentPriceUsd = await this.reportingService.fetchCurrentPrice(trade.tokenMint);
+                const balance = portfolioByMint.get(trade.tokenMint)?.balance || 0;
+                const entryPriceUsd = trade.entryPrice || undefined;
+                const valueUsd = currentPriceUsd && balance > 0 ? currentPriceUsd * balance : undefined;
+                const entryValueUsd =
+                    trade.entryValueUsd !== null && trade.entryValueUsd !== undefined
+                        ? trade.entryValueUsd
+                        : undefined;
+                const pnlUsd =
+                    valueUsd !== undefined && entryValueUsd !== undefined
+                        ? valueUsd - entryValueUsd
+                        : undefined;
+                const pnlPercent =
+                    pnlUsd !== undefined && entryValueUsd !== undefined && entryValueUsd > 0
+                        ? (pnlUsd / entryValueUsd) * 100
+                        : undefined;
+
+                portfolioByMint.set(trade.tokenMint, {
+                    mint: trade.tokenMint,
+                    symbol: trade.symbol || 'UNKNOWN',
+                    balance,
+                    entryPriceUsd,
+                    currentPriceUsd: currentPriceUsd || undefined,
+                    valueUsd,
+                    pnlUsd,
+                    pnlPercent,
+                    source: 'DB',
+                });
+            }
+        }
+
+        return Array.from(portfolioByMint.values()).sort((a, b) =>
+            a.symbol.localeCompare(b.symbol),
+        );
+    }
+
     async getWalletBalanceForChat(
         chatId: string,
     ): Promise<{ publicKey: string; balanceSol: number; balanceUsd: number }> {

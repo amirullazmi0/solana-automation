@@ -440,21 +440,25 @@ export class ReportingService implements OnModuleInit {
 
     private async handlePortoRequest(targetChatId: string) {
         const tradeService = this.moduleRef.get(TradeService, { strict: false });
-        const holdings = await tradeService.getWalletHoldingsForChat(targetChatId);
+        const portfolio = await tradeService.getPortfolioForChat(targetChatId);
 
-        if (holdings.length === 0) {
+        if (portfolio.length === 0) {
             await this.sendMessage('📭 *Portfolio is empty.*', {}, 0, targetChatId);
             return;
         }
 
         await this.sendMessage(
-            '📊 *PORTFOLIO*\nShowing ' + holdings.length + ' tracked token(s).',
+            '📊 *PORTFOLIO*\nShowing ' + portfolio.length + ' tracked token(s).',
             {},
             0,
             targetChatId,
         );
 
-        for (const holding of holdings) {
+        for (const holding of portfolio) {
+            const valueUsd = holding.valueUsd ?? 0;
+            const pnlUsd = holding.pnlUsd ?? 0;
+            const pnlPercent = holding.pnlPercent ?? 0;
+            const pnlEmoji = pnlUsd >= 0 ? '🟢' : '🔴';
             const message =
                 '🪙 *' +
                 (holding.symbol || 'UNKNOWN') +
@@ -464,6 +468,20 @@ export class ReportingService implements OnModuleInit {
                 '`\n' +
                 'Balance: `' +
                 holding.balance.toFixed(4) +
+                '`\n' +
+                'Value: `$' +
+                valueUsd.toFixed(2) +
+                '`\n' +
+                'P&L: ' +
+                pnlEmoji +
+                ' `$' +
+                pnlUsd.toFixed(2) +
+                '` (`' +
+                pnlPercent.toFixed(2) +
+                '%`)' +
+                '\n' +
+                'Source: `' +
+                holding.source +
                 '`';
 
             const buttons: TelegramBot.InlineKeyboardButton[][] = [
