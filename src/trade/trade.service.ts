@@ -2040,7 +2040,55 @@ export class TradeService implements OnModuleInit {
         Array<{ mint: string; symbol: string; balance: number }>
     > {
         const wallet = await this.getWallet(chatId);
-        return this.getWalletHoldings(wallet.publicKey.toBase58());
+        const [onChainHoldings, chatRecord] = await Promise.all([
+            this.getWalletHoldings(wallet.publicKey.toBase58()),
+            this.telegramWorkspace.getChatById(chatId),
+        ]);
+
+        const holdingsByMint = new Map<
+            string,
+            { mint: string; symbol: string; balance: number }
+        >();
+
+        for (const holding of onChainHoldings) {
+            holdingsByMint.set(holding.mint, holding);
+        }
+
+        if (chatRecord?.id) {
+            const openTrades = await this.prismaService.trade.findMany({
+                where: {
+                    telegramChatId: chatRecord.id,
+                    status: 'OPEN',
+                    mode: 'LIVE',
+                },
+                orderBy: { updatedAt: 'desc' },
+            });
+
+            for (const trade of openTrades) {
+                if (holdingsByMint.has(trade.tokenMint)) continue;
+
+                let estimatedBalance = 0;
+                try {
+                    const currentPrice = await this.reportingService.fetchCurrentPrice(trade.tokenMint);
+                    if (currentPrice && trade.entryPrice > 0) {
+                        const estimatedUsdValue = trade.amountInSol * (trade.solPriceAtEntry || currentPrice);
+                        estimatedBalance = estimatedUsdValue / trade.entryPrice;
+                    }
+                } catch {
+                    estimatedBalance = 0;
+                }
+
+                holdingsByMint.set(trade.tokenMint, {
+                    mint: trade.tokenMint,
+                    symbol: trade.symbol || 'UNKNOWN',
+                    balance: estimatedBalance,
+                });
+            }
+        }
+
+        return Array.from(holdingsByMint.values()).sort((a, b) =>
+            a.symbol.localeCompare(b.symbol),
+        );
     }
 
     async getWalletBalanceForChat(

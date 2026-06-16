@@ -330,30 +330,45 @@ export class ReportingService implements OnModuleInit {
 
         const targetChatId = query.message?.chat.id.toString();
         if (!targetChatId) {
-            await this.bot.answerCallbackQuery(query.id);
+            await this.safeAnswerCallbackQuery(query.id);
             return;
         }
+
+        await this.safeAnswerCallbackQuery(query.id);
+
         const [action, payload] = data.split(':');
 
-        if (action === 'buy_menu') {
-            await this.sendBuyMenu(payload, targetChatId);
-        } else if (action === 'sell_menu') {
-            await this.sendSellMenu(payload, targetChatId);
-        } else if (action === 'buy_exec') {
-            const [mint, amount] = payload.split('|');
-            await this.executeManualBuy(mint, Number.parseFloat(amount), targetChatId);
-        } else if (action === 'sell_exec') {
-            const [mint, percent] = payload.split('|');
-            await this.executeManualSell(mint, Number.parseFloat(percent), targetChatId);
-        } else if (action === 'settings') {
-            const [section, value] = payload.split('|');
-            await this.handleSettingsCallback(section, value, targetChatId);
-        } else if (action === 'withdraw') {
-            const [mode, value] = payload.split('|');
-            await this.handleWithdrawCallback(mode, value, targetChatId);
+        try {
+            if (action === 'buy_menu') {
+                await this.sendBuyMenu(payload, targetChatId);
+            } else if (action === 'sell_menu') {
+                await this.sendSellMenu(payload, targetChatId);
+            } else if (action === 'buy_exec') {
+                const [mint, amount] = payload.split('|');
+                await this.executeManualBuy(mint, Number.parseFloat(amount), targetChatId);
+            } else if (action === 'sell_exec') {
+                const [mint, percent] = payload.split('|');
+                await this.executeManualSell(mint, Number.parseFloat(percent), targetChatId);
+            } else if (action === 'settings') {
+                const [section, value] = payload.split('|');
+                await this.handleSettingsCallback(section, value, targetChatId);
+            } else if (action === 'withdraw') {
+                const [mode, value] = payload.split('|');
+                await this.handleWithdrawCallback(mode, value, targetChatId);
+            }
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Callback query failed: ${msg}`);
         }
+    }
 
-        await this.bot.answerCallbackQuery(query.id);
+    private async safeAnswerCallbackQuery(queryId: string) {
+        try {
+            await this.bot.answerCallbackQuery(queryId);
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`Failed to answer callback query ${queryId}: ${msg}`);
+        }
     }
 
     private async sendBuyMenu(mint: string, targetChatId?: string) {
