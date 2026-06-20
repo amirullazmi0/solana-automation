@@ -962,6 +962,34 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(message);
     }
 
+    async sendRiskAdjustmentAlert(params: {
+        tokenMint: string;
+        symbol?: string;
+        currentPrice: number;
+        newTrailingStop: number;
+        baseTrailingDistancePercent: number;
+        effectiveTrailingDistancePercent: number;
+        volScore: number;
+        priceChange1h: number;
+        targetChatId?: string;
+    }): Promise<void> {
+        const displaySymbol = params.symbol || 'UNKNOWN';
+        const message =
+            `🧠 *AI RISK ADJUSTMENT*\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `💎 *Token:* ${displaySymbol}\n` +
+            `🆔 *Mint:* \`${params.tokenMint}\`\n` +
+            `📉 *Price:* \`$${params.currentPrice.toFixed(8)}\`\n` +
+            `🛑 *Trailing Stop:* \`$${params.newTrailingStop.toFixed(8)}\`\n` +
+            `📏 *Base Trail:* \`${params.baseTrailingDistancePercent.toFixed(1)}%\`\n` +
+            `📏 *AI Trail:* \`${params.effectiveTrailingDistancePercent.toFixed(1)}%\`\n` +
+            `🌪️ *VoL:* \`${params.volScore.toFixed(4)}\` | 1h: \`${params.priceChange1h.toFixed(2)}%\`\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `Status: \`AI tightened exit risk due to high volatility.\``;
+
+        await this.sendMessage(message, {}, 0, params.targetChatId);
+    }
+
     async sendSellAlert(
         tokenMint: string,
         sellPrice: number,

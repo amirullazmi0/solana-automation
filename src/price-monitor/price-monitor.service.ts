@@ -8,7 +8,29 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
 import { TradeService } from '../trade/trade.service';
 import { DexLimiter } from '../common/dex-limiter';
+import { AIService } from '../ai/ai.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
+import { DexScreenerPair } from '../dto/analyzer.dto';
+
+interface TradeFreshMarketSignals {
+    priceUsd: number;
+    volScore: number;
+    priceChange1h: number;
+    liquidityUsd: number;
+    marketCapUsd: number;
+    volume5mUsd: number;
+    volume1hUsd: number;
+    buys5mCount: number;
+    sells5mCount: number;
+    volumeSurge: number;
+    zScore: number;
+}
+
+type TradeWithTelegramChat = Trade & {
+    telegramChat?: {
+        chatId: string;
+    } | null;
+};
 
 @Injectable()
 export class PriceMonitorService {
@@ -18,6 +40,7 @@ export class PriceMonitorService {
     private stopLossPercent: number;
     private readonly newTokenPatienceThresholdMinutes: number;
     private readonly lastAlertTime = new Map<string, number>(); // Cooldown alert: tokenMint -> timestamp
+    private readonly lastRiskAdjustmentAlertTime = new Map<string, number>();
     private ipCache: Record<string, string> = {};
     private readonly fallbackApiIps: Record<string, string> = {
         'api.jup.ag': '18.239.105.107',
@@ -29,6 +52,7 @@ export class PriceMonitorService {
         private readonly tradeService: TradeService,
         private readonly telegramWorkspace: TelegramWorkspaceService,
         private readonly reportingService: ReportingService,
+        private readonly aiService: AIService,
     ) {
         this.trailingDistancePercent = parseFloat(
             this.configService.get<string>('TRAILING_DISTANCE_PERCENT', '5.0'),
@@ -48,13 +72,20 @@ export class PriceMonitorService {
     async monitorPrices() {
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN', mode: 'LIVE' },
+            include: {
+                telegramChat: {
+                    select: {
+                        chatId: true,
+                    },
+                },
+            },
         });
 
         if (openTrades.length === 0) return;
 
         // 📦 BATCHING: Get all prices in one go
         const mints = openTrades.map((t) => t.tokenMint);
-        const priceMap = await this.getBatchPrices(mints);
+        const freshMarketDataMap = await this.getBatchFreshMarketData(mints);
 
         for (const trade of openTrades) {
             if (this.processingTrades.has(trade.id)) continue;
@@ -71,12 +102,13 @@ export class PriceMonitorService {
                 }
             }
 
-            const currentPrice = priceMap[trade.tokenMint];
-            if (!currentPrice || currentPrice <= 0) continue;
+            const freshMarketData = freshMarketDataMap.get(trade.tokenMint);
+            const currentPrice = freshMarketData?.priceUsd ?? 0;
+            if (currentPrice <= 0) continue;
 
             this.processingTrades.add(trade.id);
             try {
-                await this.evaluateTrade(trade, currentPrice);
+                await this.evaluateTrade(trade, currentPrice, freshMarketData);
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 this.logger.error(`Error evaluating ${trade.tokenMint}: ${msg}`);
@@ -111,71 +143,94 @@ export class PriceMonitorService {
         });
     }
 
-    private async getBatchPrices(mints: string[]): Promise<Record<string, number>> {
-        const result: Record<string, number> = {};
+    private async getBatchFreshMarketData(
+        mints: string[],
+    ): Promise<Map<string, TradeFreshMarketSignals>> {
+        const result = new Map<string, TradeFreshMarketSignals>();
         if (mints.length === 0) return result;
 
-        try {
-            const hostname = 'api.jup.ag';
-            const ids = mints.join(',');
-            const response = await axios.get(`https://${hostname}/price/v3?ids=${ids}`, {
-                timeout: 3000,
-                headers: { 'x-api-key': this.jupiterApiKey },
-                httpsAgent: this.getHttpsAgent(),
-            });
+        const uniqueMints = [...new Set(mints)];
+        const snapshots = await Promise.all(
+            uniqueMints.map(async (mint) => ({
+                mint,
+                snapshot: await this.getDexScreenerMarketSnapshot(mint),
+            })),
+        );
 
-            const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
-            if (data) {
-                for (const mint of mints) {
-                    const tokenData = data[mint];
-                    if (tokenData && typeof tokenData.usdPrice === 'number') {
-                        result[mint] = tokenData.usdPrice;
-                    }
-                }
-            }
-        } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            this.logger.error(`Batch price fetch failed: ${msg}`);
-        }
-
-        const missingMints = mints.filter((mint) => !result[mint]);
-        for (const mint of missingMints) {
-            const dexPrice = await this.getDexScreenerPrice(mint);
-            if (dexPrice && dexPrice > 0) {
-                result[mint] = dexPrice;
+        for (const { mint, snapshot } of snapshots) {
+            if (snapshot) {
+                result.set(mint, snapshot);
             }
         }
 
         return result;
     }
 
-    private async getDexScreenerPrice(tokenMint: string): Promise<number | null> {
+    private async getDexScreenerMarketSnapshot(
+        tokenMint: string,
+    ): Promise<TradeFreshMarketSignals | null> {
         try {
             const response = await DexLimiter.get<{
-                pairs: Array<{ priceUsd?: string }>;
+                pairs: Array<DexScreenerPair & { priceUsd?: string }>;
             }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
                 timeout: 5000,
                 httpsAgent: this.getHttpsAgent(),
             });
-            const price = Number.parseFloat(response.data.pairs?.[0]?.priceUsd || '');
-            return Number.isFinite(price) && price > 0 ? price : null;
-        } catch {
+
+            const pair = response.data.pairs?.[0];
+            if (!pair) {
+                return null;
+            }
+
+            const priceUsd = this.parsePriceUsd(pair.priceUsd);
+            const liquidityUsd = pair.liquidity?.usd ?? 0;
+            const volume5mUsd = pair.volume?.m5 ?? 0;
+            const volume1hUsd = pair.volume?.h1 ?? 0;
+            const buys5mCount = pair.txns?.m5?.buys ?? 0;
+            const sells5mCount = pair.txns?.m5?.sells ?? 0;
+            const priceChange1h = pair.priceChange?.h1 ?? 0;
+            const averageVolume5m = volume1hUsd / 12;
+            const volumeSurge = averageVolume5m > 0 ? volume5mUsd / averageVolume5m : 0;
+            const confidenceScore = this.calculateBuyConfidence(buys5mCount, sells5mCount);
+            const volScore =
+                liquidityUsd > 0 ? (volume5mUsd / liquidityUsd) * confidenceScore : 0;
+            const zScore =
+                averageVolume5m > 0
+                    ? (volume5mUsd - averageVolume5m) / ((averageVolume5m * 0.5) || 1)
+                    : 0;
+
+            return {
+                priceUsd,
+                volScore,
+                priceChange1h,
+                liquidityUsd,
+                marketCapUsd: pair.fdv ?? 0,
+                volume5mUsd,
+                volume1hUsd,
+                buys5mCount,
+                sells5mCount,
+                volumeSurge,
+                zScore,
+            };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.debug(`DexScreener market snapshot failed for ${tokenMint}: ${message}`);
             return null;
         }
     }
 
-    private async getLiquidityOnly(tokenMint: string): Promise<number | null> {
-        try {
-            const response = await DexLimiter.get<{
-                pairs: Array<{ liquidity?: { usd?: number } }>;
-            }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
-                timeout: 5000,
-                httpsAgent: this.getHttpsAgent(),
-            });
-            return response.data.pairs?.[0]?.liquidity?.usd || 0;
-        } catch {
-            return null;
+    private parsePriceUsd(priceUsd?: string): number {
+        const parsed = Number.parseFloat(priceUsd ?? '');
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    }
+
+    private calculateBuyConfidence(buys5m: number, sells5m: number): number {
+        const totalTx = buys5m + sells5m;
+        if (!Number.isFinite(totalTx) || totalTx <= 0) {
+            return 0;
         }
+
+        return buys5m / totalTx;
     }
 
     private async resolveDns(hostname: string): Promise<string | null> {
@@ -225,16 +280,56 @@ export class PriceMonitorService {
         }
     }
 
-    private async evaluateTrade(trade: Trade, currentPrice: number) {
+    private async evaluateTrade(
+        trade: TradeWithTelegramChat,
+        currentPrice: number,
+        freshMarketSignals?: TradeFreshMarketSignals,
+    ) {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
 
         const effectiveStopLossPercent = trade.targetStopLoss ?? this.stopLossPercent;
-        const effectiveTrailingDistancePercent =
+        const normalizedFreshMarketSignals: TradeFreshMarketSignals = {
+            priceUsd: freshMarketSignals?.priceUsd ?? currentPrice,
+            volScore: freshMarketSignals?.volScore ?? 0,
+            priceChange1h: freshMarketSignals?.priceChange1h ?? 0,
+            liquidityUsd: freshMarketSignals?.liquidityUsd ?? 0,
+            marketCapUsd: freshMarketSignals?.marketCapUsd ?? 0,
+            volume5mUsd: freshMarketSignals?.volume5mUsd ?? 0,
+            volume1hUsd: freshMarketSignals?.volume1hUsd ?? 0,
+            buys5mCount: freshMarketSignals?.buys5mCount ?? 0,
+            sells5mCount: freshMarketSignals?.sells5mCount ?? 0,
+            volumeSurge: freshMarketSignals?.volumeSurge ?? 0,
+            zScore: freshMarketSignals?.zScore ?? 0,
+        };
+        const aiRecommendedTrailingDistance = this.aiService.getRecommendedTrailingDistance(
+            normalizedFreshMarketSignals.volScore,
+            normalizedFreshMarketSignals.priceChange1h,
+        );
+        const baseTrailingDistancePercent =
             trade.targetTrailingDistance ?? this.trailingDistancePercent;
+        const effectiveTrailingDistancePercent = Math.min(
+            baseTrailingDistancePercent,
+            aiRecommendedTrailingDistance,
+        );
 
         this.logger.debug(
             `[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)}, Profit: ${profitPercent.toFixed(2)}%, SL: -${effectiveStopLossPercent}%, TSL: $${trade.trailingStopPrice.toFixed(8)}`,
         );
+
+        if (effectiveTrailingDistancePercent < baseTrailingDistancePercent) {
+            this.logger.warn(
+                `[AI Brain] Tightening trailing stop due to high volatility... token=${trade.tokenMint} volScore=${normalizedFreshMarketSignals.volScore.toFixed(4)} priceChange1h=${normalizedFreshMarketSignals.priceChange1h.toFixed(2)}% base=${baseTrailingDistancePercent.toFixed(1)}% effective=${effectiveTrailingDistancePercent.toFixed(1)}%`,
+            );
+            await this.sendRiskAdjustmentAlertIfNeeded(
+                trade,
+                currentPrice,
+                normalizedFreshMarketSignals,
+                baseTrailingDistancePercent,
+                effectiveTrailingDistancePercent,
+                trade.trailingStopPrice,
+                trade.telegramChat?.chatId,
+            );
+        }
 
         // 1. ANALISIS HOLDER (Insting Intelijen)
         if (trade.creatorAddress || trade.topHolderAddress) {
@@ -311,6 +406,32 @@ export class PriceMonitorService {
                     trade.symbol || undefined,
                 );
                 this.lastAlertTime.set(trade.tokenMint, now);
+            }
+        } else if (
+            effectiveTrailingDistancePercent < baseTrailingDistancePercent &&
+            trade.trailingStopPrice > 0
+        ) {
+            const referencePrice = Math.max(trade.highestPrice, currentPrice);
+            const tightenedTrailingStop =
+                referencePrice * (1 - effectiveTrailingDistancePercent / 100);
+
+            if (tightenedTrailingStop > trade.trailingStopPrice) {
+                await this.prismaService.trade.update({
+                    where: { id: trade.id },
+                    data: { trailingStopPrice: tightenedTrailingStop },
+                });
+                this.logger.warn(
+                    `[AI Brain] Tightening trailing stop realtime for ${trade.tokenMint}. Reference=$${referencePrice.toFixed(8)} NewTSL=$${tightenedTrailingStop.toFixed(8)}.`,
+                );
+                await this.sendRiskAdjustmentAlertIfNeeded(
+                    trade,
+                    referencePrice,
+                    normalizedFreshMarketSignals,
+                    baseTrailingDistancePercent,
+                    effectiveTrailingDistancePercent,
+                    tightenedTrailingStop,
+                    trade.telegramChat?.chatId,
+                );
             }
         }
 
@@ -456,6 +577,42 @@ export class PriceMonitorService {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`Failed to check buy pressure: ${msg}`);
             return false;
+        }
+    }
+
+    private async sendRiskAdjustmentAlertIfNeeded(
+        trade: Trade,
+        currentPrice: number,
+        signals: TradeFreshMarketSignals,
+        baseTrailingDistancePercent: number,
+        effectiveTrailingDistancePercent: number,
+        newTrailingStop: number,
+        targetChatId?: string,
+    ): Promise<void> {
+        try {
+            const now = Date.now();
+            const lastAlertAt = this.lastRiskAdjustmentAlertTime.get(trade.tokenMint) || 0;
+            if (now - lastAlertAt < 5 * 60 * 1000) {
+                return;
+            }
+
+            await this.reportingService.sendRiskAdjustmentAlert({
+                tokenMint: trade.tokenMint,
+                symbol: trade.symbol || undefined,
+                currentPrice,
+                newTrailingStop,
+                baseTrailingDistancePercent,
+                effectiveTrailingDistancePercent,
+                volScore: signals.volScore,
+                priceChange1h: signals.priceChange1h,
+                targetChatId,
+            });
+            this.lastRiskAdjustmentAlertTime.set(trade.tokenMint, now);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.warn(
+                `[AI Brain] Failed to send risk adjustment alert for ${trade.tokenMint}: ${message}`,
+            );
         }
     }
 }

@@ -31,6 +31,10 @@ export class AIService {
         return Number.isFinite(value) ? value : fallback;
     }
 
+    private getTrailingDistanceConfig(): number {
+        return this.getNumberConfig('TRAILING_DISTANCE_PERCENT', 5);
+    }
+
     private calculateRatio(numerator: number, denominator: number): number {
         try {
             if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
@@ -50,6 +54,56 @@ export class AIService {
             return metrics.buys5mCount / totalTx;
         } catch {
             return 0;
+        }
+    }
+
+    private formatAgeDisplay(ageHours: number): string {
+        try {
+            if (!Number.isFinite(ageHours) || ageHours < 0) {
+                return 'Unknown';
+            }
+
+            if (ageHours < 1) {
+                const ageMinutes = ageHours * 60;
+                return `${ageMinutes.toFixed(1)} minutes`;
+            }
+
+            return `${ageHours.toFixed(2)} hours`;
+        } catch {
+            return 'Unknown';
+        }
+    }
+
+    private getSafeRugcheckScore(score?: number): number {
+        if (!Number.isFinite(score ?? Number.NaN)) {
+            return 0;
+        }
+
+        return score ?? 0;
+    }
+
+    public getRecommendedTrailingDistance(volScore: number, priceChange1h: number): number {
+        try {
+            const defaultTrailingDistance = this.getTrailingDistanceConfig();
+            if (!Number.isFinite(volScore) || !Number.isFinite(priceChange1h)) {
+                return defaultTrailingDistance;
+            }
+
+            const chaosDetected = volScore > 0.8 || Math.abs(priceChange1h) > 50;
+            if (!chaosDetected) {
+                return defaultTrailingDistance;
+            }
+
+            const severeChaos = volScore > 1.2 || Math.abs(priceChange1h) > 100;
+            const recommendedDistance = severeChaos ? 2.5 : 3.0;
+
+            return recommendedDistance;
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.warn(
+                `[AI Brain] Trailing distance recommendation failed, using default config: ${message}`,
+            );
+            return this.getTrailingDistanceConfig();
         }
     }
 
@@ -212,10 +266,13 @@ Decision rules:
 5. Prefer "buy" only when volume, buyer dominance, liquidity, market cap, age, and risk profile are all coherent with BOT_MODE=${thresholds.botMode}.
 6. Be highly objective. Most memecoins are scams. Output only valid JSON; no markdown wrappers.`;
 
+            const ageDisplay = this.formatAgeDisplay(metrics.ageHours);
+            const safeRugcheckScore = this.getSafeRugcheckScore(metrics.rugcheckScore);
+
             const userPrompt = `Token Symbol: $${symbol}
 Mint Address: ${tokenMint}
 Token Metrics:
-- Age: ${metrics.ageHours.toFixed(2)} hours
+- Age: ${ageDisplay}
 - Liquidity: $${metrics.liquidityUsd.toLocaleString()}
 - Market Cap: $${metrics.marketCapUsd.toLocaleString()}
 - 5m Volume: $${metrics.volume5mUsd.toLocaleString()}
@@ -223,7 +280,7 @@ Token Metrics:
 - 5m Sells: ${metrics.sells5mCount}
 - 1h Price Change: ${metrics.priceChange1hPct.toFixed(2)}%
 - Is Pump.fun Migration: ${metrics.isPumpFun ? 'Yes' : 'No'}
-- RugCheck Score: ${metrics.rugcheckScore ?? 'Unknown'}
+- RugCheck Score: ${safeRugcheckScore}
 - Danger Risks Count: ${metrics.dangerRisksCount ?? 0}
 - Creator Holding: ${metrics.creatorHoldPct !== undefined ? `${metrics.creatorHoldPct.toFixed(2)}%` : 'Unknown'}
 - Top 10 Holder Concentration: ${metrics.top10HolderPct !== undefined ? `${metrics.top10HolderPct.toFixed(2)}%` : 'Unknown'}
