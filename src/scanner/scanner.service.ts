@@ -31,6 +31,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private activeMonitoring = 0;
     private readonly MAX_CONCURRENT: number;
     private readonly processingTokens = new Set<string>();
+    private readonly noDexPairRetryCounts = new Map<string, number>();
     private readonly httpsAgent: https.Agent;
 
     // Cache for resolved IPs
@@ -278,7 +279,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 );
             },
             Number.parseInt(
-                this.configService.get<string>('SCANNER_HEARTBEAT_INTERVAL', '30000'),
+                this.configService.get<string>('SCANNER_HEARTBEAT_INTERVAL', '5000'),
                 10,
             ),
         );
@@ -561,8 +562,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     );
                     return;
                 }
-                const { isWin, cooldownHours, expiredAt: cooldownExpiredAt } =
-                    this.getTradeCooldown(recentTrade);
+                const {
+                    isWin,
+                    cooldownHours,
+                    expiredAt: cooldownExpiredAt,
+                } = this.getTradeCooldown(recentTrade);
 
                 if (Date.now() < cooldownExpiredAt) {
                     this.logger.debug(
@@ -699,7 +703,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                     Number.parseInt(
                                         this.configService.get<string>(
                                             'SCANNER_RECHECK_DELAY_MS',
-                                            '30000',
+                                            '5000',
                                         ),
                                         10,
                                     ),
@@ -832,13 +836,22 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
                         await this.updateWatchlistByMint(tokenMint, {
                             status: liveBuyExecuted ? 'TRADED' : 'FAILED',
-                            reason: liveBuyExecuted ? undefined : signalOnlySent ? 'signal_only' : 'auto_buy_failed',
+                            reason: liveBuyExecuted
+                                ? undefined
+                                : signalOnlySent
+                                  ? 'signal_only'
+                                  : 'auto_buy_failed',
                         });
                         this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
                         return;
                     }
 
                     if (result.permanent) {
+                        if (result.reason) {
+                            this.logger.debug(
+                                `[${tokenMint}] Token ${tokenMint} skipped: ${result.reason}`,
+                            );
+                        }
                         this.logger.debug(
                             `[${tokenMint}] ⛔ Permanent filter fail (${result.reason}). Giving up.`,
                         );
@@ -855,11 +868,34 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     // biarkan status tetap PENDING agar dicek kembali oleh background radar nanti,
                     // dan teruskan pemantauan aktif di loop ini hanya jika itu adalah error API/Network.
                     if (!result.permanent && result.reason) {
+                        if (result.reason === 'no_dex_pair') {
+                            const nextRetryCount =
+                                (this.noDexPairRetryCounts.get(tokenMint) ?? 0) + 1;
+                            this.noDexPairRetryCounts.set(tokenMint, nextRetryCount);
+
+                            if (nextRetryCount >= 3) {
+                                this.logger.debug(
+                                    `[${tokenMint}] Token ${tokenMint} skipped: no_dex_pair`,
+                                );
+                                await this.updateWatchlistByMint(tokenMint, {
+                                    reason: 'no_dex_pair',
+                                });
+                                this.seenTokens.set(tokenMint, Date.now() + 5 * 60 * 1000);
+                                return;
+                            }
+
+                            const retryBackoffMs = Math.min(250 * 2 ** (nextRetryCount - 1), 1000);
+                            this.logger.debug(
+                                `[${tokenMint}] ⏳ no_dex_pair retry ${nextRetryCount}/3. Backing off ${retryBackoffMs}ms.`,
+                            );
+                            await new Promise((res) => setTimeout(res, retryBackoffMs));
+                            continue;
+                        }
+
                         const isApiOrNetworkError = [
                             'rugcheck_error',
                             'rebound_analysis_error',
                             'error',
-                            'no_dex_pair',
                         ].includes(result.reason);
 
                         if (isApiOrNetworkError) {
@@ -872,7 +908,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                     Number.parseInt(
                                         this.configService.get<string>(
                                             'SCANNER_RECHECK_DELAY_MS',
-                                            '30000',
+                                            '5000',
                                         ),
                                         10,
                                     ),
@@ -880,6 +916,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             );
                             continue; // Lanjut loop pemantauan aktif
                         } else {
+                            this.logger.debug(
+                                `[${tokenMint}] Token ${tokenMint} skipped: ${result.reason}`,
+                            );
                             this.logger.debug(
                                 `[${tokenMint}] ⏳ Market metric temporary fail (${result.reason}). Exiting active monitor to let background radar handle it.`,
                             );
@@ -895,7 +934,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         setTimeout(
                             res,
                             Number.parseInt(
-                                this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '30000'),
+                                this.configService.get<string>('SCANNER_RECHECK_DELAY_MS', '5000'),
                                 10,
                             ),
                         ),
@@ -919,6 +958,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 this.activeMonitoring--;
             }
             this.processingTokens.delete(tokenMint);
+            this.noDexPairRetryCounts.delete(tokenMint);
         }
     }
 
@@ -961,7 +1001,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
         const fallbackIp = this.fallbackApiIps[hostname];
         if (fallbackIp) {
-            this.logger.warn(`[DNS] Falling back to temporary pinned IP for ${hostname}: ${fallbackIp}`);
+            this.logger.warn(
+                `[DNS] Falling back to temporary pinned IP for ${hostname}: ${fallbackIp}`,
+            );
             return fallbackIp;
         }
 

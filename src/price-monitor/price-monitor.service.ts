@@ -26,6 +26,14 @@ interface TradeFreshMarketSignals {
     zScore: number;
 }
 
+interface DexScreenerPairWithPriceUsd extends DexScreenerPair {
+    priceUsd?: string;
+}
+
+interface DexScreenerBatchResponse {
+    pairs?: DexScreenerPairWithPriceUsd[];
+}
+
 type TradeWithTelegramChat = Trade & {
     telegramChat?: {
         chatId: string;
@@ -149,69 +157,91 @@ export class PriceMonitorService {
         const result = new Map<string, TradeFreshMarketSignals>();
         if (mints.length === 0) return result;
 
-        const uniqueMints = [...new Set(mints)];
-        const snapshots = await Promise.all(
-            uniqueMints.map(async (mint) => ({
-                mint,
-                snapshot: await this.getDexScreenerMarketSnapshot(mint),
-            })),
-        );
+        const uniqueMints = [...new Set(mints)].filter((mint) => mint.trim().length > 0);
+        if (uniqueMints.length === 0) return result;
 
-        for (const { mint, snapshot } of snapshots) {
-            if (snapshot) {
-                result.set(mint, snapshot);
+        try {
+            const response = await DexLimiter.get<DexScreenerBatchResponse>(
+                `https://api.dexscreener.com/latest/dex/tokens/${uniqueMints.join(',')}`,
+                {
+                    timeout: 5000,
+                    httpsAgent: this.getHttpsAgent(),
+                },
+            );
+
+            const pairs = response.data.pairs ?? [];
+            for (const mint of uniqueMints) {
+                const matchedPair = pairs.find((pair) => pair.baseToken?.address === mint);
+                if (!matchedPair) continue;
+
+                const signals = this.extractTradeFreshMarketSignals(matchedPair);
+                if (signals) {
+                    result.set(mint, signals);
+                }
             }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.debug(`DexScreener batch market snapshot failed: ${message}`);
+            return result;
         }
 
         return result;
+    }
+
+    private extractTradeFreshMarketSignals(
+        pair: DexScreenerPairWithPriceUsd,
+    ): TradeFreshMarketSignals | null {
+        const priceUsd = this.parsePriceUsd(pair.priceUsd);
+        const liquidityUsd = pair.liquidity?.usd ?? 0;
+        const volume5mUsd = pair.volume?.m5 ?? 0;
+        const volume1hUsd = pair.volume?.h1 ?? 0;
+        const buys5mCount = pair.txns?.m5?.buys ?? 0;
+        const sells5mCount = pair.txns?.m5?.sells ?? 0;
+        const priceChange1h = pair.priceChange?.h1 ?? 0;
+        const averageVolume5m = volume1hUsd / 12;
+        const volumeSurge = averageVolume5m > 0 ? volume5mUsd / averageVolume5m : 0;
+        const confidenceScore = this.calculateBuyConfidence(buys5mCount, sells5mCount);
+        const volScore = liquidityUsd > 0 ? (volume5mUsd / liquidityUsd) * confidenceScore : 0;
+        const zScore =
+            averageVolume5m > 0
+                ? (volume5mUsd - averageVolume5m) / ((averageVolume5m * 0.5) || 1)
+                : 0;
+
+        return {
+            priceUsd,
+            volScore,
+            priceChange1h,
+            liquidityUsd,
+            marketCapUsd: pair.fdv ?? 0,
+            volume5mUsd,
+            volume1hUsd,
+            buys5mCount,
+            sells5mCount,
+            volumeSurge,
+            zScore,
+        };
     }
 
     private async getDexScreenerMarketSnapshot(
         tokenMint: string,
     ): Promise<TradeFreshMarketSignals | null> {
         try {
-            const response = await DexLimiter.get<{
-                pairs: Array<DexScreenerPair & { priceUsd?: string }>;
-            }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
-                timeout: 5000,
-                httpsAgent: this.getHttpsAgent(),
-            });
+            const response = await DexLimiter.get<DexScreenerBatchResponse>(
+                `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
+                {
+                    timeout: 5000,
+                    httpsAgent: this.getHttpsAgent(),
+                },
+            );
 
-            const pair = response.data.pairs?.[0];
+            const pair =
+                response.data.pairs?.find((entry) => entry.baseToken?.address === tokenMint) ??
+                response.data.pairs?.[0];
             if (!pair) {
                 return null;
             }
 
-            const priceUsd = this.parsePriceUsd(pair.priceUsd);
-            const liquidityUsd = pair.liquidity?.usd ?? 0;
-            const volume5mUsd = pair.volume?.m5 ?? 0;
-            const volume1hUsd = pair.volume?.h1 ?? 0;
-            const buys5mCount = pair.txns?.m5?.buys ?? 0;
-            const sells5mCount = pair.txns?.m5?.sells ?? 0;
-            const priceChange1h = pair.priceChange?.h1 ?? 0;
-            const averageVolume5m = volume1hUsd / 12;
-            const volumeSurge = averageVolume5m > 0 ? volume5mUsd / averageVolume5m : 0;
-            const confidenceScore = this.calculateBuyConfidence(buys5mCount, sells5mCount);
-            const volScore =
-                liquidityUsd > 0 ? (volume5mUsd / liquidityUsd) * confidenceScore : 0;
-            const zScore =
-                averageVolume5m > 0
-                    ? (volume5mUsd - averageVolume5m) / ((averageVolume5m * 0.5) || 1)
-                    : 0;
-
-            return {
-                priceUsd,
-                volScore,
-                priceChange1h,
-                liquidityUsd,
-                marketCapUsd: pair.fdv ?? 0,
-                volume5mUsd,
-                volume1hUsd,
-                buys5mCount,
-                sells5mCount,
-                volumeSurge,
-                zScore,
-            };
+            return this.extractTradeFreshMarketSignals(pair);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logger.debug(`DexScreener market snapshot failed for ${tokenMint}: ${message}`);

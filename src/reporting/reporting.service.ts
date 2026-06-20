@@ -113,7 +113,14 @@ export class ReportingService implements OnModuleInit {
             });
 
             try {
-                if (await this.handlePendingWithdrawAddressInput(incomingChatId, text, command, normalizedText)) {
+                if (
+                    await this.handlePendingWithdrawAddressInput(
+                        incomingChatId,
+                        text,
+                        command,
+                        normalizedText,
+                    )
+                ) {
                     return;
                 }
 
@@ -648,12 +655,7 @@ export class ReportingService implements OnModuleInit {
 
         const trimmed = text.trim();
         if (!this.isSolanaAddress(trimmed)) {
-            await this.sendMessage(
-                '⚠️ Please send a valid Solana address.',
-                {},
-                0,
-                targetChatId,
-            );
+            await this.sendMessage('⚠️ Please send a valid Solana address.', {}, 0, targetChatId);
             return true;
         }
 
@@ -675,10 +677,22 @@ export class ReportingService implements OnModuleInit {
 
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
             [
-                { text: `$${presetUsd(0.2).toFixed(2)}`, callback_data: `withdraw:usd|${presetUsd(0.2).toFixed(2)}` },
-                { text: `$${presetUsd(0.5).toFixed(2)}`, callback_data: `withdraw:usd|${presetUsd(0.5).toFixed(2)}` },
-                { text: `$${presetUsd(0.8).toFixed(2)}`, callback_data: `withdraw:usd|${presetUsd(0.8).toFixed(2)}` },
-                { text: `$${presetUsd(1.0).toFixed(2)}`, callback_data: `withdraw:usd|${presetUsd(1.0).toFixed(2)}` },
+                {
+                    text: `$${presetUsd(0.2).toFixed(2)}`,
+                    callback_data: `withdraw:usd|${presetUsd(0.2).toFixed(2)}`,
+                },
+                {
+                    text: `$${presetUsd(0.5).toFixed(2)}`,
+                    callback_data: `withdraw:usd|${presetUsd(0.5).toFixed(2)}`,
+                },
+                {
+                    text: `$${presetUsd(0.8).toFixed(2)}`,
+                    callback_data: `withdraw:usd|${presetUsd(0.8).toFixed(2)}`,
+                },
+                {
+                    text: `$${presetUsd(1.0).toFixed(2)}`,
+                    callback_data: `withdraw:usd|${presetUsd(1.0).toFixed(2)}`,
+                },
             ],
             [
                 { text: '$10', callback_data: 'withdraw:usd|10' },
@@ -1123,7 +1137,12 @@ export class ReportingService implements OnModuleInit {
             ],
         ].filter((row) => row.length > 0);
 
-        await this.sendMessage(message, { reply_markup: { inline_keyboard: buttons } }, 0, targetChatId);
+        await this.sendMessage(
+            message,
+            { reply_markup: { inline_keyboard: buttons } },
+            0,
+            targetChatId,
+        );
     }
 
     async sendSwapResultReport(params: {
