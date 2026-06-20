@@ -17,7 +17,7 @@ interface CacheEntry {
 export class AIService {
     private readonly logger = new Logger(AIService.name);
     private readonly cache = new Map<string, CacheEntry>();
-    private readonly cacheTTLMs = 10 * 60 * 1000; // 10 minutes cache
+    private readonly cacheTTLMs = 10 * 60 * 1000;
 
     constructor(private readonly configService: ConfigService) {}
 
@@ -45,7 +45,6 @@ export class AIService {
             if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
                 return 0;
             }
-
             return numerator / denominator;
         } catch {
             return 0;
@@ -67,12 +66,10 @@ export class AIService {
             if (!Number.isFinite(ageHours) || ageHours < 0) {
                 return 'Unknown';
             }
-
             if (ageHours < 1) {
                 const ageMinutes = ageHours * 60;
                 return `${ageMinutes.toFixed(1)} minutes`;
             }
-
             return `${ageHours.toFixed(2)} hours`;
         } catch {
             return 'Unknown';
@@ -83,7 +80,6 @@ export class AIService {
         if (!Number.isFinite(score ?? Number.NaN)) {
             return 0;
         }
-
         return score ?? 0;
     }
 
@@ -92,7 +88,6 @@ export class AIService {
         if (!Number.isFinite(numericValue)) {
             return 1;
         }
-
         return Math.min(Math.max(numericValue, 0.1), 1);
     }
 
@@ -101,7 +96,6 @@ export class AIService {
         if (!Number.isFinite(numericValue) || numericValue <= 0) {
             return this.getTrailingDistanceConfig();
         }
-
         return numericValue;
     }
 
@@ -118,9 +112,7 @@ export class AIService {
             }
 
             const severeChaos = volScore > 1.2 || Math.abs(priceChange1h) > 100;
-            const recommendedDistance = severeChaos ? 2.5 : 3.0;
-
-            return recommendedDistance;
+            return severeChaos ? 2.5 : 3.0;
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logger.warn(
@@ -144,21 +136,15 @@ export class AIService {
         const action = parsed.action === 'buy' || parsed.action === 'skip' ? parsed.action : 'skip';
 
         const result: AIAnalysisResult = {
-            cuanConvictionScore: Number.isFinite(score)
-                ? Math.min(Math.max(score, 0), 100)
-                : 0,
-            predictedPumpPercentage: Number.isFinite(predictedPump)
-                ? Math.max(predictedPump, 0)
-                : 0,
+            cuanConvictionScore: Number.isFinite(score) ? Math.min(Math.max(score, 0), 100) : 0,
+            predictedPumpPercentage: Number.isFinite(predictedPump) ? Math.max(predictedPump, 0) : 0,
             confidenceLevel,
             reasoning:
                 typeof parsed.reasoning === 'string' && parsed.reasoning.trim().length > 0
                     ? parsed.reasoning.trim().slice(0, 500)
                     : 'No reasoning provided.',
             action,
-            positionSizeMultiplier: this.sanitizePositionSizeMultiplier(
-                parsed.positionSizeMultiplier,
-            ),
+            positionSizeMultiplier: this.sanitizePositionSizeMultiplier(parsed.positionSizeMultiplier),
             customTrailingBaseDistance: this.sanitizeTrailingBaseDistance(
                 parsed.customTrailingBaseDistance,
             ),
@@ -215,7 +201,6 @@ export class AIService {
         symbol: string,
         metrics: AIAnalysisMetrics,
     ): Promise<AIAnalysisResult> {
-        // 1. Check cache
         const cached = this.cache.get(tokenMint);
         if (cached && cached.expiresAt > Date.now()) {
             this.logger.debug(`[${tokenMint}] Serving AI analysis from cache.`);
@@ -240,12 +225,10 @@ export class AIService {
         const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
         const thresholds = this.getThresholdSnapshot();
 
-        this.logger.log(
-            `🧠 Calling AI Model (${model}) to analyze token $${symbol} (${tokenMint})...`,
-        );
+        this.logger.log(`🧠 Calling AI Model (${model}) to analyze token $${symbol} (${tokenMint})...`);
 
         try {
-        const systemPrompt = `You are MaSoul Sniper's AI Conviction Engine, an expert Solana on-chain analyst and quantitative memecoin trader.
+            const systemPrompt = `You are MaSoul Sniper's AI Conviction Engine, an expert Solana on-chain analyst and quantitative memecoin trader.
 You are NOT the primary filter. The deterministic NestJS filters already ran before this call. Your job is the final sanity-check and conviction score using the live .env thresholds below.
 
 Return a JSON object with exactly these fields:
@@ -255,8 +238,8 @@ Return a JSON object with exactly these fields:
   "confidenceLevel": "high" | "medium" | "low",
   "reasoning": "<brief indonesian explanation of why it is cuan or skip, max 2 sentences>",
   "action": "buy" | "skip",
-  "positionSizeMultiplier": <number between 0.1 and 1.0>,
-  "customTrailingBaseDistance": <number, optional recommended base trailing distance percent>
+  "positionSizeMultiplier": <number between 0.1 and 1.0 based on asset short-term risks vs velocity>,
+  "customTrailingBaseDistance": <number, optional custom recommended base trailing distance percent>
 }
 Live .env thresholds and mode:
 - BOT_MODE=${thresholds.botMode}
@@ -293,12 +276,11 @@ Live .env thresholds and mode:
 
 Decision rules:
 1. "action" must only be "buy" if "cuanConvictionScore" is >= AI_CONVICTION_THRESHOLD. Otherwise use "skip".
-2. If liquidity, volume, buy count, market cap, age, or buy confidence are below the live thresholds, strongly penalize conviction even if momentum looks attractive.
-3. If RugCheck score is above ${thresholds.maxRugcheckScore}, danger risks count is above 0, or creator holding is above 5%, conviction must be very low.
-4. Prefer "buy" only when volume, buyer dominance, liquidity, market cap, age, and risk profile are all coherent with BOT_MODE=${thresholds.botMode}.
-5. If MARKET_REGIME is bearish_chaos, be extremely conservative, restrict scores, and penalize volatile assets.
-6. If MARKET_REGIME is bullish_gas, you may be more permissive to high-momentum tokens, but still respect the deterministic filters.
-7. Be highly objective. Most memecoins are scams. Output only valid JSON; no markdown wrappers.`;
+2. Matrix Velocity Rules: Carefully evaluate short-term momentum changes (5m and 15m price changes). If 5m price pump is excessively vertical compared to 15m/1h, penalize positionSizeMultiplier to protect capital from malicious bot pumps.
+3. Creator Profile Rules: Heavily penalize or enforce an absolute "skip" if the creator has a high historical "rugged tokens" count or if the "creator risk score" is critical.
+4. If MARKET_REGIME is bearish_chaos, be extremely conservative, restrict scores, and penalize volatile assets by reducing positionSizeMultiplier (0.1 to 0.5).
+5. If MARKET_REGIME is bullish_gas, you may be more permissive to high-momentum tokens, but still respect risk baselines.
+6. Be highly objective. Output only valid JSON; no markdown wrappers.`;
 
             const ageDisplay = this.formatAgeDisplay(metrics.ageHours);
             const safeRugcheckScore = this.getSafeRugcheckScore(metrics.rugcheckScore);
@@ -312,10 +294,17 @@ Token Metrics:
 - 5m Volume: $${metrics.volume5mUsd.toLocaleString()}
 - 5m Buys: ${metrics.buys5mCount}
 - 5m Sells: ${metrics.sells5mCount}
-- 1h Price Change: ${metrics.priceChange1hPct.toFixed(2)}%
+- 1m/5m/15m/1h Velocity Structure:
+  * 5m Price Change: ${metrics.priceChange5mPct !== undefined ? `${metrics.priceChange5mPct.toFixed(2)}%` : 'Unknown'}
+  * 15m Price Change: ${metrics.priceChange15mPct !== undefined ? `${metrics.priceChange15mPct.toFixed(2)}%` : 'Unknown'}
+  * 1h Price Change: ${metrics.priceChange1hPct.toFixed(2)}%
 - Is Pump.fun Migration: ${metrics.isPumpFun ? 'Yes' : 'No'}
 - RugCheck Score: ${safeRugcheckScore}
 - Danger Risks Count: ${metrics.dangerRisksCount ?? 0}
+- Creator Database Profile:
+  * Tokens Created by Dev: ${metrics.creatorTokensCreated ?? 0}
+  * Known Rugged Tokens by Dev: ${metrics.creatorRuggedTokens ?? 0}
+  * Developer Structural Risk Score: ${metrics.creatorRiskScore !== undefined ? `${metrics.creatorRiskScore}/100` : 'Unknown'}
 - Creator Holding: ${metrics.creatorHoldPct !== undefined ? `${metrics.creatorHoldPct.toFixed(2)}%` : 'Unknown'}
 - Top 10 Holder Concentration: ${metrics.top10HolderPct !== undefined ? `${metrics.top10HolderPct.toFixed(2)}%` : 'Unknown'}
 - Safety Index: ${metrics.safetyIndex !== undefined ? metrics.safetyIndex.toFixed(4) : 'Unknown'}
@@ -344,7 +333,7 @@ Evaluate against the live thresholds above and return the JSON decision.`;
                         Authorization: `Bearer ${apiKey}`,
                         'Content-Type': 'application/json',
                     },
-                    timeout: 10000, // 10s timeout
+                    timeout: 10000,
                 },
             );
 
@@ -356,15 +345,24 @@ Evaluate against the live thresholds above and return the JSON decision.`;
             const parsed = JSON.parse(content) as Partial<AIAnalysisResult>;
             const result = this.normalizeAnalysisResult(parsed, thresholds);
 
-            // Save to cache
             this.cache.set(tokenMint, {
                 result,
                 expiresAt: Date.now() + this.cacheTTLMs,
             });
 
+            const mappedPositionSize = thresholds.positionSizeUsd * result.positionSizeMultiplier;
             this.logger.log(
-                `🧠 AI Decision for $${symbol}: Score=${result.cuanConvictionScore}, Action=${result.action.toUpperCase()}, Pred=${result.predictedPumpPercentage}%`,
+                [
+                    `[AI TRACE DECISION] Token: $${symbol} | Mint: ${tokenMint.slice(0, 6)}...${tokenMint.slice(-4)} (PUMP.FUN: ${metrics.isPumpFun ? 'YES' : 'NO'})`,
+                    `├── Macro Regime Context : ${thresholds.marketRegime.toUpperCase()}`,
+                    `├── Matrix Price Velocity : 5m(${(metrics.priceChange5mPct ?? 0).toFixed(2)}%) | 15m(${(metrics.priceChange15mPct ?? 0).toFixed(2)}%) | 1h(${metrics.priceChange1hPct.toFixed(2)}%)`,
+                    `├── Creator Wallet Audit : Created: ${metrics.creatorTokensCreated ?? 0} | Rugs: ${metrics.creatorRuggedTokens ?? 0} | Risk: ${metrics.creatorRiskScore ?? 0}/100`,
+                    `├── Conviction Engine Check: Verdict Score: ${result.cuanConvictionScore}/100 -> ACTION: ${result.action.toUpperCase()}`,
+                    `└── Strategic Dynamic Sizing: Sizing Multiplier: ${result.positionSizeMultiplier}x (Allocated: $${mappedPositionSize.toFixed(2)}) | Custom Trailing: ${result.customTrailingBaseDistance ?? thresholds.trailingDistancePercent}%`,
+                    `[Reasoning]: ${result.reasoning}`,
+                ].join('\n'),
             );
+
             return result;
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
