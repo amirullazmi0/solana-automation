@@ -15,6 +15,11 @@ export interface AIAnalysisMetrics {
     volumeSurge?: number;
     volScore?: number;
     zScore?: number;
+    priceChange5mPct?: number;
+    priceChange15mPct?: number;
+    creatorTokensCreated?: number;
+    creatorRuggedTokens?: number;
+    creatorRiskScore?: number;
 }
 
 export interface AIAnalysisResult {
@@ -23,6 +28,8 @@ export interface AIAnalysisResult {
     confidenceLevel: 'high' | 'medium' | 'low';
     reasoning: string;
     action: 'buy' | 'skip';
+    positionSizeMultiplier: number;
+    customTrailingBaseDistance?: number;
 }
 
 export interface AIThresholdSnapshot {
@@ -57,6 +64,7 @@ export interface AIThresholdSnapshot {
     maxPriceImpactPercent: number;
     cooldownWinHours: number;
     cooldownLossHours: number;
+    marketRegime: string;
 }
 
 export interface OpenAIChatChoiceMessage {

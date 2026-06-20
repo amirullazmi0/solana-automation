@@ -35,6 +35,11 @@ export class AIService {
         return this.getNumberConfig('TRAILING_DISTANCE_PERCENT', 5);
     }
 
+    private getMarketRegimeConfig(): string {
+        const value = this.configService.get<string>('MARKET_REGIME', 'balanced');
+        return value && value.trim().length > 0 ? value.trim() : 'balanced';
+    }
+
     private calculateRatio(numerator: number, denominator: number): number {
         try {
             if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
@@ -80,6 +85,24 @@ export class AIService {
         }
 
         return score ?? 0;
+    }
+
+    private sanitizePositionSizeMultiplier(value?: number): number {
+        const numericValue = Number(value);
+        if (!Number.isFinite(numericValue)) {
+            return 1;
+        }
+
+        return Math.min(Math.max(numericValue, 0.1), 1);
+    }
+
+    private sanitizeTrailingBaseDistance(value?: number): number {
+        const numericValue = Number(value);
+        if (!Number.isFinite(numericValue) || numericValue <= 0) {
+            return this.getTrailingDistanceConfig();
+        }
+
+        return numericValue;
     }
 
     public getRecommendedTrailingDistance(volScore: number, priceChange1h: number): number {
@@ -133,6 +156,12 @@ export class AIService {
                     ? parsed.reasoning.trim().slice(0, 500)
                     : 'No reasoning provided.',
             action,
+            positionSizeMultiplier: this.sanitizePositionSizeMultiplier(
+                parsed.positionSizeMultiplier,
+            ),
+            customTrailingBaseDistance: this.sanitizeTrailingBaseDistance(
+                parsed.customTrailingBaseDistance,
+            ),
         };
 
         if (result.cuanConvictionScore < thresholds.aiConvictionThreshold) {
@@ -178,6 +207,7 @@ export class AIService {
             maxPriceImpactPercent: this.getNumberConfig('MAX_PRICE_IMPACT_PCT', 15),
             cooldownWinHours: this.getNumberConfig('COOLDOWN_WIN_HOURS', 6),
             cooldownLossHours: this.getNumberConfig('COOLDOWN_LOSS_HOURS', 24),
+            marketRegime: this.getMarketRegimeConfig(),
         };
     }
 
@@ -202,6 +232,8 @@ export class AIService {
                 confidenceLevel: 'low',
                 reasoning: 'API Key OpenAI belum dikonfigurasi.',
                 action: 'skip',
+                positionSizeMultiplier: 1,
+                customTrailingBaseDistance: this.getTrailingDistanceConfig(),
             };
         }
 
@@ -214,7 +246,7 @@ export class AIService {
         );
 
         try {
-            const systemPrompt = `You are MaSoul Sniper's AI Conviction Engine, an expert Solana on-chain analyst and quantitative memecoin trader.
+        const systemPrompt = `You are MaSoul Sniper's AI Conviction Engine, an expert Solana on-chain analyst and quantitative memecoin trader.
 You are NOT the primary filter. The deterministic NestJS filters already ran before this call. Your job is the final sanity-check and conviction score using the live .env thresholds below.
 
 Return a JSON object with exactly these fields:
@@ -223,11 +255,14 @@ Return a JSON object with exactly these fields:
   "predictedPumpPercentage": <estimated percentage pump potential, e.g. 20, 50, 150>,
   "confidenceLevel": "high" | "medium" | "low",
   "reasoning": "<brief indonesian explanation of why it is cuan or skip, max 2 sentences>",
-  "action": "buy" | "skip"
+  "action": "buy" | "skip",
+  "positionSizeMultiplier": <number between 0.1 and 1.0>,
+  "customTrailingBaseDistance": <number, optional recommended base trailing distance percent>
 }
 Live .env thresholds and mode:
 - BOT_MODE=${thresholds.botMode}
 - DRY_RUN=${thresholds.dryRun}
+- MARKET_REGIME=${thresholds.marketRegime}
 - AI_CONVICTION_THRESHOLD=${thresholds.aiConvictionThreshold}
 - MIN_LIQUIDITY_USD=${thresholds.minLiquidityUsd}
 - MIN_VOLUME_USD=${thresholds.minVolumeUsd}
@@ -264,7 +299,9 @@ Decision rules:
 3. If RugCheck score is above ${thresholds.maxRugcheckScore}, danger risks count is above 0, or creator holding is above 5%, conviction must be very low.
 4. For DRY_RUN=true, still judge as if this were a real trade. Do not become more permissive because it is simulation mode.
 5. Prefer "buy" only when volume, buyer dominance, liquidity, market cap, age, and risk profile are all coherent with BOT_MODE=${thresholds.botMode}.
-6. Be highly objective. Most memecoins are scams. Output only valid JSON; no markdown wrappers.`;
+6. If MARKET_REGIME is bearish_chaos, be extremely conservative, restrict scores, and penalize volatile assets.
+7. If MARKET_REGIME is bullish_gas, you may be more permissive to high-momentum tokens, but still respect the deterministic filters.
+8. Be highly objective. Most memecoins are scams. Output only valid JSON; no markdown wrappers.`;
 
             const ageDisplay = this.formatAgeDisplay(metrics.ageHours);
             const safeRugcheckScore = this.getSafeRugcheckScore(metrics.rugcheckScore);
@@ -341,6 +378,8 @@ Evaluate against the live thresholds above and return the JSON decision.`;
                 confidenceLevel: 'low',
                 reasoning: `AI analysis failed: ${msg}`,
                 action: 'skip',
+                positionSizeMultiplier: 1,
+                customTrailingBaseDistance: this.getTrailingDistanceConfig(),
             };
         }
     }

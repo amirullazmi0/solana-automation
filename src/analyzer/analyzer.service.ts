@@ -135,13 +135,25 @@ export class AnalyzerService {
                 };
             }
 
-            // 🧑‍💻 CREATOR PROFILE CHECK (Anti-Rug)
-            if (rugResult.creator) {
-                const profile = await this.creatorProfileService.evaluateCreator(rugResult.creator);
+            const openAiKey = this.configService.get<string>('OPENAI_API_KEY') || '';
+            const shouldUseAi =
+                openAiKey.length > 0 &&
+                !openAiKey.includes('your-openai-api-key') &&
+                !openAiKey.includes('your_');
+            const aiThreshold = Number.parseFloat(
+                this.configService.get<string>('AI_CONVICTION_THRESHOLD', '75.0'),
+            );
 
-                if (profile.isBlacklisted || profile.riskScore >= 80) {
+            // 🧑‍💻 CREATOR PROFILE CHECK (Anti-Rug)
+            let creatorProfile:
+                | Awaited<ReturnType<CreatorProfileService['evaluateCreator']>>
+                | null = null;
+            if (rugResult.creator) {
+                creatorProfile = await this.creatorProfileService.evaluateCreator(rugResult.creator);
+
+                if (creatorProfile.isBlacklisted || creatorProfile.riskScore >= 80) {
                     this.logger.warn(
-                        `[${tokenMint}] 🛑 Creator ${rugResult.creator} is blacklisted or high risk (Score: ${profile.riskScore}). Skip.`,
+                        `[${tokenMint}] 🛑 Creator ${rugResult.creator} is blacklisted or high risk (Score: ${creatorProfile.riskScore}). Skip.`,
                     );
                     return {
                         safe: false,
@@ -152,15 +164,7 @@ export class AnalyzerService {
                 }
             }
 
-            const openAiKey = this.configService.get<string>('OPENAI_API_KEY') || '';
-            const shouldUseAi =
-                openAiKey.length > 0 &&
-                !openAiKey.includes('your-openai-api-key') &&
-                !openAiKey.includes('your_');
             if (shouldUseAi) {
-                const aiThreshold = Number.parseFloat(
-                    this.configService.get<string>('AI_CONVICTION_THRESHOLD', '75.0'),
-                );
                 const aiResult = await this.aiService.analyzeToken(
                     tokenMint,
                     traction.symbol || 'UNKNOWN',
@@ -183,6 +187,11 @@ export class AnalyzerService {
                         volumeSurge: traction.volumeSurge,
                         volScore: traction.volScore,
                         zScore: traction.zScore,
+                        priceChange5mPct: traction.priceChange5m || 0,
+                        priceChange15mPct: traction.priceChange15m || 0,
+                        creatorTokensCreated: creatorProfile?.tokensCreated,
+                        creatorRuggedTokens: creatorProfile?.ruggedTokens,
+                        creatorRiskScore: creatorProfile?.riskScore,
                     },
                 );
 
@@ -312,6 +321,8 @@ export class AnalyzerService {
         volScore?: number;
         zScore?: number;
         priceChange1h?: number;
+        priceChange5m?: number;
+        priceChange15m?: number;
         isPumpFun?: boolean;
         volume5m?: number;
         buys5m?: number;
@@ -440,6 +451,8 @@ export class AnalyzerService {
                     socials,
                     volScore,
                     zScore,
+                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange15m: pair.priceChange?.m15 || 0,
                     priceChange1h: pair.priceChange?.h1 || 0,
                     isPumpFun:
                         pair.info?.websites?.some((w) => w.url.includes('pump.fun')) || false,
@@ -463,6 +476,8 @@ export class AnalyzerService {
                     liquidity,
                     volScore,
                     zScore,
+                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange15m: pair.priceChange?.m15 || 0,
                     priceChange1h,
                     isPumpFun,
                 };
@@ -491,6 +506,8 @@ export class AnalyzerService {
                     liquidity,
                     volScore,
                     zScore,
+                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange15m: pair.priceChange?.m15 || 0,
                     priceChange1h,
                     isPumpFun,
                 };
@@ -512,6 +529,8 @@ export class AnalyzerService {
                     liquidity,
                     volScore,
                     zScore,
+                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange15m: pair.priceChange?.m15 || 0,
                     priceChange1h,
                     isPumpFun,
                 };
@@ -528,6 +547,8 @@ export class AnalyzerService {
                     liquidity,
                     volScore,
                     zScore,
+                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange15m: pair.priceChange?.m15 || 0,
                     priceChange1h,
                     isPumpFun,
                 };
@@ -564,6 +585,8 @@ export class AnalyzerService {
                     liquidity,
                     volScore,
                     zScore,
+                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange15m: pair.priceChange?.m15 || 0,
                     priceChange1h,
                     isPumpFun,
                 };
@@ -580,6 +603,8 @@ export class AnalyzerService {
                     liquidity,
                     volScore,
                     zScore,
+                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange15m: pair.priceChange?.m15 || 0,
                     priceChange1h,
                     isPumpFun,
                 };
@@ -596,6 +621,8 @@ export class AnalyzerService {
                 volumeSurge,
                 volScore,
                 zScore,
+                priceChange5m: pair.priceChange?.m5 || 0,
+                priceChange15m: pair.priceChange?.m15 || 0,
                 priceChange1h,
                 isPumpFun,
                 volume5m,

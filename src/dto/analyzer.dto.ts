@@ -12,7 +12,7 @@ export interface DexScreenerPair {
     liquidity?: { usd?: number };
     fdv?: number;
     pairCreatedAt?: number;
-    priceChange?: { m5?: number; h1?: number; h6?: number; h24?: number };
+    priceChange?: { m5?: number; m15?: number; h1?: number; h6?: number; h24?: number };
     volume?: { m5?: number; h1?: number; h24?: number };
     txns?: {
         m5?: { buys?: number; sells?: number };
