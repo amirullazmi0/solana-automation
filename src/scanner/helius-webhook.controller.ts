@@ -37,11 +37,23 @@ export class HeliusWebhookController {
                 }
             }
 
+            this.logger.log(
+                `[HeliusWebhook] Accepted webhook payload: tx=${safeTransactions.length}, mints=${mintAddresses.size}`,
+            );
+
             for (const mintAddress of mintAddresses) {
                 void this.scannerService.processNewToken(mintAddress).catch((error) => {
                     const message = error instanceof Error ? error.message : String(error);
                     this.logger.error(`[HeliusWebhook] Failed to queue ${mintAddress}: ${message}`);
                 });
+            }
+
+            if (mintAddresses.size > 0) {
+                this.logger.log(
+                    `[HeliusWebhook] Queued webhook mint(s): ${Array.from(mintAddresses).join(', ')}`,
+                );
+            } else {
+                this.logger.log('[HeliusWebhook] Webhook accepted but no mint candidates were found.');
             }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
