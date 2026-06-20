@@ -16,6 +16,7 @@ export class PriceMonitorService {
     private trailingDistancePercent: number;
     private jupiterApiKey: string;
     private stopLossPercent: number;
+    private readonly newTokenPatienceThresholdMinutes: number;
     private readonly lastAlertTime = new Map<string, number>(); // Cooldown alert: tokenMint -> timestamp
     private ipCache: Record<string, string> = {};
     private readonly fallbackApiIps: Record<string, string> = {
@@ -34,6 +35,9 @@ export class PriceMonitorService {
         );
         this.stopLossPercent = parseFloat(
             this.configService.get<string>('STOP_LOSS_PERCENT', '25.0'),
+        );
+        this.newTokenPatienceThresholdMinutes = parseFloat(
+            this.configService.get<string>('SL_PATIENCE_NEW_TOKEN_MINUTES', '30'),
         );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
@@ -350,20 +354,33 @@ export class PriceMonitorService {
         if (profitPercent <= -effectiveStopLossPercent) {
             const disablePatience =
                 this.configService.get<string>('DISABLE_SL_PATIENCE', 'false') === 'true';
+            const patienceThresholdMinutes = Number.isFinite(
+                this.newTokenPatienceThresholdMinutes,
+            )
+                ? this.newTokenPatienceThresholdMinutes
+                : 30;
+            const tradeAgeInMinutes =
+                (Date.now() - new Date(trade.createdAt).getTime()) / (1000 * 60);
+            const isNewToken = tradeAgeInMinutes < patienceThresholdMinutes;
 
-            // Bypass patience protocol if disabled globally.
-            if (disablePatience) {
-                this.logger.error(
-                    `[Slot ${trade.slotNumber}] 💀 STOP LOSS TRIGGERED (${profitPercent.toFixed(2)}%). Bypassing patience protocol and executing IMMEDIATE STOP LOSS.`,
-                );
+            // Bypass patience protocol if disabled globally or token is still fresh.
+            if (disablePatience || isNewToken) {
+                if (disablePatience) {
+                    this.logger.error(
+                        `[Slot ${trade.slotNumber}] 💀 STOP LOSS TRIGGERED (${profitPercent.toFixed(2)}%). DISABLE_SL_PATIENCE=true, executing IMMEDIATE STOP LOSS.`,
+                    );
+                } else {
+                    this.logger.warn(
+                        `[Slot ${trade.slotNumber}] ⚠️ New token bypass activated for stop loss. Age=${tradeAgeInMinutes.toFixed(1)}m < ${patienceThresholdMinutes.toFixed(0)}m. Executing IMMEDIATE STOP LOSS.`,
+                    );
+                }
                 await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
                 return;
             }
 
-
             if (!trade.slTriggeredAt) {
                 this.logger.warn(
-                    `[Slot ${trade.slotNumber}] 🛑 Stop Loss zone. Starting 5-minute patience timer (Hard Cap 10-min)...`,
+                    `[Slot ${trade.slotNumber}] 🛑 Stop Loss zone. Starting 5-minute patience timer (Hard Cap 10-min). Trade age=${tradeAgeInMinutes.toFixed(1)}m.`,
                 );
                 await this.prismaService.trade.update({
                     where: { id: trade.id },

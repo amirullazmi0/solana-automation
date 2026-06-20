@@ -52,6 +52,7 @@ model TelegramChat {
   createdAt   DateTime             @default(now())
   updatedAt   DateTime             @updatedAt
   walletVault TelegramWalletVault?
+  deposits    TelegramDepositLedger[]
   settings    TelegramChatSetting?
   trades      Trade[]
   withdrawals TelegramWithdrawal[]
@@ -64,6 +65,7 @@ model TelegramWalletVault {
   id                  Int           @id @default(autoincrement())
   telegramChatId      Int           @unique
   publicKey           String        @unique
+  balanceSol          Float         @default(0)
   encryptedSecretKey  String
   initializationVector String
   authTag             String
@@ -71,6 +73,22 @@ model TelegramWalletVault {
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
   chat                TelegramChat  @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+}
+
+model TelegramDepositLedger {
+  id               Int          @id @default(autoincrement())
+  telegramChatId   Int
+  walletPublicKey  String
+  signature        String
+  amountSol        Float
+  slotNumber       Int?
+  txTimestamp      DateTime?
+  createdAt        DateTime     @default(now())
+  chat             TelegramChat @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+
+  @@unique([signature, walletPublicKey])
+  @@index([telegramChatId, createdAt])
+  @@index([walletPublicKey])
 }
 
 model TelegramChatSetting {

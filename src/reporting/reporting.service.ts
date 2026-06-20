@@ -1159,6 +1159,26 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(message, {}, 0, targetChatId);
     }
 
+    async sendDepositNotification(params: {
+        targetChatId: string;
+        walletAddress: string;
+        amountSol: number;
+        newBalanceSol: number;
+        signature: string;
+    }): Promise<void> {
+        const message =
+            `✅ *DEPOSIT TERDETEKSI!*\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `🏦 *Wallet:* \`${params.walletAddress}\`\n` +
+            `💎 *Masuk:* \`${params.amountSol.toFixed(4)} SOL\`\n` +
+            `💼 *Saldo Baru:* \`${params.newBalanceSol.toFixed(4)} SOL\`\n` +
+            `🔗 *Tx:* \`${params.signature}\`\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `Status: \`Deposit berhasil ditambahkan ke saldo bot.\``;
+
+        await this.sendMessage(message, {}, 0, params.targetChatId);
+    }
+
     async sendWatchlistNotification(
         tokenMint: string,
         mcap: number,
