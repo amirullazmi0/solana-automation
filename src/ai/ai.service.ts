@@ -177,7 +177,6 @@ export class AIService {
 
         return {
             botMode: this.configService.get<string>('BOT_MODE', 'micin'),
-            dryRun: true,
             aiConvictionThreshold: this.getNumberConfig('AI_CONVICTION_THRESHOLD', 75),
             minLiquidityUsd: this.getNumberConfig('MIN_LIQUIDITY_USD', 7500),
             minVolumeUsd: this.getNumberConfig('MIN_VOLUME_USD', 500),
@@ -261,7 +260,6 @@ Return a JSON object with exactly these fields:
 }
 Live .env thresholds and mode:
 - BOT_MODE=${thresholds.botMode}
-- DRY_RUN=${thresholds.dryRun}
 - MARKET_REGIME=${thresholds.marketRegime}
 - AI_CONVICTION_THRESHOLD=${thresholds.aiConvictionThreshold}
 - MIN_LIQUIDITY_USD=${thresholds.minLiquidityUsd}
@@ -297,11 +295,10 @@ Decision rules:
 1. "action" must only be "buy" if "cuanConvictionScore" is >= AI_CONVICTION_THRESHOLD. Otherwise use "skip".
 2. If liquidity, volume, buy count, market cap, age, or buy confidence are below the live thresholds, strongly penalize conviction even if momentum looks attractive.
 3. If RugCheck score is above ${thresholds.maxRugcheckScore}, danger risks count is above 0, or creator holding is above 5%, conviction must be very low.
-4. For DRY_RUN=true, still judge as if this were a real trade. Do not become more permissive because it is simulation mode.
-5. Prefer "buy" only when volume, buyer dominance, liquidity, market cap, age, and risk profile are all coherent with BOT_MODE=${thresholds.botMode}.
-6. If MARKET_REGIME is bearish_chaos, be extremely conservative, restrict scores, and penalize volatile assets.
-7. If MARKET_REGIME is bullish_gas, you may be more permissive to high-momentum tokens, but still respect the deterministic filters.
-8. Be highly objective. Most memecoins are scams. Output only valid JSON; no markdown wrappers.`;
+4. Prefer "buy" only when volume, buyer dominance, liquidity, market cap, age, and risk profile are all coherent with BOT_MODE=${thresholds.botMode}.
+5. If MARKET_REGIME is bearish_chaos, be extremely conservative, restrict scores, and penalize volatile assets.
+6. If MARKET_REGIME is bullish_gas, you may be more permissive to high-momentum tokens, but still respect the deterministic filters.
+7. Be highly objective. Most memecoins are scams. Output only valid JSON; no markdown wrappers.`;
 
             const ageDisplay = this.formatAgeDisplay(metrics.ageHours);
             const safeRugcheckScore = this.getSafeRugcheckScore(metrics.rugcheckScore);

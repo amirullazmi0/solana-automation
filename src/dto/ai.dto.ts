@@ -34,7 +34,6 @@ export interface AIAnalysisResult {
 
 export interface AIThresholdSnapshot {
     botMode: string;
-    dryRun: boolean;
     aiConvictionThreshold: number;
     minLiquidityUsd: number;
     minVolumeUsd: number;
