@@ -38,9 +38,21 @@ export class EstablishedAnalyzerService {
         private readonly prismaService: PrismaService,
         private readonly creatorProfileService: CreatorProfileService,
     ) {
-        const rpcEndpoint =
-            this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
-        this.connection = new Connection(rpcEndpoint, 'confirmed');
+        this.connection = new Connection(this.getSolanaRpcUrl(), 'confirmed');
+    }
+
+    private getSolanaRpcUrl(): string {
+        const heliusRpcUrl = this.configService.get<string>('SOLANA_RPC_URL');
+        if (heliusRpcUrl && heliusRpcUrl.trim()) {
+            return heliusRpcUrl.trim();
+        }
+
+        const fallbackRpcUrl = this.configService.get<string>('RPC_ENDPOINT');
+        if (fallbackRpcUrl && fallbackRpcUrl.trim()) {
+            return fallbackRpcUrl.trim();
+        }
+
+        return 'https://api.mainnet-beta.solana.com';
     }
 
     private get tradeService(): TradeService {

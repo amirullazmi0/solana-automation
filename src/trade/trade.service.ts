@@ -170,9 +170,7 @@ export class TradeService implements OnModuleInit {
         private readonly moduleRef: ModuleRef,
         private readonly telegramWorkspace: TelegramWorkspaceService,
     ) {
-        const rpcEndpoint =
-            this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
-        this.connection = new Connection(rpcEndpoint, 'confirmed');
+        this.connection = new Connection(this.getSolanaRpcUrl(), 'confirmed');
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
 
         // CONFIG BUDGET (Updated by Amirull)
@@ -215,6 +213,20 @@ export class TradeService implements OnModuleInit {
                 }
             },
         });
+    }
+
+    private getSolanaRpcUrl(): string {
+        const heliusRpcUrl = this.configService.get<string>('SOLANA_RPC_URL');
+        if (heliusRpcUrl && heliusRpcUrl.trim()) {
+            return heliusRpcUrl.trim();
+        }
+
+        const fallbackRpcUrl = this.configService.get<string>('RPC_ENDPOINT');
+        if (fallbackRpcUrl && fallbackRpcUrl.trim()) {
+            return fallbackRpcUrl.trim();
+        }
+
+        return 'https://api.mainnet-beta.solana.com';
     }
 
     private get reportingService(): ReportingService {

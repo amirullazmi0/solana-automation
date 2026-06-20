@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Connection } from '@solana/web3.js';
+import { Connection, PublicKey } from '@solana/web3.js';
 import axios from 'axios';
 import * as WebSocket from 'ws';
 import * as https from 'https';
@@ -12,6 +12,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ModuleRef } from '@nestjs/core';
 import { DexLimiter } from '../common/dex-limiter';
 import { Prisma } from '@prisma/client';
+import {
+    HeliusWebhookPayload,
+    HeliusWebhookProcessingResult,
+    HeliusWebhookTransaction,
+} from './helius-webhook.dto';
 
 @Injectable()
 export class ScannerService implements OnModuleInit, OnModuleDestroy {
@@ -84,7 +89,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
     onModuleInit() {
         const wssEndpoint = this.configService.get<string>('WSS_ENDPOINT');
-        const rpcEndpoint = this.configService.get<string>('RPC_ENDPOINT');
+        const rpcEndpoint = this.getSolanaRpcUrl();
         const botMode = this.configService.get<string>('BOT_MODE', 'micin');
 
         if (!wssEndpoint || !rpcEndpoint) {
@@ -171,6 +176,20 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             this.pumpPortalWs.close();
         }
         this.logger.log('Scanner stopped');
+    }
+
+    private getSolanaRpcUrl(): string {
+        const heliusRpcUrl = this.configService.get<string>('SOLANA_RPC_URL');
+        if (heliusRpcUrl && heliusRpcUrl.trim()) {
+            return heliusRpcUrl.trim();
+        }
+
+        const fallbackRpcUrl = this.configService.get<string>('RPC_ENDPOINT');
+        if (fallbackRpcUrl && fallbackRpcUrl.trim()) {
+            return fallbackRpcUrl.trim();
+        }
+
+        return 'https://api.mainnet-beta.solana.com';
     }
 
     private startDiscoveryPolling() {
@@ -320,6 +339,97 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         };
     }
 
+    public async handleHeliusWebhook(
+        payload: HeliusWebhookPayload,
+    ): Promise<HeliusWebhookProcessingResult> {
+        try {
+            const mints = this.extractHeliusWebhookMints(payload);
+            if (mints.length === 0) {
+                this.logger.debug('Helius webhook received without mint candidates.');
+                return {
+                    accepted: true,
+                    processed: 0,
+                    mints: [],
+                    note: 'No mint candidate found in payload',
+                };
+            }
+
+            for (const mint of mints) {
+                void this.processNewToken(mint).catch((error) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    this.logger.error(`[HeliusWebhook] Failed to enqueue ${mint}: ${message}`);
+                });
+            }
+
+            this.logger.log(`[HeliusWebhook] Queued ${mints.length} mint(s): ${mints.join(', ')}`);
+            return {
+                accepted: true,
+                processed: mints.length,
+                mints,
+            };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Helius webhook handling failed: ${message}`);
+            return {
+                accepted: false,
+                processed: 0,
+                mints: [],
+                note: message,
+            };
+        }
+    }
+
+    private extractHeliusWebhookMints(payload: HeliusWebhookPayload): string[] {
+        const entries = Array.isArray(payload) ? payload : [payload];
+        const candidates = new Set<string>();
+
+        for (const entry of entries) {
+            this.collectWebhookMintCandidates(entry, candidates);
+        }
+
+        return Array.from(candidates);
+    }
+
+    private collectWebhookMintCandidates(
+        entry: HeliusWebhookTransaction,
+        candidates: Set<string>,
+    ): void {
+        for (const transfer of entry.tokenTransfers || []) {
+            this.addMintCandidate(candidates, transfer.mint);
+        }
+
+        for (const transfer of entry.events?.tokenTransfers || []) {
+            this.addMintCandidate(candidates, transfer.mint);
+        }
+
+        for (const accountData of entry.accountData || []) {
+            if (accountData.mint) {
+                this.addMintCandidate(candidates, accountData.mint);
+            }
+        }
+
+        for (const accountData of entry.events?.accountData || []) {
+            if (accountData.mint) {
+                this.addMintCandidate(candidates, accountData.mint);
+            }
+        }
+    }
+
+    private addMintCandidate(candidates: Set<string>, mint: string): void {
+        if (mint && this.isValidSolanaAddress(mint)) {
+            candidates.add(mint);
+        }
+    }
+
+    private isValidSolanaAddress(address: string): boolean {
+        try {
+            new PublicKey(address);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     private async updateWatchlistByMint(
         tokenMint: string,
         data: Prisma.WatchlistUpdateManyMutationInput,
@@ -357,7 +467,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         return { isWin, cooldownHours, expiredAt };
     }
 
-    private async processNewToken(tokenMint: string) {
+    public async processNewToken(tokenMint: string) {
         if (this.processingTokens.has(tokenMint)) return;
 
         let incremented = false;

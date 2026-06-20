@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Keypair } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey } from '@solana/web3.js';
+import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramChat, TelegramChatSetting, TelegramWalletVault } from '@prisma/client';
@@ -19,15 +20,50 @@ export interface WalletResolutionResult {
     created: boolean;
 }
 
+interface SolanaTokenAmountInfo {
+    amount: string;
+    decimals: number;
+    uiAmount: number | null;
+    uiAmountString: string;
+}
+
+interface SolanaParsedTokenAccountInfo {
+    mint: string;
+    owner: string;
+    tokenAmount: SolanaTokenAmountInfo;
+}
+
+interface SolanaParsedTokenAccountData {
+    program: string;
+    parsed: {
+        info: SolanaParsedTokenAccountInfo;
+        type: string;
+    };
+    space: number;
+}
+
+export interface ParsedTokenAccount {
+    address: string;
+    mint: string;
+    owner: string;
+    amount: string;
+    decimals: number;
+    uiAmount: number;
+    uiAmountString: string;
+}
+
 @Injectable()
 export class TelegramWorkspaceService {
     private readonly logger = new Logger(TelegramWorkspaceService.name);
+    private readonly connection: Connection;
     private readonly walletCache = new Map<string, Keypair>();
 
     constructor(
         private readonly configService: ConfigService,
         private readonly prismaService: PrismaService,
-    ) {}
+    ) {
+        this.connection = new Connection(this.getSolanaRpcUrl(), 'confirmed');
+    }
 
     getAppMode(): 'development' | 'production' {
         const raw = (this.configService.get<string>('APP_MODE') || 'development').toLowerCase();
@@ -201,6 +237,66 @@ export class TelegramWorkspaceService {
         return (await this.getWalletKeypair(chatId)).publicKey.toBase58();
     }
 
+    async getSolBalance(publicKeyStr: string): Promise<number> {
+        try {
+            if (!publicKeyStr) {
+                throw new Error('Public key is required to fetch SOL balance.');
+            }
+
+            const publicKey = new PublicKey(publicKeyStr);
+            const lamports = await this.connection.getBalance(publicKey);
+            return lamports / 1_000_000_000;
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[SOL Balance] Failed to fetch ${publicKeyStr}: ${message}`);
+            return 0;
+        }
+    }
+
+    async getUserTokens(publicKeyStr: string): Promise<ParsedTokenAccount[]> {
+        try {
+            if (!publicKeyStr) {
+                throw new Error('Public key is required to fetch token accounts.');
+            }
+
+            const ownerPublicKey = new PublicKey(publicKeyStr);
+            const accounts = await this.connection.getParsedTokenAccountsByOwner(ownerPublicKey, {
+                programId: TOKEN_PROGRAM_ID,
+            });
+
+            const tokens: ParsedTokenAccount[] = [];
+
+            for (const entry of accounts.value) {
+                const accountData = entry.account.data;
+                if (!this.isParsedTokenAccountData(accountData)) {
+                    continue;
+                }
+
+                const info = accountData.parsed.info;
+                const uiAmount = info.tokenAmount.uiAmount ?? 0;
+                if (uiAmount <= 0) {
+                    continue;
+                }
+
+                tokens.push({
+                    address: entry.pubkey.toBase58(),
+                    mint: info.mint,
+                    owner: info.owner,
+                    amount: info.tokenAmount.amount,
+                    decimals: info.tokenAmount.decimals,
+                    uiAmount,
+                    uiAmountString: info.tokenAmount.uiAmountString,
+                });
+            }
+
+            return tokens;
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[Token Accounts] Failed to fetch ${publicKeyStr}: ${message}`);
+            return [];
+        }
+    }
+
     async getChatSettings(chatId: string): Promise<TelegramChatSetting> {
         const chat = await this.prismaService.telegramChat.findUnique({
             where: { chatId },
@@ -307,6 +403,26 @@ export class TelegramWorkspaceService {
 
     private getDefaultDryRun(): boolean {
         return true;
+    }
+
+    private getSolanaRpcUrl(): string {
+        const heliusRpcUrl = this.configService.get<string>('SOLANA_RPC_URL');
+        if (heliusRpcUrl && heliusRpcUrl.trim()) {
+            return heliusRpcUrl.trim();
+        }
+
+        const fallbackRpcUrl = this.configService.get<string>('RPC_ENDPOINT');
+        if (fallbackRpcUrl && fallbackRpcUrl.trim()) {
+            return fallbackRpcUrl.trim();
+        }
+
+        return 'https://api.mainnet-beta.solana.com';
+    }
+
+    private isParsedTokenAccountData(
+        data: Buffer | SolanaParsedTokenAccountData,
+    ): data is SolanaParsedTokenAccountData {
+        return !Buffer.isBuffer(data) && typeof data === 'object' && data !== null && 'parsed' in data;
     }
 
     private encryptSecretKey(secretKey: Uint8Array): {

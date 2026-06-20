@@ -34,10 +34,22 @@ export class AnalyzerService {
         private readonly creatorProfileService: CreatorProfileService,
         private readonly aiService: AIService,
     ) {
-        const rpcEndpoint =
-            this.configService.get<string>('RPC_ENDPOINT') || 'https://api.mainnet-beta.solana.com';
-        this.connection = new Connection(rpcEndpoint, 'confirmed');
+        this.connection = new Connection(this.getSolanaRpcUrl(), 'confirmed');
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
+    }
+
+    private getSolanaRpcUrl(): string {
+        const heliusRpcUrl = this.configService.get<string>('SOLANA_RPC_URL');
+        if (heliusRpcUrl && heliusRpcUrl.trim()) {
+            return heliusRpcUrl.trim();
+        }
+
+        const fallbackRpcUrl = this.configService.get<string>('RPC_ENDPOINT');
+        if (fallbackRpcUrl && fallbackRpcUrl.trim()) {
+            return fallbackRpcUrl.trim();
+        }
+
+        return 'https://api.mainnet-beta.solana.com';
     }
 
     /**
