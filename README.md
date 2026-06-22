@@ -500,4 +500,3 @@ yarn deploy:vps
 - readme ini sengaja mempertahankan rumus dan pipeline lama, lalu hanya menambahkan fitur baru yang memang sudah ada di codebase
 
 *Last updated: Juni 2026 - Helius webhook, dynamic risk adjuster, in-memory market freshness, stop loss patience bypass, live Telegram control plane.*
-

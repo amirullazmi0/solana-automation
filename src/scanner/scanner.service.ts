@@ -24,7 +24,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private connection: Connection;
     private subscriptionId: number;
     private pumpPortalWs: WebSocket | null = null;
-    private readonly PUMP_PORTAL_URL = 'wss://pumpportal.fun/api/data';
+    private readonly pumpPortalUrl = 'wss://pumpportal.fun/api/data';
+    private pumpPortalReconnectTimer: NodeJS.Timeout | null = null;
+    private pumpPortalReconnectAttempts = 0;
+    private destroyed = false;
     // Map<tokenMint, expiredAt> — koin dihapus otomatis setelah TTL biar bisa di-re-check nanti
     private readonly seenTokens = new Map<string, number>();
     // Batasi max token yang dipantau bersamaan biar nggak kelebihan memory
@@ -121,10 +124,19 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     }
 
     private initPumpPortalWS() {
+        if (this.destroyed) return;
+
         try {
-            this.pumpPortalWs = new WebSocket(this.PUMP_PORTAL_URL);
+            if (this.pumpPortalReconnectTimer) {
+                clearTimeout(this.pumpPortalReconnectTimer);
+                this.pumpPortalReconnectTimer = null;
+            }
+
+            this.pumpPortalWs?.removeAllListeners();
+            this.pumpPortalWs = new WebSocket(this.pumpPortalUrl);
 
             this.pumpPortalWs.on('open', () => {
+                this.pumpPortalReconnectAttempts = 0;
                 this.logger.log('🔌 Connected to PumpPortal WebSocket');
                 // Subscribe to migrations to Raydium
                 this.pumpPortalWs?.send(JSON.stringify({ method: 'subscribeRaydiumLiquidity' }));
@@ -144,8 +156,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             });
 
             this.pumpPortalWs.on('close', () => {
-                this.logger.warn('🔌 PumpPortal WS closed. Reconnecting in 5s...');
-                setTimeout(() => this.initPumpPortalWS(), 5000);
+                this.schedulePumpPortalReconnect('closed');
             });
 
             this.pumpPortalWs.on('error', (err) => {
@@ -155,6 +166,25 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`Failed to init PumpPortal WS: ${msg}`);
         }
+    }
+
+    private schedulePumpPortalReconnect(reason: string) {
+        if (this.destroyed) return;
+
+        this.pumpPortalReconnectAttempts += 1;
+        const delayMs = Math.min(60_000, 5_000 * 2 ** Math.min(this.pumpPortalReconnectAttempts - 1, 4));
+        this.logger.warn(
+            `🔌 PumpPortal WS ${reason}. Reconnecting in ${Math.round(delayMs / 1000)}s...`,
+        );
+
+        if (this.pumpPortalReconnectTimer) {
+            clearTimeout(this.pumpPortalReconnectTimer);
+        }
+
+        this.pumpPortalReconnectTimer = setTimeout(() => {
+            this.pumpPortalReconnectTimer = null;
+            this.initPumpPortalWS();
+        }, delayMs);
     }
 
     private handleWsDiscovery(mint: string) {
@@ -170,10 +200,16 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     }
 
     onModuleDestroy() {
+        this.destroyed = true;
+        if (this.pumpPortalReconnectTimer) {
+            clearTimeout(this.pumpPortalReconnectTimer);
+            this.pumpPortalReconnectTimer = null;
+        }
         if (this.subscriptionId && this.connection) {
             this.connection.removeProgramAccountChangeListener(this.subscriptionId);
         }
         if (this.pumpPortalWs) {
+            this.pumpPortalWs.removeAllListeners();
             this.pumpPortalWs.close();
         }
         this.logger.log('Scanner stopped');
