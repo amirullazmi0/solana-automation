@@ -497,10 +497,39 @@ export class TradeService implements OnModuleInit {
         const wallet = await this.getWallet(telegramChatId);
         const tradeChatDbId = chatRecord?.id;
         const targetChatId = chatRecord?.chatId;
+        const reportSymbol = metadata?.symbol || 'UNKNOWN';
 
         this.logger.log(
             `[BuyTrace] token=${tokenMint} chat=${telegramChatId} manual=${isManualBuy} dryRun=${effectiveDryRun} slots=${effectiveTotalSlots} positionUsd=${effectivePositionSizeUSD.toFixed(2)}`,
         );
+
+        const notifyBuyFailure = async (params: {
+            reason: string;
+            stage?: 'PRE_SWAP' | 'SWAP';
+            amountUsd?: number;
+            amountSol?: number;
+            details?: string;
+        }) => {
+            if (!targetChatId) return;
+            try {
+                await this.reportingService.sendTradeFailureAlert({
+                    side: 'BUY',
+                    tokenMint,
+                    symbol: reportSymbol,
+                    reason: params.reason,
+                    stage: params.stage,
+                    amountUsd: params.amountUsd,
+                    amountSol: params.amountSol,
+                    targetChatId,
+                    details: params.details,
+                });
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                this.logger.warn(
+                    `[BuyTrace] Failed to send buy failure alert token=${tokenMint} chat=${telegramChatId}: ${msg}`,
+                );
+            }
+        };
 
         if (effectiveDryRun) {
             const symbol = await this.fetchTokenSymbol(tokenMint);
@@ -525,6 +554,10 @@ export class TradeService implements OnModuleInit {
             // Jika manual buy (ada customAmount), abaikan cooldown
             if (recentTrade.status === 'OPEN') {
                 this.logger.warn(`[BuyTrace] Blocked by already-open trade token=${tokenMint} chat=${telegramChatId}`);
+                await notifyBuyFailure({
+                    reason: 'already_open_trade',
+                    details: `Already holding ${tokenMint}.`,
+                });
                 return { success: false, message: `Already holding ${tokenMint}` };
             }
             const winCooldownHours = Number.parseInt(
@@ -543,6 +576,10 @@ export class TradeService implements OnModuleInit {
             if (Date.now() < cooldownExpiredAt) {
                 const msg = `Token ${tokenMint} is in cooldown until ${new Date(cooldownExpiredAt).toISOString()} (Last outcome: ${isWin ? 'WIN' : 'LOSS'}, Cooldown: ${cooldownHours}h). Skip.`;
                 this.logger.warn(`[BuyTrace] Blocked by cooldown token=${tokenMint} chat=${telegramChatId}: ${msg}`);
+                await notifyBuyFailure({
+                    reason: 'cooldown',
+                    details: msg,
+                });
                 return { success: false, message: msg };
             }
         }
@@ -558,6 +595,10 @@ export class TradeService implements OnModuleInit {
             this.logger.warn(
                 `[BuyTrace] Blocked by slot limit token=${tokenMint} chat=${telegramChatId} openTrades=${openTradesCount} slots=${effectiveTotalSlots}`,
             );
+            await notifyBuyFailure({
+                reason: 'slot_limit',
+                details: `Open trades: ${openTradesCount}, Slots: ${effectiveTotalSlots}.`,
+            });
             return { success: false, message: 'All trading slots are full.' };
         }
 
@@ -583,11 +624,15 @@ export class TradeService implements OnModuleInit {
         const buyAmountUSD = customAmountUSD || effectivePositionSizeUSD;
         const committedCapitalUsd = openTradesCount * effectivePositionSizeUSD + buyAmountUSD;
         const spendableCapitalUsd = Math.max(this.totalCapital - this.reserveAmount, 0);
-        const reportSymbol = metadata?.symbol || 'UNKNOWN';
         if (!customAmountUSD && committedCapitalUsd > spendableCapitalUsd) {
             this.logger.warn(
                 `[BuyTrace] Blocked by capital guard token=${tokenMint} chat=${telegramChatId} committed=${committedCapitalUsd.toFixed(2)} spendable=${spendableCapitalUsd.toFixed(2)}`,
             );
+            await notifyBuyFailure({
+                reason: 'capital_guard',
+                details: `Committed after buy would be $${committedCapitalUsd.toFixed(2)}, spendable cap is $${spendableCapitalUsd.toFixed(2)}.`,
+                amountUsd: buyAmountUSD,
+            });
             return {
                 success: false,
                 message: `Capital guard blocked buy. Committed after buy would be $${committedCapitalUsd.toFixed(2)}, spendable cap is $${spendableCapitalUsd.toFixed(2)}.`,
@@ -637,6 +682,11 @@ export class TradeService implements OnModuleInit {
                     `consecutiveLosses=${metrics.consecutiveLosses}, ` +
                     `totalPnL=$${metrics.totalRealizedPnlUsd.toFixed(2)}.`;
                 this.logger.warn(`[Risk] ${msg}`);
+                await notifyBuyFailure({
+                    reason: `risk_${decision.reason}`,
+                    details: msg,
+                    amountUsd: buyAmountUSD,
+                });
                 return { success: false, message: msg };
             }
         }
@@ -666,6 +716,12 @@ export class TradeService implements OnModuleInit {
                 this.logger.warn(
                     `[BuyTrace] Blocked by invalid price/amount token=${tokenMint} chat=${telegramChatId} solPrice=${solPrice} amountSol=${executionPayload.amountSol}`,
                 );
+                await notifyBuyFailure({
+                    reason: 'invalid_price_or_amount',
+                    details: `SOL price=${solPrice}, amountSol=${executionPayload.amountSol}.`,
+                    amountUsd: buyAmountUSD,
+                    amountSol: executionPayload.amountSol,
+                });
                 return {
                     success: false,
                     message: 'Capital guard blocked buy. Invalid SOL price or buy amount.',
@@ -683,12 +739,23 @@ export class TradeService implements OnModuleInit {
                 const msg = `Insufficient SOL balance. Have: ${balanceSol.toFixed(4)} SOL, Need: ${totalRequiredSol.toFixed(4)} SOL (Position: ${executionPayload.amountSol.toFixed(4)} SOL, Reserve: ${reserveSol.toFixed(4)} SOL + Fees). Aborting buy to prevent trapped tokens or wasted fees.`;
                 this.logger.warn(`[Slot ${slotToUse}] ${msg}`);
                 this.logger.warn(`[BuyTrace] Blocked by balance token=${tokenMint} chat=${telegramChatId} wallet=${wallet.publicKey.toBase58()} balanceSol=${balanceSol.toFixed(6)}`);
+                await notifyBuyFailure({
+                    reason: 'insufficient_balance',
+                    details: msg,
+                    amountUsd: buyAmountUSD,
+                    amountSol: executionPayload.amountSol,
+                });
                 return { success: false, message: msg };
             }
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`[Slot ${slotToUse}] Capital protection check failed: ${msg}`);
             this.logger.error(`[BuyTrace] Capital protection exception token=${tokenMint} chat=${telegramChatId}: ${msg}`);
+            await notifyBuyFailure({
+                reason: 'capital_protection_exception',
+                details: msg,
+                amountUsd: buyAmountUSD,
+            });
             return {
                 success: false,
                 message: `Capital protection check failed: ${msg}`,
@@ -801,6 +868,13 @@ export class TradeService implements OnModuleInit {
         }
 
         this.logger.warn(`[BuyTrace] Swap failed token=${tokenMint} chat=${telegramChatId}: ${error || 'Unknown error'}`);
+        await notifyBuyFailure({
+            reason: 'swap_failed',
+            stage: 'SWAP',
+            details: error || 'Unknown error',
+            amountUsd: buyAmountUSD,
+            amountSol: amountInSol,
+        });
         if (!isManualBuy) {
             await this.reportingService.sendSwapResultReport({
                 side: 'BUY',

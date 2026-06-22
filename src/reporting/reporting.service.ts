@@ -1206,6 +1206,41 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(message, {}, 0, targetChatId);
     }
 
+    async sendTradeFailureAlert(params: {
+        side: 'BUY' | 'SELL';
+        tokenMint: string;
+        symbol?: string;
+        reason: string;
+        stage?: 'PRE_SWAP' | 'SWAP';
+        amountUsd?: number;
+        amountSol?: number;
+        targetChatId?: string;
+        details?: string;
+    }): Promise<void> {
+        const displaySymbol = params.symbol || 'UNKNOWN';
+        const stageLabel = params.stage || 'PRE_SWAP';
+        const amountUsdLine =
+            params.amountUsd !== undefined ? `💵 *USD Value:* \`$${params.amountUsd.toFixed(2)}\`\n` : '';
+        const amountSolLine =
+            params.amountSol !== undefined ? `💎 *SOL Value:* \`${params.amountSol.toFixed(4)} SOL\`\n` : '';
+        const detailsLine = params.details ? `${params.details}\n` : '';
+
+        const message =
+            `⚠️ *${params.side} EXECUTION FAILED*\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `💎 *Token:* ${displaySymbol}\n` +
+            `🆔 *Mint:* \`${params.tokenMint}\`\n` +
+            `📌 *Stage:* \`${stageLabel}\`\n` +
+            `🚫 *Reason:* \`${params.reason}\`\n` +
+            amountUsdLine +
+            amountSolLine +
+            detailsLine +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `Status: \`No live trade was opened.\``;
+
+        await this.sendMessage(message, {}, 0, params.targetChatId);
+    }
+
     async sendDepositNotification(params: {
         targetChatId: string;
         walletAddress: string;
