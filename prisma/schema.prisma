@@ -188,6 +188,7 @@ model Watchlist {
   hasTelegram   Boolean?
   isDexPaidUpdated Boolean?
   isCommunityTakeover Boolean?
+  whaleSignalScore Float?
   pairCreatedAt DateTime?
   checkCount    Int             @default(0)
   lastCheckedAt DateTime        @default(now())

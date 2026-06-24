@@ -283,11 +283,16 @@ Return a JSON object with exactly these fields:
 	6. Narrative & Social Rubric: For BOT_MODE=whale, or any token older than 4 hours, require a credible social footprint. If Telegram and Twitter are both missing, treat it as a major red flag and heavily penalize the conviction score because the token likely lacks community foundation. If only one of Twitter/Telegram exists, require stronger on-chain confirmation before returning BUY. Reward signs of Community Takeover (CTO), but only when paired with real social presence or clear holder-driven resilience.
 	7. Meta Awareness: Use Token Name to infer the current narrative/meta (e.g. AI, Cat, Dog, Politics, Celebrity, Meme, Solana-native). If the name aligns with a high-momentum crypto trend and the token also has active socials, slightly boost conviction. If the name is generic or socially silent, do not invent narrative strength.
 	8. Social quality matters more than raw quantity in whale mode: website alone is not enough; Twitter and Telegram are the primary community signals. Prefer tokens with at least Twitter + Telegram, plus website as a bonus.
-	9. Be highly objective. Output only valid JSON; no markdown wrappers.`;
+	9. Deterministic Whale Signal Score: Treat the supplied Whale Signal Score as the anchor pre-filter in whale mode. High score means the token has stronger community, narrative, and resilience signals; low score means the model should avoid overrating noisy pumps.
+	10. Be highly objective. Output only valid JSON; no markdown wrappers.`;
 
             const ageDisplay = this.formatAgeDisplay(metrics.ageHours);
             const safeRugcheckScore = this.getSafeRugcheckScore(metrics.rugcheckScore);
             const tokenName = metrics.tokenName ?? 'Unknown';
+            const whaleSignalScore =
+                typeof metrics.whaleSignalScore === 'number'
+                    ? metrics.whaleSignalScore.toFixed(0)
+                    : 'Unknown';
             const socialStatus = {
                 website: metrics.hasWebsite ? 'Verified' : 'Missing',
                 twitter: metrics.hasTwitter ? 'Verified' : 'Missing',
@@ -309,12 +314,13 @@ Return a JSON object with exactly these fields:
             const userPrompt = `Token Symbol: $${symbol}
 Mint Address: ${tokenMint}
 Social & Narrative Profile:
-- Token Name: ${tokenName}
-- Website: ${socialStatus.website}
-- Twitter: ${socialStatus.twitter}
-- Telegram: ${socialStatus.telegram}
-- Dex Paid Updated: ${socialStatus.dexPaidUpdated}
-- Community Takeover: ${socialStatus.communityTakeover}
+	- Token Name: ${tokenName}
+	- Website: ${socialStatus.website}
+	- Twitter: ${socialStatus.twitter}
+	- Telegram: ${socialStatus.telegram}
+	- Dex Paid Updated: ${socialStatus.dexPaidUpdated}
+	- Community Takeover: ${socialStatus.communityTakeover}
+	- Whale Signal Score: ${whaleSignalScore}
 Token Metrics:
 - Age: ${ageDisplay}
 - Liquidity: $${metrics.liquidityUsd.toLocaleString()}
@@ -382,10 +388,11 @@ Evaluate against the live thresholds above and return the JSON decision.`;
             this.logger.log(
                 [
                     `[AI TRACE DECISION] Token: $${symbol} | Mint: ${tokenMint.slice(0, 6)}...${tokenMint.slice(-4)} (PUMP.FUN: ${metrics.isPumpFun ? 'YES' : 'NO'})`,
-                    `├── Macro Regime Context : ${thresholds.marketRegime.toUpperCase()}`,
-                    `├── Matrix Price Velocity : 5m(${(metrics.priceChange5mPct ?? 0).toFixed(2)}%) | 15m(${(metrics.priceChange15mPct ?? 0).toFixed(2)}%) | 1h(${metrics.priceChange1hPct.toFixed(2)}%)`,
-                    `├── Creator Wallet Audit : Created: ${metrics.creatorTokensCreated ?? 0} | Rugs: ${metrics.creatorRuggedTokens ?? 0} | Risk: ${metrics.creatorRiskScore ?? 0}/100`,
-                    `├── Conviction Engine Check: Verdict Score: ${result.cuanConvictionScore}/100 -> ACTION: ${result.action.toUpperCase()}`,
+	                    `├── Macro Regime Context : ${thresholds.marketRegime.toUpperCase()}`,
+	                    `├── Matrix Price Velocity : 5m(${(metrics.priceChange5mPct ?? 0).toFixed(2)}%) | 15m(${(metrics.priceChange15mPct ?? 0).toFixed(2)}%) | 1h(${metrics.priceChange1hPct.toFixed(2)}%)`,
+	                    `├── Whale Signal Score : ${metrics.whaleSignalScore ?? 0}/100`,
+	                    `├── Creator Wallet Audit : Created: ${metrics.creatorTokensCreated ?? 0} | Rugs: ${metrics.creatorRuggedTokens ?? 0} | Risk: ${metrics.creatorRiskScore ?? 0}/100`,
+	                    `├── Conviction Engine Check: Verdict Score: ${result.cuanConvictionScore}/100 -> ACTION: ${result.action.toUpperCase()}`,
                     `└── Strategic Dynamic Sizing: Sizing Multiplier: ${result.positionSizeMultiplier}x (Allocated: $${mappedPositionSize.toFixed(2)}) | Custom Trailing: ${result.customTrailingBaseDistance ?? thresholds.trailingDistancePercent}%`,
                     `[Reasoning]: ${result.reasoning}`,
                 ].join('\n'),

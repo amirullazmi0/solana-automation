@@ -13,6 +13,7 @@ export interface AIAnalysisMetrics {
     isDexPaidUpdated?: boolean;
     isCommunityTakeover?: boolean;
     tokenName?: string;
+    whaleSignalScore?: number;
     rugcheckScore?: number;
     dangerRisksCount?: number;
     creatorHoldPct?: number;

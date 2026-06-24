@@ -774,6 +774,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             hasTelegram: result.metadata.hasTelegram,
                             isDexPaidUpdated: result.metadata.isDexPaidUpdated,
                             isCommunityTakeover: result.metadata.isCommunityTakeover,
+                            whaleSignalScore: result.metadata.whaleSignalScore,
                             pairCreatedAt: result.metadata.pairCreatedAt
                                 ? new Date(result.metadata.pairCreatedAt)
                                 : null,

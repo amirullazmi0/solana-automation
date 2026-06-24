@@ -122,6 +122,7 @@ Salin `.env.example` ke `.env` dan isi value-nya. Parameter utama yang relevan:
 |-----------|------------|
 | `OPENAI_API_KEY` | Jika valid, `AnalyzerService` akan menjalankan `AIService.analyzeToken()` setelah filter market/RPC/RugCheck lulus |
 | `AI_CONVICTION_THRESHOLD` | Minimum skor AI agar token boleh lanjut buy |
+| `WHALE_SIGNAL_SCORE_FLOOR` | Minimum skor whitelist whale mode sebelum token sosialnya terlalu lemah untuk diproses lebih lanjut |
 
 ### Established Rebound and CTO Thresholds
 
@@ -475,7 +476,7 @@ yarn deploy:vps
 
 | Mode / Parameter | Discovery & Behavior | Keterangan |
 |------------------|----------------------|------------|
-| `BOT_MODE=whale` | DexScreener only | Polling koin mapan tanpa websocket |
+| `BOT_MODE=whale` | DexScreener + social/narrative gate | Polling koin mapan dengan filter komunitas dan narasi |
 | `BOT_MODE=micin` | PumpPortal WS + DexScreener + Helius webhook | Menangkap koin baru dan migration instan |
 | `dryRun=true` | Signal-only mode | Live swaps di-skip |
 | `dryRun=false` | Live Wallet Execution | Live swaps diizinkan untuk chat itu |

@@ -52,6 +52,180 @@ export class AnalyzerService {
         return 'https://api.mainnet-beta.solana.com';
     }
 
+    private isMetaNarrativeMatch(tokenName?: string): { matched: boolean; label?: string } {
+        const normalized = (tokenName || '').toLowerCase();
+        if (!normalized) return { matched: false };
+
+        const patterns: Array<{ label: string; regex: RegExp }> = [
+            { label: 'AI', regex: /\b(ai|agent|llm|gpt|model)\b/i },
+            { label: 'Dog', regex: /\b(dog|doge|inu|shib)\b/i },
+            { label: 'Cat', regex: /\b(cat|kitty|neko)\b/i },
+            { label: 'Politics', regex: /\b(trump|polit|election|biden|maga|president)\b/i },
+            { label: 'Meme', regex: /\b(meme|pepe|frog|wojak)\b/i },
+            { label: 'Solana', regex: /\b(sol|solana|jito|pump|raydium)\b/i },
+            { label: 'Celebrity', regex: /\b(elon|musk|x\s?ai|tate|kanye)\b/i },
+        ];
+
+        for (const pattern of patterns) {
+            if (pattern.regex.test(normalized)) {
+                return { matched: true, label: pattern.label };
+            }
+        }
+
+        return { matched: false };
+    }
+
+    private calculateWhaleSignalScore(input: {
+        ageHours: number;
+        hasWebsite: boolean;
+        hasTwitter: boolean;
+        hasTelegram: boolean;
+        isCommunityTakeover?: boolean;
+        tokenName?: string;
+        volumeSurge?: number;
+        volScore?: number;
+        zScore?: number;
+        priceChange1hPct?: number;
+        priceChange5mPct?: number;
+        priceChange15mPct?: number;
+        creatorRiskScore?: number;
+        creatorRuggedTokens?: number;
+        safetyIndex?: number;
+        liquidityUsd: number;
+        marketCapUsd: number;
+    }): { score: number; reasons: string[]; narrativeLabel?: string } {
+        let score = 30;
+        const reasons: string[] = [];
+
+        const ageHours = Math.max(input.ageHours || 0, 0);
+        if (ageHours >= 4) {
+            score += 8;
+            reasons.push('age>=4h');
+        }
+        if (ageHours >= 12) {
+            score += 4;
+            reasons.push('age>=12h');
+        }
+
+        if (input.hasTwitter) {
+            score += 14;
+            reasons.push('twitter');
+        }
+        if (input.hasTelegram) {
+            score += 14;
+            reasons.push('telegram');
+        }
+        if (input.hasWebsite) {
+            score += 6;
+            reasons.push('website');
+        }
+        if (input.hasTwitter && input.hasTelegram) {
+            score += 10;
+            reasons.push('social-duo');
+        }
+        if (!input.hasTwitter && !input.hasTelegram) {
+            score -= ageHours >= 4 ? 30 : 18;
+            reasons.push('social-empty');
+        } else if (!input.hasTwitter || !input.hasTelegram) {
+            score -= 8;
+            reasons.push('single-social');
+        }
+
+        if (input.isCommunityTakeover) {
+            score += 12;
+            reasons.push('cto');
+        }
+
+        const narrative = this.isMetaNarrativeMatch(input.tokenName);
+        if (narrative.matched) {
+            score += 8;
+            reasons.push(`narrative:${narrative.label}`);
+        }
+
+        const volumeSurge = input.volumeSurge ?? 0;
+        if (volumeSurge >= 3) {
+            score += 12;
+            reasons.push('volume-surge>=3x');
+        } else if (volumeSurge >= 2) {
+            score += 8;
+            reasons.push('volume-surge>=2x');
+        } else if (volumeSurge >= 1.5) {
+            score += 4;
+            reasons.push('volume-surge>=1.5x');
+        }
+
+        const volScore = input.volScore ?? 0;
+        if (volScore >= 0.9) {
+            score += 8;
+            reasons.push('vol-score>=0.9');
+        } else if (volScore >= 0.5) {
+            score += 4;
+            reasons.push('vol-score>=0.5');
+        }
+
+        const zScore = input.zScore ?? 0;
+        if (zScore >= 3) {
+            score += 8;
+            reasons.push('z-score>=3');
+        } else if (zScore >= 2) {
+            score += 4;
+            reasons.push('z-score>=2');
+        }
+
+        const priceChange1hPct = input.priceChange1hPct ?? 0;
+        const priceChange5mPct = input.priceChange5mPct ?? 0;
+        const priceChange15mPct = input.priceChange15mPct ?? 0;
+        const momentumAligned =
+            priceChange1hPct > 0 && priceChange5mPct > 0 && priceChange15mPct > 0;
+        if (momentumAligned) {
+            score += 4;
+            reasons.push('momentum-aligned');
+        }
+
+        if (input.safetyIndex !== undefined) {
+            if (input.safetyIndex >= 0.8) {
+                score += 6;
+                reasons.push('safety>=0.8');
+            } else if (input.safetyIndex >= 0.65) {
+                score += 3;
+                reasons.push('safety>=0.65');
+            } else {
+                score -= 10;
+                reasons.push('safety-low');
+            }
+        }
+
+        const creatorRiskScore = input.creatorRiskScore ?? 0;
+        if (creatorRiskScore >= 80) {
+            score -= 24;
+            reasons.push('creator-risk>=80');
+        } else if (creatorRiskScore >= 60) {
+            score -= 14;
+            reasons.push('creator-risk>=60');
+        }
+
+        const creatorRuggedTokens = input.creatorRuggedTokens ?? 0;
+        if (creatorRuggedTokens >= 3) {
+            score -= 18;
+            reasons.push('creator-rugs>=3');
+        } else if (creatorRuggedTokens >= 1) {
+            score -= 10;
+            reasons.push('creator-rugs>=1');
+        }
+
+        if (input.marketCapUsd >= 150_000 && input.marketCapUsd <= 3_000_000) {
+            score += 4;
+            reasons.push('mcap-whale-band');
+        }
+        if (input.liquidityUsd >= 5_000) {
+            score += 4;
+            reasons.push('liquidity-ok');
+        }
+
+        score = Math.max(0, Math.min(100, Math.round(score)));
+        return { score, reasons, narrativeLabel: narrative.label };
+    }
+
     /**
      * Safety filter to check if token is safe and trending.
      */
@@ -152,15 +326,7 @@ export class AnalyzerService {
             const aiThreshold = Number.parseFloat(
                 this.configService.get<string>('AI_CONVICTION_THRESHOLD', '75.0'),
             );
-            const finalMetadata: TokenMetadata = {
-                ...baseMetadata,
-                creator: rugResult.creator,
-                topHolder: rugResult.topHolder,
-                isCTO: rugResult.isCTO,
-                isCommunityTakeover: rugResult.isCTO,
-            };
-
-            // 🧑‍💻 CREATOR PROFILE CHECK (Anti-Rug)
+            // Anti-rug creator profile is needed by the whale signal score and AI payload below.
             let creatorProfile:
                 | Awaited<ReturnType<CreatorProfileService['evaluateCreator']>>
                 | null = null;
@@ -169,15 +335,68 @@ export class AnalyzerService {
 
                 if (creatorProfile.isBlacklisted || creatorProfile.riskScore >= 80) {
                     this.logger.warn(
-                        `[${tokenMint}] 🛑 Creator ${rugResult.creator} is blacklisted or high risk (Score: ${creatorProfile.riskScore}). Skip.`,
+                        `[${tokenMint}] Creator ${rugResult.creator} is blacklisted or high risk (Score: ${creatorProfile.riskScore}). Skip.`,
                     );
                     return {
                         safe: false,
                         reason: 'creator_high_risk',
                         permanent: true,
-                        metadata: finalMetadata,
+                        metadata: baseMetadata,
                     };
                 }
+            }
+
+            const whaleSignalFloor = Number.parseFloat(
+                this.configService.get<string>('WHALE_SIGNAL_SCORE_FLOOR', '55'),
+            );
+            const whaleSignal = this.calculateWhaleSignalScore({
+                ageHours: traction.pairCreatedAt
+                    ? (Date.now() - traction.pairCreatedAt) / (1000 * 60 * 60)
+                    : 0,
+                liquidityUsd: traction.liquidity || 0,
+                marketCapUsd: traction.marketCap || 0,
+                volumeSurge: traction.volumeSurge,
+                volScore: traction.volScore,
+                zScore: traction.zScore,
+                priceChange1hPct: traction.priceChange1h || 0,
+                priceChange5mPct: traction.priceChange5m || 0,
+                priceChange15mPct: traction.priceChange15m || 0,
+                hasWebsite: Boolean(traction.socials?.website?.trim()),
+                hasTwitter: Boolean(traction.socials?.twitter?.trim()),
+                hasTelegram: Boolean(traction.socials?.telegram?.trim()),
+                isCommunityTakeover: rugResult.isCTO,
+                tokenName: traction.tokenName || traction.symbol || undefined,
+                creatorRiskScore: creatorProfile?.riskScore,
+                creatorRuggedTokens: creatorProfile?.ruggedTokens,
+                safetyIndex: rugResult.safetyIndex,
+            });
+            const finalMetadata: TokenMetadata = {
+                ...baseMetadata,
+                creator: rugResult.creator,
+                topHolder: rugResult.topHolder,
+                isCTO: rugResult.isCTO,
+                isCommunityTakeover: rugResult.isCTO,
+                whaleSignalScore: whaleSignal.score,
+            };
+
+            const botMode = this.configService.get<string>('BOT_MODE', 'micin');
+            if (
+                botMode === 'whale' &&
+                traction.pairCreatedAt &&
+                (Date.now() - traction.pairCreatedAt) / (1000 * 60 * 60) >= 4 &&
+                !baseMetadata.hasTwitter &&
+                !baseMetadata.hasTelegram &&
+                whaleSignal.score < whaleSignalFloor
+            ) {
+                this.logger.warn(
+                    `[${tokenMint}] Whale signal gate blocked token. Score=${whaleSignal.score}, Floor=${whaleSignalFloor}, Socials=empty.`,
+                );
+                return {
+                    safe: false,
+                    reason: 'whale_signal_too_weak',
+                    permanent: false,
+                    metadata: finalMetadata,
+                };
             }
 
             if (shouldUseAi) {
@@ -218,6 +437,7 @@ export class AnalyzerService {
                         ),
                         isCommunityTakeover: rugResult.isCTO,
                         tokenName: traction.tokenName || traction.symbol || 'Unknown',
+                        whaleSignalScore: whaleSignal.score,
                     },
                 );
 
@@ -1080,3 +1300,4 @@ export class AnalyzerService {
         return null;
     }
 }
+

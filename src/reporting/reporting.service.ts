@@ -275,6 +275,10 @@ export class ReportingService implements OnModuleInit {
                     : item.isCommunityTakeover
                       ? 'Yes'
                       : 'No';
+            const whaleScoreDisplay =
+                typeof item.whaleSignalScore === 'number'
+                    ? item.whaleSignalScore.toFixed(0)
+                    : 'N/A';
 
             const msg =
                 `${title}\n` +
@@ -287,6 +291,7 @@ export class ReportingService implements OnModuleInit {
                 `VoL: \`${volDisplay}\` | Z: \`${zDisplay}\`\n` +
                 `Age: \`${ageHours.toFixed(2)}h\`\n` +
                 `Socials: \`W:${websiteDisplay} T:${twitterDisplay} G:${telegramDisplay}\`\n` +
+                `Whale Score: \`${whaleScoreDisplay}/100\`\n` +
                 `CTO: \`${ctoDisplay}\`\n\n` +
                 `Status: \`MONITORING...\``;
 

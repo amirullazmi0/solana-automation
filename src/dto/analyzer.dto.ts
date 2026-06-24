@@ -43,6 +43,7 @@ export interface TokenMetadata {
     hasTwitter?: boolean;
     hasTelegram?: boolean;
     isDexPaidUpdated?: boolean;
+    whaleSignalScore?: number;
     socials?: {
         twitter?: string;
         telegram?: string;
