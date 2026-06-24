@@ -761,6 +761,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     if (result.metadata) {
                         await this.updateWatchlistByMint(tokenMint, {
                             symbol: result.metadata.symbol,
+                            tokenName: result.metadata.tokenName,
                             mcap: result.metadata.mcap,
                             liquidity: result.metadata.liquidity,
                             volumeSurge: result.metadata.volumeSurge,
@@ -768,6 +769,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             zScore: result.metadata.zScore,
                             priceChange1h: result.metadata.priceChange1h,
                             isPumpFun: result.metadata.isPumpFun || false,
+                            hasWebsite: result.metadata.hasWebsite,
+                            hasTwitter: result.metadata.hasTwitter,
+                            hasTelegram: result.metadata.hasTelegram,
+                            isDexPaidUpdated: result.metadata.isDexPaidUpdated,
+                            isCommunityTakeover: result.metadata.isCommunityTakeover,
                             pairCreatedAt: result.metadata.pairCreatedAt
                                 ? new Date(result.metadata.pairCreatedAt)
                                 : null,

@@ -241,9 +241,9 @@ Return a JSON object with exactly these fields:
   "positionSizeMultiplier": <number between 0.1 and 1.0 based on asset short-term risks vs velocity>,
   "customTrailingBaseDistance": <number, optional custom recommended base trailing distance percent>
 }
-Live .env thresholds and mode:
-- BOT_MODE=${thresholds.botMode}
-- MARKET_REGIME=${thresholds.marketRegime}
+	Live .env thresholds and mode:
+	- BOT_MODE=${thresholds.botMode}
+	- MARKET_REGIME=${thresholds.marketRegime}
 - AI_CONVICTION_THRESHOLD=${thresholds.aiConvictionThreshold}
 - MIN_LIQUIDITY_USD=${thresholds.minLiquidityUsd}
 - MIN_VOLUME_USD=${thresholds.minVolumeUsd}
@@ -274,19 +274,47 @@ Live .env thresholds and mode:
 - COOLDOWN_WIN_HOURS=${thresholds.cooldownWinHours}
 - COOLDOWN_LOSS_HOURS=${thresholds.cooldownLossHours}
 
-Decision rules:
-1. "action" must only be "buy" if "cuanConvictionScore" is >= AI_CONVICTION_THRESHOLD. Otherwise use "skip".
-2. Matrix Velocity Rules: Carefully evaluate short-term momentum changes (5m and 15m price changes). If 5m price pump is excessively vertical compared to 15m/1h, penalize positionSizeMultiplier to protect capital from malicious bot pumps.
-3. Creator Profile Rules: Heavily penalize or enforce an absolute "skip" if the creator has a high historical "rugged tokens" count or if the "creator risk score" is critical.
-4. If MARKET_REGIME is bearish_chaos, be extremely conservative, restrict scores, and penalize volatile assets by reducing positionSizeMultiplier (0.1 to 0.5).
-5. If MARKET_REGIME is bullish_gas, you may be more permissive to high-momentum tokens, but still respect risk baselines.
-6. Be highly objective. Output only valid JSON; no markdown wrappers.`;
+	Decision rules:
+	1. "action" must only be "buy" if "cuanConvictionScore" is >= AI_CONVICTION_THRESHOLD. Otherwise use "skip".
+	2. Matrix Velocity Rules: Carefully evaluate short-term momentum changes (5m and 15m price changes). If 5m price pump is excessively vertical compared to 15m/1h, penalize positionSizeMultiplier to protect capital from malicious bot pumps.
+	3. Creator Profile Rules: Heavily penalize or enforce an absolute "skip" if the creator has a high historical "rugged tokens" count or if the "creator risk score" is critical.
+	4. If MARKET_REGIME is bearish_chaos, be extremely conservative, restrict scores, and penalize volatile assets by reducing positionSizeMultiplier (0.1 to 0.5).
+	5. If MARKET_REGIME is bullish_gas, you may be more permissive to high-momentum tokens, but still respect risk baselines.
+	6. Narrative & Social Rubric: For BOT_MODE=whale, or any token older than 4 hours, require a credible social footprint. If Telegram and Twitter are both missing, treat it as a major red flag and heavily penalize the conviction score because the token likely lacks community foundation. If only one of Twitter/Telegram exists, require stronger on-chain confirmation before returning BUY. Reward signs of Community Takeover (CTO), but only when paired with real social presence or clear holder-driven resilience.
+	7. Meta Awareness: Use Token Name to infer the current narrative/meta (e.g. AI, Cat, Dog, Politics, Celebrity, Meme, Solana-native). If the name aligns with a high-momentum crypto trend and the token also has active socials, slightly boost conviction. If the name is generic or socially silent, do not invent narrative strength.
+	8. Social quality matters more than raw quantity in whale mode: website alone is not enough; Twitter and Telegram are the primary community signals. Prefer tokens with at least Twitter + Telegram, plus website as a bonus.
+	9. Be highly objective. Output only valid JSON; no markdown wrappers.`;
 
             const ageDisplay = this.formatAgeDisplay(metrics.ageHours);
             const safeRugcheckScore = this.getSafeRugcheckScore(metrics.rugcheckScore);
+            const tokenName = metrics.tokenName ?? 'Unknown';
+            const socialStatus = {
+                website: metrics.hasWebsite ? 'Verified' : 'Missing',
+                twitter: metrics.hasTwitter ? 'Verified' : 'Missing',
+                telegram: metrics.hasTelegram ? 'Verified' : 'Missing',
+                dexPaidUpdated:
+                    metrics.isDexPaidUpdated === undefined
+                        ? 'Unknown'
+                        : metrics.isDexPaidUpdated
+                          ? 'Yes'
+                          : 'No',
+                communityTakeover:
+                    metrics.isCommunityTakeover === undefined
+                        ? 'Unknown'
+                        : metrics.isCommunityTakeover
+                          ? 'Yes'
+                          : 'No',
+            };
 
             const userPrompt = `Token Symbol: $${symbol}
 Mint Address: ${tokenMint}
+Social & Narrative Profile:
+- Token Name: ${tokenName}
+- Website: ${socialStatus.website}
+- Twitter: ${socialStatus.twitter}
+- Telegram: ${socialStatus.telegram}
+- Dex Paid Updated: ${socialStatus.dexPaidUpdated}
+- Community Takeover: ${socialStatus.communityTakeover}
 Token Metrics:
 - Age: ${ageDisplay}
 - Liquidity: $${metrics.liquidityUsd.toLocaleString()}

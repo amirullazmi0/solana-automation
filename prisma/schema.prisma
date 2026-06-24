@@ -175,6 +175,7 @@ model Watchlist {
   id            Int             @id @default(autoincrement())
   tokenMint     String          @unique
   symbol        String?
+  tokenName     String?
   mcap          Float?
   liquidity     Float?
   volumeSurge   Float?
@@ -182,6 +183,11 @@ model Watchlist {
   zScore        Float?
   priceChange1h Float?
   isPumpFun     Boolean         @default(false)
+  hasWebsite    Boolean?
+  hasTwitter    Boolean?
+  hasTelegram   Boolean?
+  isDexPaidUpdated Boolean?
+  isCommunityTakeover Boolean?
   pairCreatedAt DateTime?
   checkCount    Int             @default(0)
   lastCheckedAt DateTime        @default(now())

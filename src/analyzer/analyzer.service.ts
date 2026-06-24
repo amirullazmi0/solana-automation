@@ -68,12 +68,21 @@ export class AnalyzerService {
                 mcap: traction.marketCap,
                 pairCreatedAt: traction.pairCreatedAt,
                 symbol: traction.symbol,
+                tokenName: traction.tokenName,
                 socials: traction.socials,
                 volumeSurge: traction.volumeSurge,
                 volScore: traction.volScore,
                 zScore: traction.zScore,
                 priceChange1h: traction.priceChange1h,
                 isPumpFun: traction.isPumpFun,
+                hasWebsite: Boolean(traction.socials?.website?.trim()),
+                hasTwitter: Boolean(traction.socials?.twitter?.trim()),
+                hasTelegram: Boolean(traction.socials?.telegram?.trim()),
+                isDexPaidUpdated: Boolean(
+                    traction.socials?.website?.trim() ||
+                        traction.socials?.twitter?.trim() ||
+                        traction.socials?.telegram?.trim(),
+                ),
             };
 
             if (!traction.passed) {
@@ -143,6 +152,13 @@ export class AnalyzerService {
             const aiThreshold = Number.parseFloat(
                 this.configService.get<string>('AI_CONVICTION_THRESHOLD', '75.0'),
             );
+            const finalMetadata: TokenMetadata = {
+                ...baseMetadata,
+                creator: rugResult.creator,
+                topHolder: rugResult.topHolder,
+                isCTO: rugResult.isCTO,
+                isCommunityTakeover: rugResult.isCTO,
+            };
 
             // 🧑‍💻 CREATOR PROFILE CHECK (Anti-Rug)
             let creatorProfile:
@@ -159,7 +175,7 @@ export class AnalyzerService {
                         safe: false,
                         reason: 'creator_high_risk',
                         permanent: true,
-                        metadata: baseMetadata,
+                        metadata: finalMetadata,
                     };
                 }
             }
@@ -192,6 +208,16 @@ export class AnalyzerService {
                         creatorTokensCreated: creatorProfile?.tokensCreated,
                         creatorRuggedTokens: creatorProfile?.ruggedTokens,
                         creatorRiskScore: creatorProfile?.riskScore,
+                        hasWebsite: Boolean(traction.socials?.website?.trim()),
+                        hasTwitter: Boolean(traction.socials?.twitter?.trim()),
+                        hasTelegram: Boolean(traction.socials?.telegram?.trim()),
+                        isDexPaidUpdated: Boolean(
+                            traction.socials?.website?.trim() ||
+                                traction.socials?.twitter?.trim() ||
+                                traction.socials?.telegram?.trim(),
+                        ),
+                        isCommunityTakeover: rugResult.isCTO,
+                        tokenName: traction.tokenName || traction.symbol || 'Unknown',
                     },
                 );
 
@@ -202,7 +228,7 @@ export class AnalyzerService {
                     return {
                         safe: false,
                         reason: 'ai_rejected',
-                        metadata: baseMetadata,
+                        metadata: finalMetadata,
                     };
                 }
             }
@@ -212,12 +238,7 @@ export class AnalyzerService {
             );
             return {
                 safe: true,
-                metadata: {
-                    ...baseMetadata,
-                    creator: rugResult.creator,
-                    topHolder: rugResult.topHolder,
-                    isCTO: rugResult.isCTO,
-                },
+                metadata: finalMetadata,
             };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -234,8 +255,18 @@ export class AnalyzerService {
             mcap: traction.marketCap,
             pairCreatedAt: traction.pairCreatedAt,
             symbol: traction.symbol,
+            tokenName: traction.tokenName,
             socials: traction.socials,
             volumeSurge: traction.volumeSurge,
+            isPumpFun: traction.isPumpFun,
+            hasWebsite: Boolean(traction.socials?.website?.trim()),
+            hasTwitter: Boolean(traction.socials?.twitter?.trim()),
+            hasTelegram: Boolean(traction.socials?.telegram?.trim()),
+            isDexPaidUpdated: Boolean(
+                traction.socials?.website?.trim() ||
+                    traction.socials?.twitter?.trim() ||
+                    traction.socials?.telegram?.trim(),
+            ),
         };
     }
 
@@ -327,6 +358,7 @@ export class AnalyzerService {
         volume5m?: number;
         buys5m?: number;
         sells5m?: number;
+        tokenName?: string;
     }> {
         try {
             const minLiq = Number.parseFloat(
@@ -370,6 +402,7 @@ export class AnalyzerService {
             const sells5m = txns5m.sells || 0;
             const marketCap = pair.fdv || 0;
             const symbol = pair.baseToken?.symbol;
+            const tokenName = pair.baseToken?.name || pair.baseToken?.symbol || symbol;
             const pairCreatedAt = pair.pairCreatedAt || 0;
             const socials = {
                 twitter: pair.info?.socials?.find((s) => s.type === 'twitter')?.url,
@@ -617,6 +650,7 @@ export class AnalyzerService {
                 velocity,
                 socials,
                 symbol,
+                tokenName,
                 pairCreatedAt,
                 volumeSurge,
                 volScore,

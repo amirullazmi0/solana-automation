@@ -31,12 +31,18 @@ export interface TokenMetadata {
     mcap?: number;
     pairCreatedAt?: number;
     symbol?: string;
+    tokenName?: string;
     volumeSurge?: number;
     volScore?: number;
     zScore?: number;
     priceChange1h?: number;
     isPumpFun?: boolean;
     isCTO?: boolean;
+    isCommunityTakeover?: boolean;
+    hasWebsite?: boolean;
+    hasTwitter?: boolean;
+    hasTelegram?: boolean;
+    isDexPaidUpdated?: boolean;
     socials?: {
         twitter?: string;
         telegram?: string;

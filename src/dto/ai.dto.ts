@@ -7,6 +7,12 @@ export interface AIAnalysisMetrics {
     sells5mCount: number;
     priceChange1hPct: number;
     isPumpFun: boolean;
+    hasWebsite: boolean;
+    hasTwitter: boolean;
+    hasTelegram: boolean;
+    isDexPaidUpdated?: boolean;
+    isCommunityTakeover?: boolean;
+    tokenName?: string;
     rugcheckScore?: number;
     dangerRisksCount?: number;
     creatorHoldPct?: number;

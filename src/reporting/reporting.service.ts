@@ -251,6 +251,7 @@ export class ReportingService implements OnModuleInit {
 
         for (const item of pendingWatchlist) {
             const symbol = item.symbol || 'UNKNOWN';
+            const tokenName = item.tokenName || 'Unknown';
             const ageSource = item.pairCreatedAt || item.createdAt;
             const ageHours = Math.max(
                 (Date.now() - new Date(ageSource).getTime()) / (1000 * 60 * 60),
@@ -265,16 +266,28 @@ export class ReportingService implements OnModuleInit {
                 typeof item.volumeSurge === 'number' ? `${item.volumeSurge.toFixed(2)}x` : 'N/A';
             const volDisplay = typeof item.volScore === 'number' ? item.volScore.toFixed(4) : 'N/A';
             const zDisplay = typeof item.zScore === 'number' ? item.zScore.toFixed(2) : 'N/A';
+            const websiteDisplay = item.hasWebsite ? 'Yes' : 'No';
+            const twitterDisplay = item.hasTwitter ? 'Yes' : 'No';
+            const telegramDisplay = item.hasTelegram ? 'Yes' : 'No';
+            const ctoDisplay =
+                item.isCommunityTakeover === undefined || item.isCommunityTakeover === null
+                    ? 'Unknown'
+                    : item.isCommunityTakeover
+                      ? 'Yes'
+                      : 'No';
 
             const msg =
                 `${title}\n` +
                 `Token: ${symbol}\n` +
+                `Name: ${tokenName}\n` +
                 `Mint: \`${item.tokenMint}\`\n\n` +
                 `MCap: \`${mcapDisplay}\`\n` +
                 `Liquidity: \`${liquidityDisplay}\`\n` +
                 `Surge: \`${surgeDisplay}\`\n` +
                 `VoL: \`${volDisplay}\` | Z: \`${zDisplay}\`\n` +
-                `Age: \`${ageHours.toFixed(2)}h\`\n\n` +
+                `Age: \`${ageHours.toFixed(2)}h\`\n` +
+                `Socials: \`W:${websiteDisplay} T:${twitterDisplay} G:${telegramDisplay}\`\n` +
+                `CTO: \`${ctoDisplay}\`\n\n` +
                 `Status: \`MONITORING...\``;
 
             const buttons: TelegramBot.InlineKeyboardButton[][] = [
