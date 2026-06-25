@@ -244,35 +244,35 @@ Return a JSON object with exactly these fields:
 	Live .env thresholds and mode:
 	- BOT_MODE=${thresholds.botMode}
 	- MARKET_REGIME=${thresholds.marketRegime}
-- AI_CONVICTION_THRESHOLD=${thresholds.aiConvictionThreshold}
-- MIN_LIQUIDITY_USD=${thresholds.minLiquidityUsd}
-- MIN_VOLUME_USD=${thresholds.minVolumeUsd}
-- MIN_BUY_COUNT=${thresholds.minBuyCount}
-- MIN_MCAP=${thresholds.minMarketCapUsd}
-- MAX_MCAP=${thresholds.maxMarketCapUsd}
-- MIN_AGE_HOURS=${thresholds.minAgeHours}
-- MAX_AGE_HOURS=${thresholds.maxAgeHours}
-- MIN_BUY_CONFIDENCE=${thresholds.minBuyConfidence}
-- MIN_VOLUME_MCAP_RATIO=${thresholds.minVolumeMarketCapRatio}
-- MIN_VL_RATIO=${thresholds.minVolumeLiquidityRatio}
-- ANALYZER_MIN_VOL_SCORE=${thresholds.minVolScore}
-- ANALYZER_MIN_Z_SCORE=${thresholds.minZScore}
-- ANALYZER_MIN_VOLUME_SURGE=${thresholds.minVolumeSurge}
-- RUGCHECK_MIN_SAFETY_INDEX=${thresholds.rugcheckMinSafetyIndex}
-- MAX_RUGCHECK_SCORE=${thresholds.maxRugcheckScore}
-- TAKE_PROFIT_PERCENT=${thresholds.takeProfitPercent}
-- STOP_LOSS_PERCENT=${thresholds.stopLossPercent}
-- TRAILING_DISTANCE_PERCENT=${thresholds.trailingDistancePercent}
-- HARD_CRASH_PERCENT=${thresholds.hardCrashPercent}
-- SL_PATIENCE_ENABLED=${thresholds.slPatienceEnabled}
-- TOTAL_CAPITAL=${thresholds.totalCapitalUsd}
-- RESERVE_AMOUNT=${thresholds.reserveAmountUsd}
-- POSITION_SIZE_USD=${thresholds.positionSizeUsd}
-- TOTAL_SLOTS=${thresholds.totalSlots}
-- SLIPPAGE_BPS=${thresholds.slippageBps}
-- MAX_PRICE_IMPACT_PCT=${thresholds.maxPriceImpactPercent}
-- COOLDOWN_WIN_HOURS=${thresholds.cooldownWinHours}
-- COOLDOWN_LOSS_HOURS=${thresholds.cooldownLossHours}
+	- AI_CONVICTION_THRESHOLD=${thresholds.aiConvictionThreshold}
+	- MIN_LIQUIDITY_USD=${thresholds.minLiquidityUsd}
+	- MIN_VOLUME_USD=${thresholds.minVolumeUsd}
+	- MIN_BUY_COUNT=${thresholds.minBuyCount}
+	- MIN_MCAP=${thresholds.minMarketCapUsd}
+	- MAX_MCAP=${thresholds.maxMarketCapUsd}
+	- MIN_AGE_HOURS=${thresholds.minAgeHours}
+	- MAX_AGE_HOURS=${thresholds.maxAgeHours}
+	- MIN_BUY_CONFIDENCE=${thresholds.minBuyConfidence}
+	- MIN_VOLUME_MCAP_RATIO=${thresholds.minVolumeMarketCapRatio}
+	- MIN_VL_RATIO=${thresholds.minVolumeLiquidityRatio}
+	- ANALYZER_MIN_VOL_SCORE=${thresholds.minVolScore}
+	- ANALYZER_MIN_Z_SCORE=${thresholds.minZScore}
+	- ANALYZER_MIN_VOLUME_SURGE=${thresholds.minVolumeSurge}
+	- RUGCHECK_MIN_SAFETY_INDEX=${thresholds.rugcheckMinSafetyIndex}
+	- MAX_RUGCHECK_SCORE=${thresholds.maxRugcheckScore}
+	- TAKE_PROFIT_PERCENT=${thresholds.takeProfitPercent}
+	- STOP_LOSS_PERCENT=${thresholds.stopLossPercent}
+	- TRAILING_DISTANCE_PERCENT=${thresholds.trailingDistancePercent}
+	- HARD_CRASH_PERCENT=${thresholds.hardCrashPercent}
+	- SL_PATIENCE_ENABLED=${thresholds.slPatienceEnabled}
+	- TOTAL_CAPITAL=${thresholds.totalCapitalUsd}
+	- RESERVE_AMOUNT=${thresholds.reserveAmountUsd}
+	- POSITION_SIZE_USD=${thresholds.positionSizeUsd}
+	- TOTAL_SLOTS=${thresholds.totalSlots}
+	- SLIPPAGE_BPS=${thresholds.slippageBps}
+	- MAX_PRICE_IMPACT_PCT=${thresholds.maxPriceImpactPercent}
+	- COOLDOWN_WIN_HOURS=${thresholds.cooldownWinHours}
+	- COOLDOWN_LOSS_HOURS=${thresholds.cooldownLossHours}
 
 	Decision rules:
 	1. "action" must only be "buy" if "cuanConvictionScore" is >= AI_CONVICTION_THRESHOLD. Otherwise use "skip".
@@ -284,7 +284,8 @@ Return a JSON object with exactly these fields:
 	7. Meta Awareness: Use Token Name to infer the current narrative/meta (e.g. AI, Cat, Dog, Politics, Celebrity, Meme, Solana-native). If the name aligns with a high-momentum crypto trend and the token also has active socials, slightly boost conviction. If the name is generic or socially silent, do not invent narrative strength.
 	8. Social quality matters more than raw quantity in whale mode: website alone is not enough; Twitter and Telegram are the strongest community signals, but a single credible social plus strong on-chain confirmation can still be acceptable. Treat website as a bonus.
 	9. Deterministic Whale Signal Score: Treat the supplied Whale Signal Score as the anchor pre-filter in whale mode. High score means the token has stronger community, narrative, and resilience signals; low score means the model should avoid overrating noisy pumps.
-	10. Be highly objective. Output only valid JSON; no markdown wrappers.`;
+	10. Micin Anti-Noisy Rule: When the data shows a vertical 5m spike that is unsupported by 15m/1h, weak VoL/Z-score, or obvious sell pressure, strongly prefer "skip" unless there is exceptional on-chain confirmation.
+	11. Be highly objective. Output only valid JSON; no markdown wrappers.`;
 
             const ageDisplay = this.formatAgeDisplay(metrics.ageHours);
             const safeRugcheckScore = this.getSafeRugcheckScore(metrics.rugcheckScore);
@@ -414,3 +415,4 @@ Evaluate against the live thresholds above and return the JSON decision.`;
         }
     }
 }
+

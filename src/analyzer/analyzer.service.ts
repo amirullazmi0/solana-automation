@@ -226,6 +226,67 @@ export class AnalyzerService {
         return { score, reasons, narrativeLabel: narrative.label };
     }
 
+    private calculateMicinNoiseRisk(input: {
+        volumeSurge?: number;
+        volScore?: number;
+        zScore?: number;
+        priceChange1hPct?: number;
+        priceChange5mPct?: number;
+        priceChange15mPct?: number;
+        buys5mCount?: number;
+        sells5mCount?: number;
+    }): { severity: number; reasons: string[]; isFakePump: boolean } {
+        let severity = 0;
+        const reasons: string[] = [];
+
+        const volumeSurge = input.volumeSurge ?? 0;
+        const volScore = input.volScore ?? 0;
+        const zScore = input.zScore ?? 0;
+        const priceChange1hPct = input.priceChange1hPct ?? 0;
+        const priceChange5mPct = input.priceChange5mPct ?? 0;
+        const priceChange15mPct = input.priceChange15mPct ?? 0;
+        const buys5mCount = input.buys5mCount ?? 0;
+        const sells5mCount = input.sells5mCount ?? 0;
+
+        const verticalFiveMinPump =
+            priceChange5mPct >= 25 && priceChange5mPct >= Math.max(priceChange15mPct, 1) * 3;
+        if (verticalFiveMinPump) {
+            severity += 30;
+            reasons.push('vertical-5m');
+        }
+
+        const weakVolumeSupport = volumeSurge >= 2.5 && volScore < 0.35;
+        if (weakVolumeSupport) {
+            severity += 25;
+            reasons.push('weak-vol-support');
+        }
+
+        const weakAnomalySupport = volumeSurge >= 2 && zScore < 1.25;
+        if (weakAnomalySupport) {
+            severity += 20;
+            reasons.push('weak-z-support');
+        }
+
+        const sellPressure = sells5mCount > buys5mCount * 1.1 && sells5mCount >= 5;
+        if (sellPressure) {
+            severity += 20;
+            reasons.push('sell-pressure');
+        }
+
+        if (priceChange1hPct <= 0 && priceChange5mPct >= 15) {
+            severity += 10;
+            reasons.push('1h-bearish-5m-pump');
+        }
+
+        if (buys5mCount === 0 && sells5mCount > 0 && volumeSurge >= 2) {
+            severity += 15;
+            reasons.push('no-buy-support');
+        }
+
+        severity = Math.max(0, Math.min(100, Math.round(severity)));
+        return { severity, reasons, isFakePump: severity >= 70 };
+    }
+
     /**
      * Safety filter to check if token is safe and trending.
      */
@@ -380,6 +441,27 @@ export class AnalyzerService {
             };
 
             const botMode = this.configService.get<string>('BOT_MODE', 'micin');
+            const micinNoise = this.calculateMicinNoiseRisk({
+                volumeSurge: traction.volumeSurge,
+                volScore: traction.volScore,
+                zScore: traction.zScore,
+                priceChange1hPct: traction.priceChange1h || 0,
+                priceChange5mPct: traction.priceChange5m || 0,
+                priceChange15mPct: traction.priceChange15m || 0,
+                buys5mCount: traction.buys5m || 0,
+                sells5mCount: traction.sells5m || 0,
+            });
+            if (botMode === 'micin' && micinNoise.isFakePump) {
+                this.logger.warn(
+                    `[${tokenMint}] Micin noise gate blocked token. Severity=${micinNoise.severity}, Reasons=${micinNoise.reasons.join(',')}.`,
+                );
+                return {
+                    safe: false,
+                    reason: 'noisy_pump',
+                    permanent: false,
+                    metadata: baseMetadata,
+                };
+            }
             if (
                 botMode === 'whale' &&
                 traction.pairCreatedAt &&

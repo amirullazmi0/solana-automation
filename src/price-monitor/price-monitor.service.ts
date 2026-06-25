@@ -76,6 +76,55 @@ export class PriceMonitorService {
 
     private readonly processingTrades = new Set<number>();
 
+    private calculateNoisePressure(signals: TradeFreshMarketSignals): { severity: number; reasons: string[]; isFakePump: boolean } {
+        let severity = 0;
+        const reasons: string[] = [];
+
+        const verticalFiveMinutePump =
+            signals.priceChange1h <= 0 &&
+            signals.volumeSurge >= 2.5 &&
+            signals.volScore < 0.35 &&
+            signals.zScore < 1.25 &&
+            signals.priceChange1h >= -15 &&
+            signals.priceUsd > 0 &&
+            signals.volume5mUsd > 0;
+        if (verticalFiveMinutePump) {
+            severity += 35;
+            reasons.push('vertical-5m');
+        }
+
+        const weakSupport = signals.volumeSurge >= 2 && signals.volScore < 0.4;
+        if (weakSupport) {
+            severity += 25;
+            reasons.push('weak-vol-support');
+        }
+
+        const weakAnomaly = signals.volumeSurge >= 2 && signals.zScore < 1.25;
+        if (weakAnomaly) {
+            severity += 20;
+            reasons.push('weak-z-support');
+        }
+
+        const sellPressure = signals.sells5mCount > signals.buys5mCount * 1.1 && signals.sells5mCount >= 5;
+        if (sellPressure) {
+            severity += 20;
+            reasons.push('sell-pressure');
+        }
+
+        if (signals.buys5mCount === 0 && signals.sells5mCount > 0 && signals.volumeSurge >= 2) {
+            severity += 15;
+            reasons.push('no-buy-support');
+        }
+
+        if (signals.priceChange1h < 0 && signals.priceUsd > 0 && signals.volumeSurge >= 1.8) {
+            severity += 10;
+            reasons.push('1h-down');
+        }
+
+        severity = Math.max(0, Math.min(100, Math.round(severity)));
+        return { severity, reasons, isFakePump: severity >= 70 };
+    }
+
     @Interval(2000)
     async monitorPrices() {
         const openTrades = await this.prismaService.trade.findMany({
@@ -331,16 +380,22 @@ export class PriceMonitorService {
             volumeSurge: freshMarketSignals?.volumeSurge ?? 0,
             zScore: freshMarketSignals?.zScore ?? 0,
         };
+        const noisePressure = this.calculateNoisePressure(normalizedFreshMarketSignals);
         const aiRecommendedTrailingDistance = this.aiService.getRecommendedTrailingDistance(
             normalizedFreshMarketSignals.volScore,
             normalizedFreshMarketSignals.priceChange1h,
         );
         const baseTrailingDistancePercent =
             trade.targetTrailingDistance ?? this.trailingDistancePercent;
-        const effectiveTrailingDistancePercent = Math.min(
-            baseTrailingDistancePercent,
-            aiRecommendedTrailingDistance,
-        );
+        const noiseAdjustedTrailingDistance =
+            noisePressure.severity >= 85
+                ? Math.min(baseTrailingDistancePercent, aiRecommendedTrailingDistance, 1.25)
+                : noisePressure.severity >= 70
+                  ? Math.min(baseTrailingDistancePercent, aiRecommendedTrailingDistance, 2.0)
+                  : noisePressure.severity >= 50
+                    ? Math.min(baseTrailingDistancePercent, aiRecommendedTrailingDistance, 3.0)
+                    : Math.min(baseTrailingDistancePercent, aiRecommendedTrailingDistance);
+        const effectiveTrailingDistancePercent = noiseAdjustedTrailingDistance;
 
         this.logger.debug(
             `[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)}, Profit: ${profitPercent.toFixed(2)}%, SL: -${effectiveStopLossPercent}%, TSL: $${trade.trailingStopPrice.toFixed(8)}`,
@@ -359,6 +414,18 @@ export class PriceMonitorService {
                 trade.trailingStopPrice,
                 trade.telegramChat?.chatId,
             );
+        }
+
+        if (
+            noisePressure.isFakePump &&
+            profitPercent < 15 &&
+            normalizedFreshMarketSignals.buys5mCount <= normalizedFreshMarketSignals.sells5mCount
+        ) {
+            this.logger.warn(
+                `[Slot ${trade.slotNumber}] 🧯 Noise pressure critical for ${trade.tokenMint}. Severity=${noisePressure.severity} Reasons=${noisePressure.reasons.join(',')}. Executing RUGPULL exit.`,
+            );
+            await this.tradeService.executeSell(trade.id, currentPrice, 'RUGPULL');
+            return;
         }
 
         // 1. ANALISIS HOLDER (Insting Intelijen)
