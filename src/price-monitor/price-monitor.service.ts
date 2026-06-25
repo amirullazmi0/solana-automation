@@ -74,6 +74,22 @@ export class PriceMonitorService {
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
 
+    private getNumberConfig(key: string, fallback: number): number {
+        const value = Number.parseFloat(this.configService.get<string>(key, String(fallback)));
+        return Number.isFinite(value) ? value : fallback;
+    }
+
+    private getRouteNumberConfig(
+        route: string | null | undefined,
+        micinKey: string,
+        whaleKey: string,
+        fallbackKey: string,
+        fallback: number,
+    ): number {
+        if (route === 'MICIN') return this.getNumberConfig(micinKey, fallback);
+        if (route === 'WHALE') return this.getNumberConfig(whaleKey, fallback);
+        return this.getNumberConfig(fallbackKey, fallback);
+    }
     private readonly processingTrades = new Set<number>();
 
     private calculateNoisePressure(signals: TradeFreshMarketSignals): { severity: number; reasons: string[]; isFakePump: boolean } {
@@ -366,7 +382,15 @@ export class PriceMonitorService {
     ) {
         const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
 
-        const effectiveStopLossPercent = trade.targetStopLoss ?? this.stopLossPercent;
+        const effectiveStopLossPercent =
+            trade.targetStopLoss ??
+            this.getRouteNumberConfig(
+                trade.route,
+                'MICIN_STOP_LOSS_PERCENT',
+                'WHALE_STOP_LOSS_PERCENT',
+                'STOP_LOSS_PERCENT',
+                this.stopLossPercent,
+            );
         const normalizedFreshMarketSignals: TradeFreshMarketSignals = {
             priceUsd: freshMarketSignals?.priceUsd ?? currentPrice,
             volScore: freshMarketSignals?.volScore ?? 0,
@@ -386,7 +410,21 @@ export class PriceMonitorService {
             normalizedFreshMarketSignals.priceChange1h,
         );
         const baseTrailingDistancePercent =
-            trade.targetTrailingDistance ?? this.trailingDistancePercent;
+            trade.targetTrailingDistance ??
+            this.getRouteNumberConfig(
+                trade.route,
+                'MICIN_TRAILING_DISTANCE_PERCENT',
+                'WHALE_TRAILING_DISTANCE_PERCENT',
+                'TRAILING_DISTANCE_PERCENT',
+                this.trailingDistancePercent,
+            );
+        const trailingActivationPercent = this.getRouteNumberConfig(
+            trade.route,
+            'MICIN_TRAILING_ACTIVATION_PERCENT',
+            'WHALE_TRAILING_ACTIVATION_PERCENT',
+            'TRAILING_ACTIVATION_PERCENT',
+            8,
+        );
         const noiseAdjustedTrailingDistance =
             noisePressure.severity >= 85
                 ? Math.min(baseTrailingDistancePercent, aiRecommendedTrailingDistance, 1.25)
@@ -470,9 +508,17 @@ export class PriceMonitorService {
             return;
         }
 
+        // Route-aware stop loss runs before TP/trailing so loss control is always active.
+        if (profitPercent <= -effectiveStopLossPercent) {
+            this.logger.warn(
+                `[Slot ${trade.slotNumber}] STOP_LOSS triggered before trailing. route=${trade.route ?? 'GLOBAL'} pnl=${profitPercent.toFixed(2)}% sl=${effectiveStopLossPercent}%`,
+            );
+            await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
+            return;
+        }
         // 3. TRAILING STOP LOGIC (Update Peak & TSL)
         // 🚀 Hanya update peak kalau harga sudah naik minimal 5% (Safe Zone)
-        if (currentPrice > trade.highestPrice && profitPercent >= 5) {
+        if (currentPrice > trade.highestPrice && profitPercent >= trailingActivationPercent) {
             const calculatedStop = currentPrice * (1 - effectiveTrailingDistancePercent / 100);
 
             // Jarak trailing stop murni dari peak tanpa floor buatan di awal
@@ -495,7 +541,7 @@ export class PriceMonitorService {
             // Anti-Spam Trailing Alert
             const now = Date.now();
             const lastAlert = this.lastAlertTime.get(trade.tokenMint) || 0;
-            if (profitPercent >= 5 && now - lastAlert > 5 * 60 * 1000) {
+            if (profitPercent >= trailingActivationPercent && now - lastAlert > 5 * 60 * 1000) {
                 await this.reportingService.sendTrailingAlert(
                     trade.tokenMint,
                     newTrailingStop,
@@ -535,8 +581,13 @@ export class PriceMonitorService {
         // 4. EXIT CONDITION: Take Profit or Trailing Stop
         const baseTP =
             trade.targetTakeProfit ??
-            parseFloat(this.configService.get<string>('TAKE_PROFIT_PERCENT', '30.0'));
-
+            this.getRouteNumberConfig(
+                trade.route,
+                'MICIN_TAKE_PROFIT_PERCENT',
+                'WHALE_TAKE_PROFIT_PERCENT',
+                'TAKE_PROFIT_PERCENT',
+                15,
+            );
         // 🚀 DYNAMIC TP: Kalau volume lagi "Sakit" (Surge gede), targetin lebih tinggi
         // Kita butuh volumeSurge dari database (Watchlist) kalau ada, atau kita asumsikan dari momentum
         // Untuk sekarang kita pake multiplier kalau highestPrice naik kenceng

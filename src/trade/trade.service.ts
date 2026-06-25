@@ -113,6 +113,18 @@ export function calculateFinalBuySizeUsd(
     );
 }
 
+export function normalizePriceImpactPct(raw: string | number | null | undefined): number {
+    const numeric = Number(raw);
+    if (!Number.isFinite(numeric)) return 999;
+    if (numeric > 0 && numeric < 1) return numeric * 100;
+    return numeric;
+}
+
+export function capSlippageBps(requestedSlippageBps: number, maxSlippageBps: number): number {
+    const requested = Number.isFinite(requestedSlippageBps) ? requestedSlippageBps : 100;
+    const max = Number.isFinite(maxSlippageBps) && maxSlippageBps > 0 ? maxSlippageBps : 100;
+    return Math.max(1, Math.min(Math.round(requested), Math.round(max)));
+}
 export type BuyRiskMetrics = {
     dailyRealizedPnlUsd: number;
     consecutiveLosses: number;
@@ -445,7 +457,26 @@ export class TradeService implements OnModuleInit {
         const percentageReserve = balanceUsd * reserveRatio;
         return Math.min(Math.max(percentageReserve, minReserveUsd), maxReserveUsd);
     }
-    private getStartOfDayUtc(): Date {
+
+    private getRouteMaxSlippageBps(route?: TradeRoute): number {
+        if (route === 'MICIN') {
+            return this.getNumberConfig('MICIN_MAX_SLIPPAGE_BPS', 300);
+        }
+        if (route === 'WHALE') {
+            return this.getNumberConfig('WHALE_MAX_SLIPPAGE_BPS', 150);
+        }
+        return this.getNumberConfig('SLIPPAGE_BPS', this.slippageBps);
+    }
+
+    private getRouteMaxPriceImpactPct(route?: TradeRoute): number {
+        if (route === 'MICIN') {
+            return this.getNumberConfig('MICIN_MAX_PRICE_IMPACT_PCT', 2.5);
+        }
+        if (route === 'WHALE') {
+            return this.getNumberConfig('WHALE_MAX_PRICE_IMPACT_PCT', 1.0);
+        }
+        return this.getNumberConfig('MAX_PRICE_IMPACT_PCT', 10);
+    }    private getStartOfDayUtc(): Date {
         const d = new Date();
         d.setUTCHours(0, 0, 0, 0);
         return d;
@@ -564,23 +595,29 @@ export class TradeService implements OnModuleInit {
         const effectiveTotalSlots = chatSettings?.totalSlots ?? this.totalSlots;
         const effectivePositionSizeUSD =
             chatSettings?.positionSizeUsd ?? this.positionSizeUSD;
-        const effectiveSlippageBps = chatSettings
+        const requestedSlippageBps = options?.customSlippageBps ?? (chatSettings
             ? Math.max(1, Math.round(chatSettings.slippageOnSol * 10000))
-            : this.slippageBps;
+            : this.slippageBps);
         const wallet = await this.getWallet(telegramChatId);
         const tradeChatDbId = chatRecord?.id;
         const targetChatId = chatRecord?.chatId;
         const reportSymbol = metadata?.symbol || 'UNKNOWN';
         const route = options?.route ?? metadata?.route;
+        const routeMaxSlippageBps = this.getRouteMaxSlippageBps(route);
+        const selectedSlippageBps = capSlippageBps(requestedSlippageBps, routeMaxSlippageBps);
         const aiPositionSizeMultiplier =
             options?.positionSizeMultiplier ?? metadata?.positionSizeMultiplier;
         const aiDecisionSnapshotId =
             options?.aiDecisionSnapshotId ?? metadata?.aiDecisionSnapshotId;
 
         this.logger.log(
-            `[BuyTrace] token=${tokenMint} chat=${telegramChatId} manual=${isManualBuy} dryRun=${effectiveDryRun} slots=${effectiveTotalSlots} positionUsd=${effectivePositionSizeUSD.toFixed(2)}`,
+            `[BuyTrace] token=${tokenMint} chat=${telegramChatId} manual=${isManualBuy} dryRun=${effectiveDryRun} route=${route ?? 'GLOBAL'} slots=${effectiveTotalSlots} basePositionSizeUsd=${effectivePositionSizeUSD.toFixed(2)} requestedSlippageBps=${requestedSlippageBps} selectedSlippageBps=${selectedSlippageBps}`,
         );
-
+        if (selectedSlippageBps < requestedSlippageBps) {
+            this.logger.warn(
+                `[BuyTrace] SLIPPAGE_CAPPED token=${tokenMint} route=${route ?? 'GLOBAL'} requestedSlippageBps=${requestedSlippageBps} selectedSlippageBps=${selectedSlippageBps}`,
+            );
+        }
         const notifyBuyFailure = async (params: {
             reason: string;
             stage?: 'PRE_SWAP' | 'SWAP';
@@ -608,15 +645,6 @@ export class TradeService implements OnModuleInit {
                 );
             }
         };
-
-        if (effectiveDryRun) {
-            const symbol = await this.fetchTokenSymbol(tokenMint);
-            this.logger.log(`[BuyTrace] Dry-run exit for token=${tokenMint} chat=${telegramChatId}`);
-            return {
-                success: true,
-                message: `[DRY_RUN] Signal only. No live swap executed for ${symbol}.`,
-            };
-        }
 
         // 1. Cek apakah sudah punya koin ini (OPEN) atau sedang dalam cooldown
         const recentTrade = await this.prismaService.trade.findFirst({
@@ -669,7 +697,7 @@ export class TradeService implements OnModuleInit {
                 ...(tradeChatDbId ? { telegramChatId: tradeChatDbId } : {}),
             },
         });
-        if (openTradesCount >= effectiveTotalSlots && !customAmountUSD) {
+        if (openTradesCount >= effectiveTotalSlots) {
             this.logger.warn(
                 `[BuyTrace] Blocked by slot limit token=${tokenMint} chat=${telegramChatId} openTrades=${openTradesCount} slots=${effectiveTotalSlots}`,
             );
@@ -774,7 +802,7 @@ export class TradeService implements OnModuleInit {
         const executionPayload: TradeExecutionPayload = {
             tokenMint,
             amountSol: amountInSol,
-            slippage: options?.customSlippageBps || effectiveSlippageBps,
+            slippage: selectedSlippageBps,
             priorityFee: priorityFeeLamports || 0,
             skipPreflight: false,
         };
@@ -817,8 +845,11 @@ export class TradeService implements OnModuleInit {
             }, 0);
             const committedCapitalUsd = openExposureUsd + buyAmountUSD;
             const spendableCapitalUsd = Math.max(balanceUsd - dynamicReserveUsd, 0);
+            this.logger.log(
+                `[BuyTrace] GuardContext token=${tokenMint} route=${route ?? 'GLOBAL'} basePositionSizeUsd=${effectivePositionSizeUSD.toFixed(2)} routeMultiplier=${this.getRouteSizeMultiplier(route).toFixed(3)} aiMultiplier=${sanitizeBuySizeMultiplier(aiPositionSizeMultiplier).toFixed(3)} finalBuyUsd=${buyAmountUSD.toFixed(2)} balanceSol=${balanceSol.toFixed(6)} balanceUsd=${balanceUsd.toFixed(2)} dynamicReserveUsd=${dynamicReserveUsd.toFixed(2)} spendableCapitalUsd=${spendableCapitalUsd.toFixed(2)} openExposureUsd=${openExposureUsd.toFixed(2)} committedCapitalUsd=${committedCapitalUsd.toFixed(2)} requestedSlippageBps=${requestedSlippageBps} selectedSlippageBps=${selectedSlippageBps} maxPriceImpactPct=${this.getRouteMaxPriceImpactPct(route)} dryRun=${effectiveDryRun}`,
+            );
 
-            if (!customAmountUSD && committedCapitalUsd > spendableCapitalUsd) {
+            if (committedCapitalUsd > spendableCapitalUsd) {
                 const msg = `Capital guard blocked buy. Wallet=$${balanceUsd.toFixed(2)}, Spendable=$${spendableCapitalUsd.toFixed(2)}, Reserve=$${dynamicReserveUsd.toFixed(2)}, CommittedAfterBuy=$${committedCapitalUsd.toFixed(2)}.`;
                 this.logger.warn(`[BuyTrace] Blocked by dynamic capital guard token=${tokenMint} chat=${telegramChatId} ${msg}`);
                 await notifyBuyFailure({
@@ -868,16 +899,26 @@ export class TradeService implements OnModuleInit {
                 'BUY',
                 buyAmountUSD,
                 0,
-                options?.customSlippageBps || effectiveSlippageBps,
+                selectedSlippageBps,
                 priorityFeeLamports,
                 wallet,
                 effectiveDryRun,
+                route,
             );
 
         if (success && entryPrice > 0) {
             const finalAmountInSol = actualSol || amountInSol;
             const entryValueUsd = finalAmountInSol * solPrice;
             const symbol = await this.fetchTokenSymbol(tokenMint);
+            if (effectiveDryRun) {
+                this.logger.log(
+                    `[BuyTrace] Dry-run quote validated token=${tokenMint} chat=${telegramChatId} route=${route ?? 'GLOBAL'} finalBuyUsd=${buyAmountUSD.toFixed(2)} entryPrice=${entryPrice}`,
+                );
+                return {
+                    success: true,
+                    message: `[DRY_RUN] Quote validated. No live swap executed for ${symbol}.`,
+                };
+            }
             // Get initial balances for watch addresses
             let initialCreatorBalance = 0;
             let initialTopHolderBalance = 0;
@@ -1386,6 +1427,7 @@ export class TradeService implements OnModuleInit {
         priorityFeeLamports?: number,
         wallet?: Keypair,
         dryRun = false,
+        route?: TradeRoute,
     ): Promise<{
         success: boolean;
         entryPrice: number;
@@ -1425,35 +1467,50 @@ export class TradeService implements OnModuleInit {
                 httpsAgent: this.httpsAgent,
             };
 
-            // 🛠 DYNAMIC SLIPPAGE: Naikin slippage tiap kali gagal
-            let slippage = customSlippageBps || this.slippageBps;
-            if (retryCount > 0) {
-                slippage = Math.min(slippage + retryCount * 250, 2000); // Tambah 2.5% tiap retry, max 20%
-                this.logger.warn(`[Jupiter] Retrying with higher slippage: ${slippage} bps`);
+            const requestedSlippageBps = customSlippageBps || this.slippageBps;
+            let slippage = requestedSlippageBps;
+            if (side === 'BUY') {
+                const routeMaxSlippageBps = this.getRouteMaxSlippageBps(route);
+                const initialSlippage = capSlippageBps(requestedSlippageBps, routeMaxSlippageBps);
+                slippage = initialSlippage;
+                if (initialSlippage < requestedSlippageBps) {
+                    this.logger.warn(
+                        `[Jupiter] SLIPPAGE_CAPPED route=${route ?? 'GLOBAL'} requestedSlippageBps=${requestedSlippageBps} selectedSlippageBps=${initialSlippage}`,
+                    );
+                }
+                if (retryCount > 0) {
+                    const proposedRetrySlippage = initialSlippage + retryCount * 250;
+                    slippage = capSlippageBps(proposedRetrySlippage, routeMaxSlippageBps);
+                    this.logger.warn(
+                        `[Jupiter] Retrying route=${route ?? 'GLOBAL'} proposedSlippageBps=${proposedRetrySlippage} cappedSlippageBps=${slippage}`,
+                    );
+                }
+            } else if (retryCount > 0) {
+                slippage = Math.min(requestedSlippageBps + retryCount * 250, 2000);
+                this.logger.warn(`[Jupiter] Retrying SELL with higher slippage: ${slippage} bps`);
             }
-
             const quoteUrl = `${baseUrl}/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippage}`;
             const quoteResponse = await axios.get(quoteUrl, config);
             const quoteData = quoteResponse.data;
-
-            // 🛡️ PRICE IMPACT GUARD
-            if (side === 'BUY' && quoteData.priceImpactPct) {
-                const priceImpact = parseFloat(quoteData.priceImpactPct);
-                const maxPriceImpact = parseFloat(
-                    this.configService.get<string>('MAX_PRICE_IMPACT_PCT', '15.0'),
+            // PRICE IMPACT GUARD: route-aware and normalized for Jupiter response variants.
+            if (side === 'BUY' && quoteData.priceImpactPct !== undefined) {
+                const rawPriceImpactPct = quoteData.priceImpactPct;
+                const priceImpact = normalizePriceImpactPct(rawPriceImpactPct);
+                const maxPriceImpact = this.getRouteMaxPriceImpactPct(route);
+                this.logger.log(
+                    `[Jupiter] PriceImpact route=${route ?? 'GLOBAL'} rawPriceImpactPct=${rawPriceImpactPct} normalizedPriceImpactPct=${priceImpact.toFixed(4)} maxPriceImpactPct=${maxPriceImpact}`,
                 );
                 if (priceImpact > maxPriceImpact) {
                     this.logger.warn(
-                        `[Jupiter] 🛑 BUY rejected due to high price impact: ${priceImpact}% (Max allowed: ${maxPriceImpact}%)`,
+                        `[Jupiter] BUY rejected due to high price impact: ${priceImpact.toFixed(4)}% (Max allowed: ${maxPriceImpact}%) route=${route ?? 'GLOBAL'}`,
                     );
                     return {
                         success: false,
                         entryPrice: 0,
-                        error: `high_price_impact: ${priceImpact}%`,
+                        error: `PRICE_IMPACT_GUARD: raw=${rawPriceImpactPct}, normalized=${priceImpact.toFixed(4)}%, max=${maxPriceImpact}%`,
                     };
                 }
             }
-
             let price = 0;
             const tokenMintForDecimals = side === 'BUY' ? outputMint : inputMint;
             let decimals: number;

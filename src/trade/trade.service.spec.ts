@@ -1,12 +1,38 @@
 import {
     calculateCleanSwapSolAmount,
     calculateFinalBuySizeUsd,
+    capSlippageBps,
     evaluateBuyRisk,
+    normalizePriceImpactPct,
     PriceAnomalyError,
     validateSellPrice,
 } from './trade.service';
 
 describe('TradeService calculation helpers', () => {
+    describe('normalizePriceImpactPct', () => {
+        it('converts fraction-style Jupiter values to percent', () => {
+            expect(normalizePriceImpactPct('0.012')).toBeCloseTo(1.2);
+        });
+
+        it('keeps percent-style values unchanged', () => {
+            expect(normalizePriceImpactPct('1.2')).toBeCloseTo(1.2);
+        });
+
+        it('returns a high sentinel for invalid values', () => {
+            expect(normalizePriceImpactPct('bad')).toBe(999);
+        });
+    });
+
+    describe('capSlippageBps', () => {
+        it('caps requested slippage by route max', () => {
+            expect(capSlippageBps(500, 300)).toBe(300);
+            expect(capSlippageBps(500, 150)).toBe(150);
+        });
+
+        it('keeps safe requested slippage', () => {
+            expect(capSlippageBps(100, 300)).toBe(100);
+        });
+    });
     describe('validateSellPrice', () => {
         it.each([0.5, 1.0, 2.5, 150])('accepts matching prices at $%s', (price) => {
             expect(validateSellPrice(price, price, 'mint')).toBe(price);
