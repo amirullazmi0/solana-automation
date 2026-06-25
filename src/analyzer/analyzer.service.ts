@@ -444,6 +444,7 @@ export class AnalyzerService {
                 isCTO: rugResult.isCTO,
                 isCommunityTakeover: rugResult.isCTO,
                 whaleSignalScore: whaleSignal.score,
+                route: route === 'WHALE_ROUTE' ? 'WHALE' : 'MICIN',
             };
 
             const micinNoise = this.calculateMicinNoiseRisk({
@@ -518,8 +519,11 @@ export class AnalyzerService {
                         isCommunityTakeover: rugResult.isCTO,
                         tokenName: traction.tokenName || traction.symbol || 'Unknown',
                         whaleSignalScore: whaleSignal.score,
+                        route: finalMetadata.route,
                     },
                 );
+                finalMetadata.positionSizeMultiplier = aiResult.positionSizeMultiplier;
+                finalMetadata.aiDecisionSnapshotId = aiResult.aiDecisionSnapshotId;
 
                 if (aiResult.action !== 'buy' || aiResult.cuanConvictionScore < aiThreshold) {
                     this.logger.debug(

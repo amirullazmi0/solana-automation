@@ -855,7 +855,13 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                 tokenMint,
                                 result.metadata,
                                 undefined,
-                                undefined,
+                                {
+                                    route: result.metadata?.route,
+                                    positionSizeMultiplier:
+                                        result.metadata?.positionSizeMultiplier,
+                                    aiDecisionSnapshotId:
+                                        result.metadata?.aiDecisionSnapshotId,
+                                },
                                 chat.chatId,
                             );
 

@@ -17,6 +17,11 @@ enum TradeMode {
   PAPER
 }
 
+enum TradeRoute {
+  MICIN
+  WHALE
+}
+
 enum TelegramChatType {
   PRIVATE
   GROUP
@@ -141,6 +146,8 @@ model Trade {
   entryValueUsd           Float?
   status                  TradeStatus @default(OPEN)
   mode                    TradeMode   @default(LIVE)
+  route                   TradeRoute?
+  aiDecisionSnapshotId    Int?
   amountInSol             Float
   buyTxHash               String?
   sellTxHash              String?
@@ -158,11 +165,26 @@ model Trade {
   targetStopLoss          Float?
   targetTrailingDistance  Float?
   telegramChat            TelegramChat? @relation(fields: [telegramChatId], references: [id], onDelete: SetNull)
+  aiDecisionSnapshot      AiDecisionSnapshot? @relation(fields: [aiDecisionSnapshotId], references: [id], onDelete: SetNull)
 
   @@index([status])
   @@index([mode, status])
+  @@index([route, status, mode])
   @@index([tokenMint, createdAt])
   @@index([telegramChatId, status, mode])
+}
+
+model AiDecisionSnapshot {
+  id        Int         @id @default(autoincrement())
+  tokenMint String
+  route     TradeRoute
+  metrics   Json
+  result    Json
+  createdAt DateTime    @default(now())
+  trades    Trade[]
+
+  @@index([tokenMint, createdAt])
+  @@index([route, createdAt])
 }
 
 enum WatchlistStatus {

@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
+import { validateConfig } from './config/runtime-config';
 import * as dns from 'dns';
 
 // FORCE Google & Cloudflare DNS to bypass ISP blocks and Windows ENOTFOUND issues
@@ -10,6 +11,15 @@ async function bootstrap() {
     console.log('[DEBUG] Starting NestJS Bootstrap...');
     const app = await NestFactory.create(AppModule);
     const configService = app.get(ConfigService);
+    const configErrors = validateConfig(configService);
+    if (configErrors.length > 0) {
+        console.error('[CONFIG] Invalid runtime configuration:');
+        for (const error of configErrors) {
+            console.error(`[CONFIG] - ${error}`);
+        }
+        await app.close();
+        process.exit(1);
+    }
 
     // 🛡️ GRACEFUL SHUTDOWN: Biar in-progress sell bisa selesai sebelum restart
     app.enableShutdownHooks();

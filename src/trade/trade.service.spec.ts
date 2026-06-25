@@ -1,5 +1,6 @@
 import {
     calculateCleanSwapSolAmount,
+    calculateFinalBuySizeUsd,
     evaluateBuyRisk,
     PriceAnomalyError,
     validateSellPrice,
@@ -45,6 +46,17 @@ describe('TradeService calculation helpers', () => {
         it('returns null when fees exceed the raw SOL delta', () => {
             const result = calculateCleanSwapSolAmount(100, 50, 50, 1);
             expect(result.cleanSolAmount).toBeNull();
+        });
+    });
+
+    describe('calculateFinalBuySizeUsd', () => {
+        it('applies route and AI multipliers', () => {
+            expect(calculateFinalBuySizeUsd(3, 0.7, 0.5)).toBeCloseTo(1.05);
+            expect(calculateFinalBuySizeUsd(3, 1, 1)).toBeCloseTo(3);
+        });
+
+        it('clamps unsafe multipliers', () => {
+            expect(calculateFinalBuySizeUsd(3, 0, 5)).toBeCloseTo(0.3);
         });
     });
 

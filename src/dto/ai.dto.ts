@@ -27,6 +27,7 @@ export interface AIAnalysisMetrics {
     creatorTokensCreated?: number;
     creatorRuggedTokens?: number;
     creatorRiskScore?: number;
+    route?: 'MICIN' | 'WHALE';
 }
 
 export interface AIAnalysisResult {
@@ -37,6 +38,7 @@ export interface AIAnalysisResult {
     action: 'buy' | 'skip';
     positionSizeMultiplier: number;
     customTrailingBaseDistance?: number;
+    aiDecisionSnapshotId?: number;
 }
 
 export interface AIThresholdSnapshot {

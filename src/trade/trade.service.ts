@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
-import { Trade as PrismaTrade } from '@prisma/client';
+import { Trade as PrismaTrade, TradeRoute } from '@prisma/client';
 import {
     Connection,
     Keypair,
@@ -95,6 +95,24 @@ export function calculateCleanSwapSolAmount(
     };
 }
 
+export function sanitizeBuySizeMultiplier(value: number | undefined, fallback = 1): number {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return fallback;
+    return Math.min(Math.max(numeric, 0.1), 1);
+}
+
+export function calculateFinalBuySizeUsd(
+    baseSizeUsd: number,
+    routeMultiplier: number,
+    aiMultiplier: number | undefined,
+): number {
+    return (
+        baseSizeUsd *
+        sanitizeBuySizeMultiplier(routeMultiplier) *
+        sanitizeBuySizeMultiplier(aiMultiplier)
+    );
+}
+
 export type BuyRiskMetrics = {
     dailyRealizedPnlUsd: number;
     consecutiveLosses: number;
@@ -106,6 +124,17 @@ export type BuyRiskConfig = {
     dailyMaxLossUsd: number; // blocks when daily PnL <= -dailyMaxLossUsd
     maxConsecutiveLosses: number; // blocks when consecutiveLosses >= limit
     maxDrawdownPct: number; // blocks when total PnL <= -(totalCapital * pct/100)
+};
+
+export type BuyExecutionOptions = {
+    customSlippageBps?: number;
+    priorityFeeSol?: number;
+    targetTakeProfit?: number;
+    targetStopLoss?: number;
+    targetTrailingDistance?: number;
+    route?: TradeRoute;
+    positionSizeMultiplier?: number;
+    aiDecisionSnapshotId?: number;
 };
 
 export function evaluateBuyRisk(
@@ -149,6 +178,8 @@ export class TradeService implements OnModuleInit {
     private readonly reserveAmount: number;
     private readonly totalSlots: number;
     private readonly positionSizeUSD: number;
+    private readonly micinPositionSizeMultiplier: number;
+    private readonly whalePositionSizeMultiplier: number;
     private readonly slippageBps: number;
     private readonly jupiterApiKey: string;
     private readonly httpsAgent: https.Agent;
@@ -183,6 +214,12 @@ export class TradeService implements OnModuleInit {
         this.totalSlots = Number.parseInt(this.configService.get<string>('TOTAL_SLOTS', '4'), 10);
         this.positionSizeUSD = Number.parseFloat(
             this.configService.get<string>('POSITION_SIZE_USD', '3'),
+        );
+        this.micinPositionSizeMultiplier = Number.parseFloat(
+            this.configService.get<string>('MICIN_POSITION_SIZE_MULTIPLIER', '0.7'),
+        );
+        this.whalePositionSizeMultiplier = Number.parseFloat(
+            this.configService.get<string>('WHALE_POSITION_SIZE_MULTIPLIER', '1'),
         );
 
         this.slippageBps = Number.parseInt(
@@ -370,14 +407,41 @@ export class TradeService implements OnModuleInit {
         return rows[0] || {};
     }
 
+    private sanitizeSizeMultiplier(value: number | undefined, fallback = 1): number {
+        return sanitizeBuySizeMultiplier(value, fallback);
+    }
+
+    private getRouteSizeMultiplier(route?: TradeRoute): number {
+        if (route === 'MICIN') {
+            return this.sanitizeSizeMultiplier(this.micinPositionSizeMultiplier);
+        }
+        if (route === 'WHALE') {
+            return this.sanitizeSizeMultiplier(this.whalePositionSizeMultiplier);
+        }
+        return 1;
+    }
+
+    private applyFinalSize(
+        baseSizeUsd: number,
+        route?: TradeRoute,
+        aiMultiplier?: number,
+    ): number {
+        const routeMultiplier = this.getRouteSizeMultiplier(route);
+        return calculateFinalBuySizeUsd(baseSizeUsd, routeMultiplier, aiMultiplier);
+    }
+
     private getStartOfDayUtc(): Date {
         const d = new Date();
         d.setUTCHours(0, 0, 0, 0);
         return d;
     }
 
-    private async getBuyRiskMetrics(maxConsecutiveLosses: number): Promise<BuyRiskMetrics> {
+    private async getBuyRiskMetrics(
+        maxConsecutiveLosses: number,
+        route?: TradeRoute,
+    ): Promise<BuyRiskMetrics> {
         const dayStart = this.getStartOfDayUtc();
+        const routeWhere = route ? { route } : {};
 
         const [dailyAgg, totalAgg, recentClosed] = await Promise.all([
             this.prismaService.trade.aggregate({
@@ -390,7 +454,7 @@ export class TradeService implements OnModuleInit {
             }),
             maxConsecutiveLosses > 0
                 ? this.prismaService.trade.findMany({
-                      where: { status: 'CLOSED', mode: 'LIVE' },
+                      where: { status: 'CLOSED', mode: 'LIVE', ...routeWhere },
                       orderBy: { updatedAt: 'desc' },
                       take: Math.min(maxConsecutiveLosses, 50),
                       select: { profitUsd: true },
@@ -463,13 +527,7 @@ export class TradeService implements OnModuleInit {
         tokenMint: string,
         metadata?: TokenMetadata,
         customAmountUSD?: number,
-        options?: {
-            customSlippageBps?: number;
-            priorityFeeSol?: number;
-            targetTakeProfit?: number;
-            targetStopLoss?: number;
-            targetTrailingDistance?: number;
-        },
+        options?: BuyExecutionOptions,
         telegramChatId?: string,
     ): Promise<{ success: boolean; message: string }> {
         if (!telegramChatId) {
@@ -498,6 +556,11 @@ export class TradeService implements OnModuleInit {
         const tradeChatDbId = chatRecord?.id;
         const targetChatId = chatRecord?.chatId;
         const reportSymbol = metadata?.symbol || 'UNKNOWN';
+        const route = options?.route ?? metadata?.route;
+        const aiPositionSizeMultiplier =
+            options?.positionSizeMultiplier ?? metadata?.positionSizeMultiplier;
+        const aiDecisionSnapshotId =
+            options?.aiDecisionSnapshotId ?? metadata?.aiDecisionSnapshotId;
 
         this.logger.log(
             `[BuyTrace] token=${tokenMint} chat=${telegramChatId} manual=${isManualBuy} dryRun=${effectiveDryRun} slots=${effectiveTotalSlots} positionUsd=${effectivePositionSizeUSD.toFixed(2)}`,
@@ -621,7 +684,8 @@ export class TradeService implements OnModuleInit {
         }
 
         // Use custom amount if provided, otherwise use config
-        const buyAmountUSD = customAmountUSD || effectivePositionSizeUSD;
+        const buyAmountUSD =
+            customAmountUSD ?? this.applyFinalSize(effectivePositionSizeUSD, route, aiPositionSizeMultiplier);
         const committedCapitalUsd = openTradesCount * effectivePositionSizeUSD + buyAmountUSD;
         const spendableCapitalUsd = Math.max(this.totalCapital - this.reserveAmount, 0);
         if (!customAmountUSD && committedCapitalUsd > spendableCapitalUsd) {
@@ -654,14 +718,24 @@ export class TradeService implements OnModuleInit {
                 this.configService.get<string>('DAILY_MAX_LOSS_USD', '0'),
             );
             const maxConsecutiveLosses = Number.parseInt(
-                this.configService.get<string>('MAX_CONSECUTIVE_LOSSES', '0'),
+                route === 'MICIN'
+                    ? this.configService.get<string>(
+                          'MICIN_MAX_CONSECUTIVE_LOSSES',
+                          this.configService.get<string>('MAX_CONSECUTIVE_LOSSES', '0'),
+                      )
+                    : route === 'WHALE'
+                      ? this.configService.get<string>(
+                            'WHALE_MAX_CONSECUTIVE_LOSSES',
+                            this.configService.get<string>('MAX_CONSECUTIVE_LOSSES', '0'),
+                        )
+                      : this.configService.get<string>('MAX_CONSECUTIVE_LOSSES', '0'),
                 10,
             );
             const maxDrawdownPct = Number.parseFloat(
                 this.configService.get<string>('MAX_DRAWDOWN_PCT', '0'),
             );
 
-            const metrics = await this.getBuyRiskMetrics(maxConsecutiveLosses);
+            const metrics = await this.getBuyRiskMetrics(maxConsecutiveLosses, route);
             const decision = evaluateBuyRisk(
                 metrics,
                 {
@@ -678,6 +752,7 @@ export class TradeService implements OnModuleInit {
             if (!decision.allowed) {
                 const msg =
                     `Risk breaker blocked buy (${decision.reason}). ` +
+                    `route=${route ?? 'GLOBAL'}, ` +
                     `dailyPnL=$${metrics.dailyRealizedPnlUsd.toFixed(2)}, ` +
                     `consecutiveLosses=${metrics.consecutiveLosses}, ` +
                     `totalPnL=$${metrics.totalRealizedPnlUsd.toFixed(2)}.`;
@@ -763,7 +838,7 @@ export class TradeService implements OnModuleInit {
         }
 
         this.logger.log(
-            `[Slot ${slotToUse}] Attempting to buy ${tokenMint} with $${buyAmountUSD} (${amountInSol.toFixed(4)} SOL)`,
+            `[Slot ${slotToUse}] Attempting to buy ${tokenMint} route=${route ?? 'GLOBAL'} with $${buyAmountUSD.toFixed(2)} (${amountInSol.toFixed(4)} SOL)`,
         );
 
         const { success, entryPrice, error, txHash, actualSol, actualTokens, totalFeesSol } =
@@ -807,6 +882,8 @@ export class TradeService implements OnModuleInit {
                     trailingStopPrice: 0, // PriceMonitor activates it once the position is in profit.
                     status: 'OPEN',
                     mode: 'LIVE',
+                    route,
+                    aiDecisionSnapshotId,
                     amountInSol: finalAmountInSol,
                     buyTxHash: txHash || null,
                     entryLiquidity: metadata?.liquidity || 0,

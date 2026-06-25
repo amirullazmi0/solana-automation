@@ -1,6 +1,7 @@
 ﻿import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import { PrismaService } from '../prisma/prisma.service';
 import {
     AIAnalysisMetrics,
     AIAnalysisResult,
@@ -19,7 +20,10 @@ export class AIService {
     private readonly cache = new Map<string, CacheEntry>();
     private readonly cacheTTLMs = 10 * 60 * 1000;
 
-    constructor(private readonly configService: ConfigService) {}
+    constructor(
+        private readonly configService: ConfigService,
+        private readonly prismaService: PrismaService,
+    ) {}
 
     private getNumberConfig(key: string, fallback: number): number {
         const value = Number.parseFloat(this.configService.get<string>(key, String(fallback)));
@@ -81,6 +85,45 @@ export class AIService {
             return 0;
         }
         return score ?? 0;
+    }
+
+    private resolveRoute(metrics: AIAnalysisMetrics): 'MICIN' | 'WHALE' {
+        return metrics.route ?? (metrics.ageHours >= 2 ? 'WHALE' : 'MICIN');
+    }
+
+    private formatRouteLabel(route: 'MICIN' | 'WHALE'): 'MICIN_ROUTE' | 'WHALE_ROUTE' {
+        return route === 'WHALE' ? 'WHALE_ROUTE' : 'MICIN_ROUTE';
+    }
+
+    private async saveDecisionSnapshot(
+        tokenMint: string,
+        route: 'MICIN' | 'WHALE',
+        metrics: AIAnalysisMetrics,
+        result: AIAnalysisResult,
+    ): Promise<number | undefined> {
+        try {
+            const snapshot = await this.prismaService.aiDecisionSnapshot.create({
+                data: {
+                    tokenMint,
+                    route,
+                    metrics: metrics as unknown as object,
+                    result: {
+                        cuanConvictionScore: result.cuanConvictionScore,
+                        predictedPumpPercentage: result.predictedPumpPercentage,
+                        confidenceLevel: result.confidenceLevel,
+                        reasoning: result.reasoning,
+                        action: result.action,
+                        positionSizeMultiplier: result.positionSizeMultiplier,
+                        customTrailingBaseDistance: result.customTrailingBaseDistance,
+                    },
+                },
+            });
+            return snapshot.id;
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[AI TRACE] Failed to save decision snapshot for ${tokenMint}: ${msg}`);
+            return undefined;
+        }
     }
 
     private sanitizePositionSizeMultiplier(value?: number): number {
@@ -201,10 +244,18 @@ export class AIService {
         symbol: string,
         metrics: AIAnalysisMetrics,
     ): Promise<AIAnalysisResult> {
+        const route = this.resolveRoute(metrics);
+        const routeLabel = this.formatRouteLabel(route);
         const cached = this.cache.get(tokenMint);
         if (cached && cached.expiresAt > Date.now()) {
             this.logger.debug(`[${tokenMint}] Serving AI analysis from cache.`);
-            return cached.result;
+            const aiDecisionSnapshotId = await this.saveDecisionSnapshot(
+                tokenMint,
+                route,
+                metrics,
+                cached.result,
+            );
+            return { ...cached.result, aiDecisionSnapshotId };
         }
 
         const apiKey = this.configService.get<string>('OPENAI_API_KEY');
@@ -224,7 +275,6 @@ export class AIService {
         const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
         const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
         const thresholds = this.getThresholdSnapshot();
-        const route = metrics.ageHours >= 2 ? 'WHALE_ROUTE' : 'MICIN_ROUTE';
 
         this.logger.log(`🧠 Calling AI Model (${model}) to analyze token $${symbol} (${tokenMint})...`);
 
@@ -244,7 +294,7 @@ Return a JSON object with exactly these fields:
 }
 	Live runtime thresholds and route context:
 	- PIPELINE_MODE=${thresholds.botMode}
-	- ROUTE=${route}
+	- ROUTE=${routeLabel}
 	- MARKET_REGIME=${thresholds.marketRegime}
 	- AI_CONVICTION_THRESHOLD=${thresholds.aiConvictionThreshold}
 	- MIN_LIQUIDITY_USD=${thresholds.minLiquidityUsd}
@@ -317,7 +367,7 @@ Return a JSON object with exactly these fields:
 
             const userPrompt = `Token Symbol: $${symbol}
 Mint Address: ${tokenMint}
-Route: ${route}
+Route: ${routeLabel}
 - Social & Narrative Profile:
 	- Token Name: ${tokenName}
 	- Website: ${socialStatus.website}
@@ -383,9 +433,15 @@ Evaluate against the live thresholds above and return the JSON decision.`;
 
             const parsed = JSON.parse(content) as Partial<AIAnalysisResult>;
             const result = this.normalizeAnalysisResult(parsed, thresholds);
+            result.aiDecisionSnapshotId = await this.saveDecisionSnapshot(
+                tokenMint,
+                route,
+                metrics,
+                result,
+            );
 
             this.cache.set(tokenMint, {
-                result,
+                result: { ...result, aiDecisionSnapshotId: undefined },
                 expiresAt: Date.now() + this.cacheTTLMs,
             });
 
@@ -393,7 +449,7 @@ Evaluate against the live thresholds above and return the JSON decision.`;
             this.logger.log(
                 [
                     `[AI TRACE DECISION] Token: $${symbol} | Mint: ${tokenMint.slice(0, 6)}...${tokenMint.slice(-4)} (PUMP.FUN: ${metrics.isPumpFun ? 'YES' : 'NO'})`,
-                    `Route Context: ${route}`,
+                    `Route Context: ${routeLabel}`,
                     `Macro Regime Context: ${thresholds.marketRegime.toUpperCase()}`,
                     `Matrix Price Velocity: 5m(${(metrics.priceChange5mPct ?? 0).toFixed(2)}%) | 15m(${(metrics.priceChange15mPct ?? 0).toFixed(2)}%) | 1h(${metrics.priceChange1hPct.toFixed(2)}%)`,
                     `Whale Signal Score: ${metrics.whaleSignalScore ?? 0}/100`,
@@ -407,7 +463,7 @@ Evaluate against the live thresholds above and return the JSON decision.`;
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`AI analysis call failed: ${msg}`);
-            return {
+            const fallbackResult: AIAnalysisResult = {
                 cuanConvictionScore: 0,
                 predictedPumpPercentage: 0,
                 confidenceLevel: 'low',
@@ -416,8 +472,17 @@ Evaluate against the live thresholds above and return the JSON decision.`;
                 positionSizeMultiplier: 1,
                 customTrailingBaseDistance: this.getTrailingDistanceConfig(),
             };
+            fallbackResult.aiDecisionSnapshotId = await this.saveDecisionSnapshot(
+                tokenMint,
+                route,
+                metrics,
+                fallbackResult,
+            );
+            return fallbackResult;
         }
     }
 }
+
+
 
 

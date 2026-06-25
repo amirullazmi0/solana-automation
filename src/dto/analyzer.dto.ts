@@ -44,6 +44,9 @@ export interface TokenMetadata {
     hasTelegram?: boolean;
     isDexPaidUpdated?: boolean;
     whaleSignalScore?: number;
+    route?: 'MICIN' | 'WHALE';
+    positionSizeMultiplier?: number;
+    aiDecisionSnapshotId?: number;
     socials?: {
         twitter?: string;
         telegram?: string;
