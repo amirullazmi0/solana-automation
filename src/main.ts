@@ -1,4 +1,5 @@
 import { NestFactory } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import * as dns from 'dns';
 
@@ -8,11 +9,12 @@ dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
 async function bootstrap() {
     console.log('[DEBUG] Starting NestJS Bootstrap...');
     const app = await NestFactory.create(AppModule);
+    const configService = app.get(ConfigService);
 
     // 🛡️ GRACEFUL SHUTDOWN: Biar in-progress sell bisa selesai sebelum restart
     app.enableShutdownHooks();
 
-    const port = Number(process.env.PORT ?? 3000);
+    const port = Number.parseInt(configService.get<string>('PORT', '3000'), 10) || 3000;
     console.log(`[DEBUG] Attempting to listen on port ${port}...`);
 
     await app.listen(port);

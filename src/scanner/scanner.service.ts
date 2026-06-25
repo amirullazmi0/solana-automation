@@ -94,7 +94,6 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     onModuleInit() {
         const wssEndpoint = this.configService.get<string>('WSS_ENDPOINT');
         const rpcEndpoint = this.getSolanaRpcUrl();
-        const botMode = this.configService.get<string>('BOT_MODE', 'micin');
 
         if (!wssEndpoint || !rpcEndpoint) {
             this.logger.error('RPC or WSS endpoints not configured. Scanner will not start.');
@@ -106,15 +105,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             commitment: 'confirmed',
         });
 
-        this.logger.log(`🤖 Bot Mode: ${botMode.toUpperCase()}`);
-
-        if (botMode === 'micin') {
-            // 1. Start WebSocket Discovery (Pump.fun Migrations) — ONLY in micin mode
-            this.initPumpPortalWS();
-            this.logger.log('🔌 PumpPortal WS ENABLED (Micin Sniper Mode)');
-        } else {
-            this.logger.log('🐋 PumpPortal WS DISABLED (Second Whale Mode — DexScreener Only)');
-        }
+        this.logger.log('🤖 Hybrid Pipeline: internal routing enabled (MICIN_ROUTE / WHALE_ROUTE)');
+        this.initPumpPortalWS();
+        this.logger.log('🔌 PumpPortal WS ENABLED (Hybrid Discovery)');
 
         // 2. Start Polling Discovery (DexScreener — Always Active)
         this.startDiscoveryPolling();
@@ -790,9 +783,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         : 0;
 
                     const isCTO = result.metadata?.isCTO || false;
-                    const botMode = this.configService.get<string>('BOT_MODE', 'micin');
-                    const minAgeForNotif = botMode === 'micin' ? 0.05 : 1.5;
-                    const minMcapForNotif = botMode === 'micin' ? 5000 : 20000;
+                    const route = ageHours < 2 ? 'MICIN_ROUTE' : 'WHALE_ROUTE';
+                    const minAgeForNotif = route === 'MICIN_ROUTE' ? 0.05 : 1.5;
+                    const minMcapForNotif = route === 'MICIN_ROUTE' ? 5000 : 20000;
 
                     if (
                         !localNotified &&
@@ -812,7 +805,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         );
                         localNotified = true;
                         this.notifiedTokens.set(tokenMint, Date.now());
-                        this.logger.log(`[${tokenMint}] 🔔 Telegram Alert sent! (isCTO: ${isCTO})`);
+                        this.logger.log(
+                            `[${tokenMint}] 🔔 Telegram Alert sent! [ROUTE: ${route}] (isCTO: ${isCTO})`,
+                        );
                     }
 
                     if (result.safe) {

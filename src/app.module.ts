@@ -11,12 +11,14 @@ import { TradeModule } from './trade/trade.module';
 import { PriceMonitorModule } from './price-monitor/price-monitor.module';
 import { AIModule } from './ai/ai.module';
 import { TelegramModule } from './telegram/telegram.module';
+import { loadRuntimeConfig } from './config/runtime-config';
 
 @Module({
     imports: [
         ConfigModule.forRoot({
             isGlobal: true,
             envFilePath: '.env',
+            load: [loadRuntimeConfig],
         }),
         ScheduleModule.forRoot(),
         PrismaModule,

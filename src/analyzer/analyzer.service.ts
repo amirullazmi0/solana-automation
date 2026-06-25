@@ -222,8 +222,12 @@ export class AnalyzerService {
             reasons.push('liquidity-ok');
         }
 
-        score = Math.max(0, Math.min(100, Math.round(score)));
+        score = Math.max(-100, Math.min(100, Math.round(score)));
         return { score, reasons, narrativeLabel: narrative.label };
+    }
+
+    private resolveRoute(ageHours: number): 'MICIN_ROUTE' | 'WHALE_ROUTE' {
+        return ageHours < 2 ? 'MICIN_ROUTE' : 'WHALE_ROUTE';
     }
 
     private calculateMicinNoiseRisk(input: {
@@ -410,10 +414,12 @@ export class AnalyzerService {
             const whaleSignalFloor = Number.parseFloat(
                 this.configService.get<string>('WHALE_SIGNAL_SCORE_FLOOR', '45'),
             );
+            const ageHours = traction.pairCreatedAt
+                ? (Date.now() - traction.pairCreatedAt) / (1000 * 60 * 60)
+                : 0;
+            const route = this.resolveRoute(ageHours);
             const whaleSignal = this.calculateWhaleSignalScore({
-                ageHours: traction.pairCreatedAt
-                    ? (Date.now() - traction.pairCreatedAt) / (1000 * 60 * 60)
-                    : 0,
+                ageHours,
                 liquidityUsd: traction.liquidity || 0,
                 marketCapUsd: traction.marketCap || 0,
                 volumeSurge: traction.volumeSurge,
@@ -440,7 +446,6 @@ export class AnalyzerService {
                 whaleSignalScore: whaleSignal.score,
             };
 
-            const botMode = this.configService.get<string>('BOT_MODE', 'micin');
             const micinNoise = this.calculateMicinNoiseRisk({
                 volumeSurge: traction.volumeSurge,
                 volScore: traction.volScore,
@@ -451,9 +456,9 @@ export class AnalyzerService {
                 buys5mCount: traction.buys5m || 0,
                 sells5mCount: traction.sells5m || 0,
             });
-            if (botMode === 'micin' && micinNoise.isFakePump) {
+            if (route === 'MICIN_ROUTE' && micinNoise.isFakePump) {
                 this.logger.warn(
-                    `[${tokenMint}] Micin noise gate blocked token. Severity=${micinNoise.severity}, Reasons=${micinNoise.reasons.join(',')}.`,
+                    `[${tokenMint}] [ROUTE: ${route}] Micin noise gate blocked token. Severity=${micinNoise.severity}, Reasons=${micinNoise.reasons.join(',')}.`,
                 );
                 return {
                     safe: false,
@@ -462,16 +467,9 @@ export class AnalyzerService {
                     metadata: baseMetadata,
                 };
             }
-            if (
-                botMode === 'whale' &&
-                traction.pairCreatedAt &&
-                (Date.now() - traction.pairCreatedAt) / (1000 * 60 * 60) >= 4 &&
-                !baseMetadata.hasTwitter &&
-                !baseMetadata.hasTelegram &&
-                whaleSignal.score < whaleSignalFloor
-            ) {
+            if (route === 'WHALE_ROUTE' && !baseMetadata.hasTwitter && !baseMetadata.hasTelegram && whaleSignal.score < whaleSignalFloor) {
                 this.logger.warn(
-                    `[${tokenMint}] Whale signal gate blocked token. Score=${whaleSignal.score}, Floor=${whaleSignalFloor}, Socials=empty.`,
+                    `[${tokenMint}] [ROUTE: ${route}] Whale signal gate blocked token. Score=${whaleSignal.score}, Floor=${whaleSignalFloor}, Socials=empty.`,
                 );
                 return {
                     safe: false,
@@ -525,7 +523,7 @@ export class AnalyzerService {
 
                 if (aiResult.action !== 'buy' || aiResult.cuanConvictionScore < aiThreshold) {
                     this.logger.debug(
-                        `[${tokenMint}] AI rejected signal. Score=${aiResult.cuanConvictionScore}, Threshold=${aiThreshold}, Action=${aiResult.action}.`,
+                        `[${tokenMint}] [ROUTE: ${route}] AI rejected signal. Score=${aiResult.cuanConvictionScore}, Threshold=${aiThreshold}, Action=${aiResult.action}.`,
                     );
                     return {
                         safe: false,
@@ -536,7 +534,7 @@ export class AnalyzerService {
             }
 
             this.logger.log(
-                `[${tokenMint}] ✅ Passed Advanced Filters (VoL: ${traction.volScore?.toFixed(3)}, Z: ${traction.zScore?.toFixed(1)}, Safety: ${rugResult.safetyIndex?.toFixed(2)}, isCTO: ${rugResult.isCTO}). Ready!`,
+                `[${tokenMint}] ✅ [ROUTE: ${route}] Passed Advanced Filters (VoL: ${traction.volScore?.toFixed(3)}, Z: ${traction.zScore?.toFixed(1)}, Safety: ${rugResult.safetyIndex?.toFixed(2)}, isCTO: ${rugResult.isCTO}). Ready!`,
             );
             return {
                 safe: true,

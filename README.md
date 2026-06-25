@@ -472,12 +472,12 @@ yarn deploy:vps
 
 ---
 
-## Bot Modes and Simulation
+## Pipeline and Simulation
 
 | Mode / Parameter | Discovery & Behavior | Keterangan |
 |------------------|----------------------|------------|
-| `BOT_MODE=whale` | DexScreener + social/narrative gate | Polling koin mapan dengan filter komunitas dan narasi |
-| `BOT_MODE=micin` | PumpPortal WS + DexScreener + Helius webhook | Menangkap koin baru dan migration instan |
+| `Hybrid pipeline` | Internal routing based on token age | `MICIN_ROUTE` untuk token < 2 jam, `WHALE_ROUTE` untuk token >= 2 jam |
+| `config.json` | Non-secret thresholds and strategy tuning | Angka filter, sizing, dan regime diambil dari sini |
 | `dryRun=true` | Signal-only mode | Live swaps di-skip |
 | `dryRun=false` | Live Wallet Execution | Live swaps diizinkan untuk chat itu |
 

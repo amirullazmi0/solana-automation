@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+﻿import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import {
@@ -162,7 +162,7 @@ export class AIService {
             this.configService.get<string>('DISABLE_SL_PATIENCE', 'false') === 'true';
 
         return {
-            botMode: this.configService.get<string>('BOT_MODE', 'micin'),
+            botMode: 'hybrid',
             aiConvictionThreshold: this.getNumberConfig('AI_CONVICTION_THRESHOLD', 75),
             minLiquidityUsd: this.getNumberConfig('MIN_LIQUIDITY_USD', 7500),
             minVolumeUsd: this.getNumberConfig('MIN_VOLUME_USD', 500),
@@ -224,12 +224,13 @@ export class AIService {
         const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
         const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
         const thresholds = this.getThresholdSnapshot();
+        const route = metrics.ageHours >= 2 ? 'WHALE_ROUTE' : 'MICIN_ROUTE';
 
         this.logger.log(`🧠 Calling AI Model (${model}) to analyze token $${symbol} (${tokenMint})...`);
 
         try {
             const systemPrompt = `You are MaSoul Sniper's AI Conviction Engine, an expert Solana on-chain analyst and quantitative memecoin trader.
-You are NOT the primary filter. The deterministic NestJS filters already ran before this call. Your job is the final sanity-check and conviction score using the live .env thresholds below.
+You are the final judge. The deterministic NestJS filters already ran before this call. Your job is the final sanity-check and conviction score using the live runtime thresholds below.
 
 Return a JSON object with exactly these fields:
 {
@@ -241,8 +242,9 @@ Return a JSON object with exactly these fields:
   "positionSizeMultiplier": <number between 0.1 and 1.0 based on asset short-term risks vs velocity>,
   "customTrailingBaseDistance": <number, optional custom recommended base trailing distance percent>
 }
-	Live .env thresholds and mode:
-	- BOT_MODE=${thresholds.botMode}
+	Live runtime thresholds and route context:
+	- PIPELINE_MODE=${thresholds.botMode}
+	- ROUTE=${route}
 	- MARKET_REGIME=${thresholds.marketRegime}
 	- AI_CONVICTION_THRESHOLD=${thresholds.aiConvictionThreshold}
 	- MIN_LIQUIDITY_USD=${thresholds.minLiquidityUsd}
@@ -280,12 +282,13 @@ Return a JSON object with exactly these fields:
 	3. Creator Profile Rules: Heavily penalize or enforce an absolute "skip" if the creator has a high historical "rugged tokens" count or if the "creator risk score" is critical.
 	4. If MARKET_REGIME is bearish_chaos, be extremely conservative, restrict scores, and penalize volatile assets by reducing positionSizeMultiplier (0.1 to 0.5).
 	5. If MARKET_REGIME is bullish_gas, you may be more permissive to high-momentum tokens, but still respect risk baselines.
-	6. Narrative & Social Rubric: For BOT_MODE=whale, or any token older than 4 hours, prefer a credible social footprint. If Telegram and Twitter are both missing, treat it as a major red flag and penalize the conviction score because the token likely lacks community foundation. If only one of Twitter/Telegram exists, apply a smaller penalty and rely more on on-chain confirmation before returning BUY. Reward signs of Community Takeover (CTO), but do not overrule obvious risk signals.
+	6. Narrative & Social Rubric: For ROUTE=WHALE_ROUTE, or any token older than 2 hours, prefer a credible social footprint. If Telegram and Twitter are both missing, treat it as a major red flag and penalize the conviction score because the token likely lacks community foundation. If only one of Twitter/Telegram exists, apply a smaller penalty and rely more on on-chain confirmation before returning BUY. Reward signs of Community Takeover (CTO), but do not overrule obvious risk signals.
 	7. Meta Awareness: Use Token Name to infer the current narrative/meta (e.g. AI, Cat, Dog, Politics, Celebrity, Meme, Solana-native). If the name aligns with a high-momentum crypto trend and the token also has active socials, slightly boost conviction. If the name is generic or socially silent, do not invent narrative strength.
-	8. Social quality matters more than raw quantity in whale mode: website alone is not enough; Twitter and Telegram are the strongest community signals, but a single credible social plus strong on-chain confirmation can still be acceptable. Treat website as a bonus.
-	9. Deterministic Whale Signal Score: Treat the supplied Whale Signal Score as the anchor pre-filter in whale mode. High score means the token has stronger community, narrative, and resilience signals; low score means the model should avoid overrating noisy pumps.
-	10. Micin Anti-Noisy Rule: When the data shows a vertical 5m spike that is unsupported by 15m/1h, weak VoL/Z-score, or obvious sell pressure, strongly prefer "skip" unless there is exceptional on-chain confirmation.
-	11. Be highly objective. Output only valid JSON; no markdown wrappers.`;
+	8. Social quality matters more than raw quantity in whale route: website alone is not enough; Twitter and Telegram are the strongest community signals, but a single credible social plus strong on-chain confirmation can still be acceptable. Treat website as a bonus.
+	9. Deterministic Whale Signal Score: Treat the supplied Whale Signal Score as the anchor pre-filter. High score means the token has stronger community, narrative, and resilience signals; low score means the model should avoid overrating noisy pumps.
+	10. Micin Anti-Noisy Rule: When the route is MICIN_ROUTE and the data shows a vertical 5m spike that is unsupported by 15m/1h, weak VoL/Z-score, or obvious sell pressure, strongly prefer "skip" unless there is exceptional on-chain confirmation.
+	11. If Whale Signal Score is negative, treat the token as highly suspicious unless the rest of the data is overwhelmingly bullish.
+	12. Be highly objective. Output only valid JSON; no markdown wrappers.`;
 
             const ageDisplay = this.formatAgeDisplay(metrics.ageHours);
             const safeRugcheckScore = this.getSafeRugcheckScore(metrics.rugcheckScore);
@@ -314,7 +317,8 @@ Return a JSON object with exactly these fields:
 
             const userPrompt = `Token Symbol: $${symbol}
 Mint Address: ${tokenMint}
-Social & Narrative Profile:
+Route: ${route}
+- Social & Narrative Profile:
 	- Token Name: ${tokenName}
 	- Website: ${socialStatus.website}
 	- Twitter: ${socialStatus.twitter}
@@ -389,16 +393,16 @@ Evaluate against the live thresholds above and return the JSON decision.`;
             this.logger.log(
                 [
                     `[AI TRACE DECISION] Token: $${symbol} | Mint: ${tokenMint.slice(0, 6)}...${tokenMint.slice(-4)} (PUMP.FUN: ${metrics.isPumpFun ? 'YES' : 'NO'})`,
-	                    `├── Macro Regime Context : ${thresholds.marketRegime.toUpperCase()}`,
-	                    `├── Matrix Price Velocity : 5m(${(metrics.priceChange5mPct ?? 0).toFixed(2)}%) | 15m(${(metrics.priceChange15mPct ?? 0).toFixed(2)}%) | 1h(${metrics.priceChange1hPct.toFixed(2)}%)`,
-	                    `├── Whale Signal Score : ${metrics.whaleSignalScore ?? 0}/100`,
-	                    `├── Creator Wallet Audit : Created: ${metrics.creatorTokensCreated ?? 0} | Rugs: ${metrics.creatorRuggedTokens ?? 0} | Risk: ${metrics.creatorRiskScore ?? 0}/100`,
-	                    `├── Conviction Engine Check: Verdict Score: ${result.cuanConvictionScore}/100 -> ACTION: ${result.action.toUpperCase()}`,
-                    `└── Strategic Dynamic Sizing: Sizing Multiplier: ${result.positionSizeMultiplier}x (Allocated: $${mappedPositionSize.toFixed(2)}) | Custom Trailing: ${result.customTrailingBaseDistance ?? thresholds.trailingDistancePercent}%`,
+                    `Route Context: ${route}`,
+                    `Macro Regime Context: ${thresholds.marketRegime.toUpperCase()}`,
+                    `Matrix Price Velocity: 5m(${(metrics.priceChange5mPct ?? 0).toFixed(2)}%) | 15m(${(metrics.priceChange15mPct ?? 0).toFixed(2)}%) | 1h(${metrics.priceChange1hPct.toFixed(2)}%)`,
+                    `Whale Signal Score: ${metrics.whaleSignalScore ?? 0}/100`,
+                    `Creator Wallet Audit: Created: ${metrics.creatorTokensCreated ?? 0} | Rugs: ${metrics.creatorRuggedTokens ?? 0} | Risk: ${metrics.creatorRiskScore ?? 0}/100`,
+                    `Conviction Engine Check: Verdict Score: ${result.cuanConvictionScore}/100 -> ACTION: ${result.action.toUpperCase()}`,
+                    `Strategic Dynamic Sizing: Sizing Multiplier: ${result.positionSizeMultiplier}x (Allocated: ${mappedPositionSize.toFixed(2)}) | Custom Trailing: ${result.customTrailingBaseDistance ?? thresholds.trailingDistancePercent}%`,
                     `[Reasoning]: ${result.reasoning}`,
                 ].join('\n'),
             );
-
             return result;
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -415,4 +419,5 @@ Evaluate against the live thresholds above and return the JSON decision.`;
         }
     }
 }
+
 
