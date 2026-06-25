@@ -1,6 +1,6 @@
 # Solana Trend Follower Bot (MaSoul Sniper)
 
-Bot trading otomatis untuk **Solana** yang fokus pada strategi **Second Wave** dan **Smart Momentum**. Didesain untuk menangkap koin yang sudah melewati fase awal dan siap untuk ledakan harga kedua.
+Bot trading otomatis untuk **Solana** yang fokus pada strategi **Hybrid Momentum**: token muda diroute sebagai `MICIN_ROUTE`, token lebih matang diroute sebagai `WHALE_ROUTE`. Bot memakai filter kuantitatif, social/narrative scoring, AI conviction, dan risk breaker sebelum live buy.
 
 **Target lama tetap sama: $5/hari dari modal $20.**
 
@@ -16,8 +16,13 @@ Catatan update:
 - Jalur price monitor sekarang tidak lagi membaca `volScore` dan `priceChange1h` dari Watchlist.
 - Sinyal volatilitas untuk risk adjuster sekarang diambil dari snapshot market fresh di memori.
 
-### 2. Advanced Trading Metrics
-Rumus matematis untuk membedakan koin micin biasa dengan koin yang punya potensi ledakan nyata:
+### 2. Hybrid Quant Routing
+Bot tidak lagi memakai `BOT_MODE`. Semua token masuk ke satu pipeline, lalu route ditentukan dari umur token:
+
+- `MICIN_ROUTE` - token < 2 jam, fokus velocity, z-score, volume surge, dan anti-noise fake pump
+- `WHALE_ROUTE` - token >= 2 jam, fokus momentum yang sudah tervalidasi, social footprint, CTO, narrative, dan whale signal score
+
+Rumus matematis utama:
 
 - **VoL (Velocity of Liquidity)** - Kecepatan aliran uang dibanding ketersediaan liquidity di pool
 - **Volume Z-Score** - Deteksi anomali volume untuk menemukan jejak akumulasi whale/insider
@@ -83,7 +88,8 @@ Layanan kuantitatif khusus (`EstablishedAnalyzerService`) untuk mendeteksi anoma
 ```text
 ScannerService (Discovery)
   -> EstablishedAnalyzerService (Rebound and CTO detector)
-  -> AnalyzerService (12-gate standard filter)
+  -> AnalyzerService (Hybrid quant gate + route classification + deterministic score)
+  -> AIService (Conviction judge)
   -> TradeService (Jupiter swap)
   -> PriceMonitorService (TP/SL/Trail + custom exit)
   -> ReportingService (Telegram alert)
@@ -100,29 +106,41 @@ Tambahan alur discovery:
 
 ## Configuration
 
-Salin `.env.example` ke `.env` dan isi value-nya. Parameter utama yang relevan:
+Konfigurasi dipisah jadi dua:
+
+- `.env` hanya untuk runtime dan credential: RPC, WSS, webhook secret, API key, Telegram, wallet encryption, database, OpenAI.
+- `config.json` untuk angka strategi dan perhitungan: threshold filter, sizing, TP/SL, scanner interval, risk breaker, AI threshold, dan `MARKET_REGIME`.
+
+Parameter utama di `config.json`:
 
 | Parameter | Value | Keterangan |
 |-----------|-------|------------|
+| `MARKET_REGIME` | `balanced` | Bias AI untuk kondisi market. Opsi yang dipakai prompt: `balanced`, `bullish_gas`, `bearish_chaos` |
 | `ANALYZER_MIN_Z_SCORE` | `1.5` | Volume anomaly detection |
 | `ANALYZER_MIN_VOL_SCORE` | `0.02` | Kecepatan uang masuk pool |
 | `ANALYZER_MIN_VOLUME_SURGE` | `1.5` | Volume saat ini vs rata-rata |
 | `MIN_BUY_CONFIDENCE` | `0.60` | Rasio buyer vs seller |
-| `MIN_LIQUIDITY_USD` | `7500` | Minimum liquidity di pool |
-| `MIN_BUY_COUNT` | `5` | Minimum buyer dalam 5 menit |
-| `TAKE_PROFIT_PERCENT` | `30.0` | TP standar |
-| `STOP_LOSS_PERCENT` | `25.0` | SL standar |
-| `TRAILING_DISTANCE_PERCENT` | `5.0` | TSL standar |
-| `DISABLE_SL_PATIENCE` | `false` | Patience protocol bisa dimatikan |
-| `SL_PATIENCE_NEW_TOKEN_MINUTES` | `30` | Bypass patience untuk token baru |
+| `MIN_LIQUIDITY_USD` | `5000` | Minimum liquidity di pool |
+| `MIN_VOLUME_USD` | `200` | Minimum volume 5 menit |
+| `MIN_BUY_COUNT` | `3` | Minimum buyer dalam 5 menit |
+| `MIN_MCAP` | `5000` | Minimum market cap |
+| `MAX_MCAP` | `3000000` | Maximum market cap |
+| `MIN_AGE_HOURS` | `0.02` | Umur minimum token |
+| `MAX_AGE_HOURS` | `72` | Umur maksimum token |
+| `TAKE_PROFIT_PERCENT` | `15` | TP standar |
+| `STOP_LOSS_PERCENT` | `12` | SL standar |
+| `TRAILING_DISTANCE_PERCENT` | `1.5` | TSL standar |
+| `DISABLE_SL_PATIENCE` | `true` | Patience protocol dimatikan untuk stop loss lebih cepat |
 
 ### AI Analysis Layer
 
 | Parameter | Keterangan |
 |-----------|------------|
-| `OPENAI_API_KEY` | Jika valid, `AnalyzerService` akan menjalankan `AIService.analyzeToken()` setelah filter market/RPC/RugCheck lulus |
+| `OPENAI_API_KEY` | Disimpan di `.env`. Jika valid, `AnalyzerService` menjalankan `AIService.analyzeToken()` setelah filter market/RPC/RugCheck lulus |
+| `AI_BASE_URL` | Disimpan di `config.json` karena bukan secret |
+| `AI_MODEL` | Disimpan di `config.json` |
 | `AI_CONVICTION_THRESHOLD` | Minimum skor AI agar token boleh lanjut buy |
-| `WHALE_SIGNAL_SCORE_FLOOR` | Minimum skor whale mode sebelum token sosialnya dianggap terlalu lemah untuk diproses lebih lanjut |
+| `WHALE_SIGNAL_SCORE_FLOOR` | Floor deterministic score untuk `WHALE_ROUTE` saat social Twitter/Telegram kosong |
 
 ### Established Rebound and CTO Thresholds
 
@@ -139,12 +157,18 @@ Salin `.env.example` ke `.env` dan isi value-nya. Parameter utama yang relevan:
 
 ### Runtime and Connectivity
 
-- `SOLANA_RPC_URL` - RPC utama, sekarang diarahkan ke Helius
+Nilai berikut tetap di `.env`:
+
+- `PORT` - port aplikasi
+- `APP_MODE` - `development` atau `production`
+- `SOLANA_RPC_URL`, `RPC_ENDPOINT`, `WSS_ENDPOINT` - endpoint Solana/Helius
 - `HELIUS_WEBHOOK_SECRET` - Bearer secret untuk webhook
-- `TELEGRAM_BOT_TOKEN` - token bot Telegram
-- `TELEGRAM_CHAT_IDS` - allowlist chat untuk mode development
-- `DATABASE_URL` - koneksi PostgreSQL
 - `JUPITER_API_KEY` - API key Jupiter
+- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_CHAT_IDS` - Telegram runtime
+- `API_SECRET_KEY` - proteksi endpoint manual buy
+- `WALLET_ENCRYPTION_KEY` - enkripsi wallet vault
+- `DATABASE_URL`, `DB_FAIL_FAST` - koneksi PostgreSQL
+- `OPENAI_API_KEY` - credential AI
 
 ---
 
@@ -186,7 +210,16 @@ yarn start:prod
 
 ### Overview
 
-Setiap token yang ditemukan oleh Scanner harus melewati 12 gate filter secara berurutan. Jika gagal di satu gate, token di-reject atau disimpan di Watchlist untuk retry jika bersifat temporary.
+Setiap token yang ditemukan oleh Scanner masuk ke pipeline hybrid. Filter kuantitatif berlaku untuk semua token, lalu route ditentukan dari umur token. Jika gagal di satu gate, token di-reject atau disimpan di Watchlist untuk retry jika bersifat temporary.
+
+```text
+Discovery
+  -> Quant Gate
+  -> Route Assignment: MICIN_ROUTE (< 2h) atau WHALE_ROUTE (>= 2h)
+  -> Whale Signal Score
+  -> AI Conviction Judge
+  -> Trade Execution
+```
 
 ### Discovery Layer (ScannerService)
 
@@ -201,19 +234,19 @@ Bot menemukan token dari beberapa sumber:
 
 Token yang ditemukan masuk ke `processNewToken()` dan di-upsert ke Watchlist sebagai `PENDING`.
 
-### Analyzer Layer - 12 Gate Filter
+### Analyzer Layer - Hybrid Gate Filter
 
 #### Gate 1: Liquidity Check
 
 ```text
-PASS jika: liquidity >= MIN_LIQUIDITY_USD ($7,500)
+PASS jika: liquidity >= MIN_LIQUIDITY_USD ($5,000)
 FAIL: zero_liquidity
 ```
 
 #### Gate 2: Market Cap Range
 
 ```text
-PASS jika: MIN_MCAP ($5,000) <= MCap <= MAX_MCAP ($300,000)
+PASS jika: MIN_MCAP ($5,000) <= MCap <= MAX_MCAP ($3,000,000)
 FAIL: mcap_too_low | mcap_too_high
 ```
 
@@ -222,6 +255,13 @@ FAIL: mcap_too_low | mcap_too_high
 ```text
 PASS jika: MIN_AGE_HOURS (~1 menit) <= age <= MAX_AGE_HOURS (72h)
 FAIL: too_young | too_old
+```
+
+#### Route Assignment
+
+```text
+MICIN_ROUTE jika: age < 2 jam
+WHALE_ROUTE jika: age >= 2 jam
 ```
 
 #### Gate 4: Volume Surge
@@ -254,9 +294,9 @@ FAIL: low_buy_confidence
 
 ```text
 PASS jika:
-  - liquidity >= MIN_LIQUIDITY_USD ($7,500)
-  - volume_5m >= MIN_VOLUME_USD ($500)
-  - buys_5m >= MIN_BUY_COUNT (5)
+  - liquidity >= MIN_LIQUIDITY_USD ($5,000)
+  - volume_5m >= MIN_VOLUME_USD ($200)
+  - buys_5m >= MIN_BUY_COUNT (3)
 FAIL: low_metrics
 ```
 
@@ -286,6 +326,25 @@ Z = (volume_5m - avgVol_5m) / (avgVol_5m x 0.5)
 
 PASS jika: Z >= ANALYZER_MIN_Z_SCORE (1.5)
 FAIL: no_volume_anomaly
+```
+
+#### Hybrid Social and Narrative Gate
+
+```text
+whaleSignalScore dihitung dari:
+  + social footprint Twitter/Telegram/Website
+  + CTO signal
+  + tokenName narrative match
+  + volume surge / VoL / z-score / safety index
+  - empty socials
+  - creator risk / rugged token history
+
+Untuk WHALE_ROUTE:
+  - Twitter dan Telegram kosong + score di bawah WHALE_SIGNAL_SCORE_FLOOR => reject
+
+Untuk MICIN_ROUTE:
+  - whaleSignalScore hanya menjadi bias ringan
+  - fake pump/noise gate tetap aktif
 ```
 
 #### Gate 11: Safety RPC
@@ -319,11 +378,11 @@ Sub-checks:
 
 PriceMonitorService mulai tracking open trades:
 
-- Take Profit standar 30% / CTO 18% -> partial take profit lalu trailing stop aktif
+- Take Profit standar 15% / CTO 18% -> partial take profit lalu trailing stop aktif
 - Zero-Loss Protection -> saat profit >= 15%, trailing stop minimal naik ke `entryPrice + 2%`
-- Stop Loss standar 25% / CTO 20% -> Patience Protocol 5 menit, hard cap 10 menit
+- Stop Loss standar 12% / CTO 20% -> Patience Protocol 5 menit jika aktif, hard cap 10 menit
 - Hard crash -55% -> `PANIC_SELL` instan dengan slippage 15%
-- Trailing Stop standar 5% / CTO 2.5% -> sell jika harga turun dari peak ke trailing stop
+- Trailing Stop standar 1.5% / CTO 2.5% -> sell jika harga turun dari peak ke trailing stop
 
 #### Patience Protocol update
 
@@ -341,7 +400,7 @@ effectiveTrailingDistancePercent = min(baseTrailingDistancePercent, aiRecommende
 
 AI recommendation:
 
-- market normal -> 5.0%
+- market normal -> default `TRAILING_DISTANCE_PERCENT`
 - market chaos -> 3.0%
 - chaos ekstrem -> 2.5%
 
@@ -470,6 +529,8 @@ Authorization: Bearer <HELIUS_WEBHOOK_SECRET>
 yarn deploy:vps
 ```
 
+Pastikan environment di CapRover hanya berisi variable dari `.env.example`. File `config.json` ikut terkirim bersama source code dan dipakai sebagai sumber angka strategi.
+
 ---
 
 ## Pipeline and Simulation
@@ -496,8 +557,9 @@ yarn deploy:vps
 
 ## Notes
 
-- `SOLANA_RPC_URL` sekarang dipakai sebagai RPC utama
+- `SOLANA_RPC_URL` sekarang dipakai sebagai RPC utama dan tetap berada di `.env`
+- `BOT_MODE` sudah deprecated. Bot selalu berjalan sebagai hybrid pipeline dengan internal route.
+- `config.json` adalah sumber angka strategi dan threshold.
 - `Watchlist` dipakai untuk retry/discovery state, bukan sebagai sumber volatilitas fresh di price monitor
-- readme ini sengaja mempertahankan rumus dan pipeline lama, lalu hanya menambahkan fitur baru yang memang sudah ada di codebase
 
-*Last updated: Juni 2026 - Helius webhook, dynamic risk adjuster, in-memory market freshness, stop loss patience bypass, live Telegram control plane.*
+*Last updated: Juni 2026 - hybrid pipeline, config.json strategy settings, Helius webhook, dynamic risk adjuster, in-memory market freshness, stop loss patience bypass, live Telegram control plane.*
