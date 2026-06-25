@@ -1,4 +1,4 @@
-﻿import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
 import { Cron } from '@nestjs/schedule';
@@ -572,6 +572,7 @@ export class ReportingService implements OnModuleInit {
             ],
             [
                 { text: '$2 / entry', callback_data: 'settings:position|2' },
+                { text: '$4 / entry', callback_data: 'settings:position|4' },
                 { text: '$5 / entry', callback_data: 'settings:position|5' },
                 { text: '$10 / entry', callback_data: 'settings:position|10' },
                 { text: '$15 / entry', callback_data: 'settings:position|15' },

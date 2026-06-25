@@ -430,6 +430,21 @@ export class TradeService implements OnModuleInit {
         return calculateFinalBuySizeUsd(baseSizeUsd, routeMultiplier, aiMultiplier);
     }
 
+    private getNumberConfig(key: string, fallback: number): number {
+        const value = Number.parseFloat(this.configService.get<string>(key, String(fallback)));
+        return Number.isFinite(value) ? value : fallback;
+    }
+
+    private calculateDynamicReserveUsd(balanceUsd: number): number {
+        const reserveRatio = Math.min(
+            Math.max(this.getNumberConfig('DYNAMIC_RESERVE_RATIO', 0.2), 0),
+            0.95,
+        );
+        const minReserveUsd = Math.max(this.getNumberConfig('MIN_RESERVE_USD', 1), 0);
+        const maxReserveUsd = Math.max(this.getNumberConfig('MAX_RESERVE_USD', 10), minReserveUsd);
+        const percentageReserve = balanceUsd * reserveRatio;
+        return Math.min(Math.max(percentageReserve, minReserveUsd), maxReserveUsd);
+    }
     private getStartOfDayUtc(): Date {
         const d = new Date();
         d.setUTCHours(0, 0, 0, 0);
@@ -671,12 +686,12 @@ export class TradeService implements OnModuleInit {
                 mode: 'LIVE',
                 ...(tradeChatDbId ? { telegramChatId: tradeChatDbId } : {}),
             },
-            select: { slotNumber: true },
+            select: { slotNumber: true, entryValueUsd: true },
         });
 
         const usedSlots = new Set(openTrades.map((t) => t.slotNumber));
         let slotToUse = 1;
-        for (let i = 1; i <= this.totalSlots; i++) {
+        for (let i = 1; i <= effectiveTotalSlots; i++) {
             if (!usedSlots.has(i)) {
                 slotToUse = i;
                 break;
@@ -686,23 +701,6 @@ export class TradeService implements OnModuleInit {
         // Use custom amount if provided, otherwise use config
         const buyAmountUSD =
             customAmountUSD ?? this.applyFinalSize(effectivePositionSizeUSD, route, aiPositionSizeMultiplier);
-        const committedCapitalUsd = openTradesCount * effectivePositionSizeUSD + buyAmountUSD;
-        const spendableCapitalUsd = Math.max(this.totalCapital - this.reserveAmount, 0);
-        if (!customAmountUSD && committedCapitalUsd > spendableCapitalUsd) {
-            this.logger.warn(
-                `[BuyTrace] Blocked by capital guard token=${tokenMint} chat=${telegramChatId} committed=${committedCapitalUsd.toFixed(2)} spendable=${spendableCapitalUsd.toFixed(2)}`,
-            );
-            await notifyBuyFailure({
-                reason: 'capital_guard',
-                details: `Committed after buy would be $${committedCapitalUsd.toFixed(2)}, spendable cap is $${spendableCapitalUsd.toFixed(2)}.`,
-                amountUsd: buyAmountUSD,
-            });
-            return {
-                success: false,
-                message: `Capital guard blocked buy. Committed after buy would be $${committedCapitalUsd.toFixed(2)}, spendable cap is $${spendableCapitalUsd.toFixed(2)}.`,
-            };
-        }
-
         // RISK CIRCUIT BREAKERS: block new buys on drawdown / daily loss / loss streak
         const riskApplyToManual =
             this.configService.get<string>('RISK_APPLY_TO_MANUAL', 'false') === 'true';
@@ -806,12 +804,33 @@ export class TradeService implements OnModuleInit {
             const wallet = await this.getWallet(telegramChatId);
             const balanceLamports = await this.connection.getBalance(wallet.publicKey);
             const balanceSol = balanceLamports / 1_000_000_000;
-            const reserveSol = this.reserveAmount / solPrice;
-            const totalRequiredSol = executionPayload.amountSol + reserveSol + 0.005;
+            const balanceUsd = balanceSol * solPrice;
+            const dynamicReserveUsd = this.calculateDynamicReserveUsd(balanceUsd);
+            const reserveSol = dynamicReserveUsd / solPrice;
+            const feeCushionSol = this.getNumberConfig('TRADE_FEE_CUSHION_SOL', 0.005);
+            const totalRequiredSol = executionPayload.amountSol + reserveSol + feeCushionSol;
             const balanceAfterBuy = balanceSol - executionPayload.amountSol;
+            const balanceAfterBuyUsd = balanceAfterBuy * solPrice;
+            const openExposureUsd = openTrades.reduce((sum, trade) => {
+                const value = Number(trade.entryValueUsd);
+                return sum + (Number.isFinite(value) && value > 0 ? value : effectivePositionSizeUSD);
+            }, 0);
+            const committedCapitalUsd = openExposureUsd + buyAmountUSD;
+            const spendableCapitalUsd = Math.max(balanceUsd - dynamicReserveUsd, 0);
+
+            if (!customAmountUSD && committedCapitalUsd > spendableCapitalUsd) {
+                const msg = `Capital guard blocked buy. Wallet=$${balanceUsd.toFixed(2)}, Spendable=$${spendableCapitalUsd.toFixed(2)}, Reserve=$${dynamicReserveUsd.toFixed(2)}, CommittedAfterBuy=$${committedCapitalUsd.toFixed(2)}.`;
+                this.logger.warn(`[BuyTrace] Blocked by dynamic capital guard token=${tokenMint} chat=${telegramChatId} ${msg}`);
+                await notifyBuyFailure({
+                    reason: 'capital_guard',
+                    details: msg,
+                    amountUsd: buyAmountUSD,
+                });
+                return { success: false, message: msg };
+            }
 
             if (balanceAfterBuy < reserveSol || balanceSol < totalRequiredSol) {
-                const msg = `Insufficient SOL balance. Have: ${balanceSol.toFixed(4)} SOL, Need: ${totalRequiredSol.toFixed(4)} SOL (Position: ${executionPayload.amountSol.toFixed(4)} SOL, Reserve: ${reserveSol.toFixed(4)} SOL + Fees). Aborting buy to prevent trapped tokens or wasted fees.`;
+                const msg = `Insufficient SOL balance. Have: ${balanceSol.toFixed(4)} SOL ($${balanceUsd.toFixed(2)}), Need: ${totalRequiredSol.toFixed(4)} SOL (Position: ${executionPayload.amountSol.toFixed(4)} SOL, Dynamic Reserve: ${reserveSol.toFixed(4)} SOL / $${dynamicReserveUsd.toFixed(2)} + Fee cushion ${feeCushionSol.toFixed(4)} SOL). Balance after buy would be $${balanceAfterBuyUsd.toFixed(2)}. Aborting buy before swap to prevent wasted fees.`;
                 this.logger.warn(`[Slot ${slotToUse}] ${msg}`);
                 this.logger.warn(`[BuyTrace] Blocked by balance token=${tokenMint} chat=${telegramChatId} wallet=${wallet.publicKey.toBase58()} balanceSol=${balanceSol.toFixed(6)}`);
                 await notifyBuyFailure({
