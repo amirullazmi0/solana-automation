@@ -122,7 +122,7 @@ Salin `.env.example` ke `.env` dan isi value-nya. Parameter utama yang relevan:
 |-----------|------------|
 | `OPENAI_API_KEY` | Jika valid, `AnalyzerService` akan menjalankan `AIService.analyzeToken()` setelah filter market/RPC/RugCheck lulus |
 | `AI_CONVICTION_THRESHOLD` | Minimum skor AI agar token boleh lanjut buy |
-| `WHALE_SIGNAL_SCORE_FLOOR` | Minimum skor whitelist whale mode sebelum token sosialnya terlalu lemah untuk diproses lebih lanjut |
+| `WHALE_SIGNAL_SCORE_FLOOR` | Minimum skor whale mode sebelum token sosialnya dianggap terlalu lemah untuk diproses lebih lanjut |
 
 ### Established Rebound and CTO Thresholds
 

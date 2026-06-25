@@ -124,10 +124,10 @@ export class AnalyzerService {
             reasons.push('social-duo');
         }
         if (!input.hasTwitter && !input.hasTelegram) {
-            score -= ageHours >= 4 ? 30 : 18;
+            score -= ageHours >= 4 ? 20 : 14;
             reasons.push('social-empty');
         } else if (!input.hasTwitter || !input.hasTelegram) {
-            score -= 8;
+            score -= 4;
             reasons.push('single-social');
         }
 
@@ -347,7 +347,7 @@ export class AnalyzerService {
             }
 
             const whaleSignalFloor = Number.parseFloat(
-                this.configService.get<string>('WHALE_SIGNAL_SCORE_FLOOR', '55'),
+                this.configService.get<string>('WHALE_SIGNAL_SCORE_FLOOR', '45'),
             );
             const whaleSignal = this.calculateWhaleSignalScore({
                 ageHours: traction.pairCreatedAt
