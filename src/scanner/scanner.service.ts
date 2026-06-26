@@ -35,6 +35,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private readonly MAX_CONCURRENT: number;
     private readonly processingTokens = new Set<string>();
     private readonly noDexPairRetryCounts = new Map<string, number>();
+    private readonly watchlistStatusUpdateCache = new Map<
+        string,
+        { reason: string; permanent: boolean; notifiedAt: number }
+    >();
     private readonly httpsAgent: https.Agent;
 
     // Cache for resolved IPs
@@ -91,6 +95,64 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         return this.moduleRef.get(ReportingService, { strict: false });
     }
 
+
+    private shouldSendWatchlistStatusUpdate(
+        tokenMint: string,
+        reason: string,
+        permanent = false,
+    ): boolean {
+        const minIntervalMs = Number.parseInt(
+            this.configService.get<string>('WATCHLIST_STATUS_UPDATE_INTERVAL_MS', '120000'),
+            10,
+        );
+        const now = Date.now();
+        const previous = this.watchlistStatusUpdateCache.get(tokenMint);
+
+        if (!previous) {
+            this.watchlistStatusUpdateCache.set(tokenMint, { reason, permanent, notifiedAt: now });
+            return true;
+        }
+
+        const reasonChanged = previous.reason !== reason || previous.permanent !== permanent;
+        const intervalElapsed = now - previous.notifiedAt >= minIntervalMs;
+
+        if (reasonChanged || permanent || intervalElapsed) {
+            this.watchlistStatusUpdateCache.set(tokenMint, { reason, permanent, notifiedAt: now });
+            return true;
+        }
+
+        return false;
+    }
+
+    private async sendWatchlistStatusUpdateForResult(
+        tokenMint: string,
+        result: Awaited<ReturnType<AnalyzerService['isTokenSafeToBuy']>>,
+        route: string,
+        ageHours: number,
+        localNotified: boolean,
+    ): Promise<void> {
+        const reason = result.reason || 'unknown';
+        const radarWasSent = localNotified || this.notifiedTokens.has(tokenMint);
+
+        if (!radarWasSent || !this.shouldSendWatchlistStatusUpdate(tokenMint, reason, result.permanent)) {
+            return;
+        }
+
+        await this.reportingService.sendWatchlistStatusUpdate({
+            tokenMint,
+            symbol: result.metadata?.symbol,
+            route,
+            reason,
+            permanent: result.permanent,
+            mcap: result.metadata?.mcap,
+            liquidity: result.metadata?.liquidity,
+            ageHours,
+            volumeSurge: result.metadata?.volumeSurge,
+            volScore: result.metadata?.volScore,
+            zScore: result.metadata?.zScore,
+            whaleSignalScore: result.metadata?.whaleSignalScore,
+        });
+    }
     onModuleInit() {
         const wssEndpoint = this.configService.get<string>('WSS_ENDPOINT');
         const rpcEndpoint = this.getSolanaRpcUrl();
@@ -810,6 +872,16 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         );
                     }
 
+
+                    if (!result.safe && result.reason) {
+                        await this.sendWatchlistStatusUpdateForResult(
+                            tokenMint,
+                            result,
+                            route,
+                            ageHours,
+                            localNotified,
+                        );
+                    }
                     if (result.safe) {
                         const activeChats = await this.prismaService.telegramChat.findMany({
                             where: { status: 'ACTIVE' },
@@ -1003,6 +1075,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             }
             this.processingTokens.delete(tokenMint);
             this.noDexPairRetryCounts.delete(tokenMint);
+            this.watchlistStatusUpdateCache.delete(tokenMint);
         }
     }
 

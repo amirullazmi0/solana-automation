@@ -13,6 +13,33 @@ import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service
 import { ScannerService } from '../scanner/scanner.service';
 import { TradeService } from '../trade/trade.service';
 
+type WatchlistTelegramStatus = 'WAITING' | 'REJECTED' | 'BLOCKED';
+type WatchlistTelegramSeverity = 'soft_fail' | 'hard_fail' | 'unknown';
+
+interface WatchlistStatusUpdateParams {
+    tokenMint: string;
+    symbol?: string;
+    route?: string;
+    reason?: string;
+    permanent?: boolean;
+    mcap?: number;
+    liquidity?: number;
+    ageHours?: number;
+    volumeSurge?: number;
+    volScore?: number;
+    zScore?: number;
+    whaleSignalScore?: number;
+    retryCount?: number;
+    maxRetries?: number;
+}
+
+interface WatchlistReasonMapping {
+    status: WatchlistTelegramStatus;
+    label: string;
+    severity: WatchlistTelegramSeverity;
+    message: string;
+    action: string;
+}
 @Injectable()
 export class ReportingService implements OnModuleInit {
     private readonly logger = new Logger(ReportingService.name);
@@ -1280,6 +1307,160 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(message, {}, 0, params.targetChatId);
     }
 
+    private mapAnalyzerReasonToTelegramStatus(
+        reason = 'unknown',
+        permanent = false,
+        retryCount = 0,
+        maxRetries = 0,
+    ): WatchlistReasonMapping {
+        const normalizedReason = reason || 'unknown';
+        const zeroLiquidityStillRetrying =
+            normalizedReason === 'zero_liquidity' && !permanent && maxRetries > 0 && retryCount < maxRetries;
+
+        if (zeroLiquidityStillRetrying) {
+            return {
+                status: 'WAITING',
+                label: 'WAITING: zero_liquidity',
+                severity: 'soft_fail',
+                message: 'No valid liquidity found yet. New token liquidity can lag for a short window.',
+                action: 'No buy. Continue monitoring until retry window is exhausted.',
+            };
+        }
+
+        switch (normalizedReason) {
+            case 'low_surge':
+                return {
+                    status: 'WAITING',
+                    label: 'WAITING: low_surge',
+                    severity: 'soft_fail',
+                    message: 'Volume acceleration is not strong enough yet.',
+                    action: 'No buy. Continue monitoring for stronger momentum.',
+                };
+            case 'low_metrics':
+                return {
+                    status: 'WAITING',
+                    label: 'WAITING: low_metrics',
+                    severity: 'soft_fail',
+                    message: 'Momentum or quality metrics are still below threshold.',
+                    action: 'No buy. Keep it on radar unless it expires.',
+                };
+            case 'low_vol_score':
+                return {
+                    status: 'WAITING',
+                    label: 'WAITING: low_vol_score',
+                    severity: 'soft_fail',
+                    message: 'Volume-over-liquidity shock is not strong enough.',
+                    action: 'No buy. Wait for stronger supply shock.',
+                };
+            case 'no_volume_anomaly':
+                return {
+                    status: 'WAITING',
+                    label: 'WAITING: no_volume_anomaly',
+                    severity: 'soft_fail',
+                    message: 'Current volume is still normal, not a breakout anomaly.',
+                    action: 'No buy. Continue monitoring.',
+                };
+            case 'whale_signal_too_weak':
+                return {
+                    status: 'WAITING',
+                    label: 'WAITING: whale_signal_too_weak',
+                    severity: 'soft_fail',
+                    message: 'Older-token social/narrative score is not strong enough yet.',
+                    action: 'No buy. Wait for stronger whale signal.',
+                };
+            case 'ai_rejected':
+                return {
+                    status: 'REJECTED',
+                    label: 'REJECTED: ai_rejected',
+                    severity: 'soft_fail',
+                    message: 'AI conviction judge rejected the candidate.',
+                    action: 'No buy. Token stays rejected until a fresh radar cycle.',
+                };
+            case 'noisy_pump':
+                return {
+                    status: 'REJECTED',
+                    label: 'REJECTED: noisy_pump',
+                    severity: 'soft_fail',
+                    message: 'Micin noise filter detected fake-pump characteristics.',
+                    action: 'No buy. Avoid chasing noisy momentum.',
+                };
+            case 'zero_liquidity':
+                return {
+                    status: 'REJECTED',
+                    label: 'REJECTED: zero_liquidity',
+                    severity: permanent ? 'hard_fail' : 'soft_fail',
+                    message: 'No valid liquidity found.',
+                    action: permanent ? 'Permanent filter fail. Giving up.' : 'No buy. Background radar may retry later.',
+                };
+            case 'high_risk_score':
+            case 'safety_rpc_failed':
+            case 'creator_high_risk':
+            case 'rugcheck_failed':
+                return {
+                    status: 'BLOCKED',
+                    label: `BLOCKED: ${normalizedReason}`,
+                    severity: 'hard_fail',
+                    message: 'Rug/security risk is too high.',
+                    action: 'Permanent filter fail. Giving up.',
+                };
+            default:
+                return {
+                    status: permanent ? 'BLOCKED' : 'REJECTED',
+                    label: `${permanent ? 'BLOCKED' : 'REJECTED'}: ${normalizedReason}`,
+                    severity: permanent ? 'hard_fail' : 'unknown',
+                    message: 'Analyzer rejected token.',
+                    action: permanent ? 'Permanent filter fail. Giving up.' : 'No buy. Continue only if radar sees a better setup.',
+                };
+        }
+    }
+
+    async sendWatchlistStatusUpdate(params: WatchlistStatusUpdateParams): Promise<void> {
+        const mapping = this.mapAnalyzerReasonToTelegramStatus(
+            params.reason,
+            params.permanent,
+            params.retryCount,
+            params.maxRetries,
+        );
+        const displaySymbol = params.symbol || 'UNKNOWN';
+        const routeLine = params.route ? `Route: \`${params.route}\`\n` : '';
+        const retryLine =
+            params.retryCount !== undefined && params.maxRetries !== undefined
+                ? `Retry: \`${params.retryCount}/${params.maxRetries}\`\n`
+                : '';
+        const metricsLines = [
+            params.volumeSurge !== undefined ? `volumeSurge: \`${params.volumeSurge.toFixed(2)}x\`` : undefined,
+            params.volScore !== undefined ? `volScore: \`${params.volScore.toFixed(4)}\`` : undefined,
+            params.zScore !== undefined ? `zScore: \`${params.zScore.toFixed(2)}\`` : undefined,
+            params.liquidity !== undefined ? `liquidity: \`$${params.liquidity.toLocaleString()}\`` : undefined,
+            params.mcap !== undefined ? `mcap: \`$${params.mcap.toLocaleString()}\`` : undefined,
+            params.ageHours !== undefined ? `age: \`${params.ageHours.toFixed(2)}h\`` : undefined,
+            params.whaleSignalScore !== undefined
+                ? `whaleSignalScore: \`${params.whaleSignalScore.toFixed(1)}\``
+                : undefined,
+        ].filter(Boolean);
+        const metricsBlock = metricsLines.length > 0 ? `\nCurrent:\n${metricsLines.join('\n')}\n` : '';
+        const title =
+            mapping.status === 'WAITING'
+                ? 'WATCHLIST UPDATE'
+                : mapping.status === 'BLOCKED'
+                  ? 'WATCHLIST BLOCKED'
+                  : 'WATCHLIST REJECTED';
+
+        const message =
+            `*${title}*\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `Token: ${displaySymbol}\n` +
+            `Mint: \`${params.tokenMint}\`\n` +
+            routeLine +
+            `Status: \`${mapping.label}\`\n` +
+            `Severity: \`${mapping.severity}\`\n` +
+            retryLine +
+            `\nReason:\n${mapping.message}\n` +
+            metricsBlock +
+            `\nAction:\n${mapping.action}`;
+
+        await this.sendMessage(message);
+    }
     async sendWatchlistNotification(
         tokenMint: string,
         mcap: number,
