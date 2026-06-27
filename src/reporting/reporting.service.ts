@@ -1235,28 +1235,29 @@ export class ReportingService implements OnModuleInit {
     async sendTradeFailureAlert(params: TradeFailureAlertParams): Promise<void> {
         const displaySymbol = params.symbol || 'UNKNOWN';
         const stageLabel = params.stage || 'PRE_SWAP';
+        const routeLine = params.route ? `Route: \`${params.route}\`\n` : '';
         const amountUsdLine =
-            params.amountUsd !== undefined ? `💵 *USD Value:* \`$${params.amountUsd.toFixed(2)}\`\n` : '';
+            params.amountUsd !== undefined ? `Attempted USD: \`$${params.amountUsd.toFixed(2)}\`\n` : '';
         const amountSolLine =
-            params.amountSol !== undefined ? `💎 *SOL Value:* \`${params.amountSol.toFixed(4)} SOL\`\n` : '';
-        const detailsLine = params.details ? `${params.details}\n` : '';
+            params.amountSol !== undefined ? `Attempted SOL: \`${params.amountSol.toFixed(4)} SOL\`\n` : '';
+        const detailsLine = params.details ? `\nDetails:\n${params.details}\n` : '';
 
         const message =
-            `⚠️ *${params.side} EXECUTION FAILED*\n` +
-            `━━━━━━━━━━━━━━━━━━\n` +
-            `💎 *Token:* ${displaySymbol}\n` +
-            `🆔 *Mint:* \`${params.tokenMint}\`\n` +
-            `📌 *Stage:* \`${stageLabel}\`\n` +
-            `🚫 *Reason:* \`${params.reason}\`\n` +
+            `*${params.side} EXECUTION FAILED*\n` +
+            `??????????????????\n` +
+            `Token: ${displaySymbol}\n` +
+            `Mint: \`${params.tokenMint}\`\n` +
+            routeLine +
+            `Stage: \`${stageLabel}\`\n` +
+            `Reason: \`${params.reason}\`\n` +
             amountUsdLine +
             amountSolLine +
             detailsLine +
-            `━━━━━━━━━━━━━━━━━━\n` +
+            `??????????????????\n` +
             `Status: \`No live trade was opened.\``;
 
         await this.sendMessage(message, {}, 0, params.targetChatId);
     }
-
     async sendDepositNotification(params: {
         targetChatId: string;
         walletAddress: string;
@@ -1308,11 +1309,11 @@ export class ReportingService implements OnModuleInit {
                 };
             case 'low_metrics':
                 return {
-                    status: 'WAITING',
-                    label: 'WAITING: low_metrics',
+                    status: 'REJECTED',
+                    label: 'REJECTED: low_metrics',
                     severity: 'soft_fail',
                     message: 'Momentum or quality metrics are still below threshold.',
-                    action: 'No buy. Keep it on radar unless it expires.',
+                    action: 'No buy. Skip for now and wait for a fresh radar cycle.',
                 };
             case 'low_vol_score':
                 return {

@@ -105,6 +105,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         ].includes(normalizedReason);
     }
 
+    private isWatchlistSoftRejectReason(reason?: string): boolean {
+        const normalizedReason = (reason || '').toLowerCase();
+        return ['low_metrics', 'ai_rejected', 'noisy_pump'].includes(normalizedReason);
+    }
+
 
     private shouldSendWatchlistStatusUpdate(
         tokenMint: string,
@@ -141,17 +146,41 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         ageHours: number,
         localNotified: boolean,
     ): Promise<void> {
-        if (result.permanent) {
-            return;
-        }
-
         const reason = result.reason || 'unknown';
-        if (!this.isWatchlistCandidateReason(reason)) {
+
+        if (result.permanent) {
+            if (!this.shouldSendWatchlistStatusUpdate(tokenMint, reason, true)) {
+                return;
+            }
+
+            await this.reportingService.sendWatchlistStatusUpdate({
+                tokenMint,
+                symbol: result.metadata?.symbol,
+                route,
+                reason,
+                permanent: true,
+                mcap: result.metadata?.mcap,
+                liquidity: result.metadata?.liquidity,
+                ageHours,
+                volumeSurge: result.metadata?.volumeSurge,
+                volScore: result.metadata?.volScore,
+                zScore: result.metadata?.zScore,
+                whaleSignalScore: result.metadata?.whaleSignalScore,
+            });
             return;
         }
 
         const radarWasSent = localNotified || this.notifiedTokens.has(tokenMint);
-        if (!radarWasSent || !this.shouldSendWatchlistStatusUpdate(tokenMint, reason, false)) {
+
+        if (this.isWatchlistCandidateReason(reason)) {
+            if (!radarWasSent || !this.shouldSendWatchlistStatusUpdate(tokenMint, reason, false)) {
+                return;
+            }
+        } else if (this.isWatchlistSoftRejectReason(reason)) {
+            if (!this.shouldSendWatchlistStatusUpdate(tokenMint, reason, false)) {
+                return;
+            }
+        } else {
             return;
         }
 
@@ -922,7 +951,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     }
 
 
-                    if (!result.safe && !result.permanent && result.reason) {
+                    if (!result.safe && result.reason) {
                         await this.sendWatchlistStatusUpdateForResult(
                             tokenMint,
                             result,

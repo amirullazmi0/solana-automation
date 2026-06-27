@@ -149,6 +149,50 @@ export function evaluateBuyRisk(
     return { allowed: true };
 }
 
+function normalizeBuyFailureReason(rawReason: string): string {
+    const text = String(rawReason || '').toLowerCase();
+    if (text.includes('max_drawdown') || text.includes('max drawdown')) return 'risk_max_drawdown';
+    if (text.includes('daily_max_loss') || text.includes('daily max loss')) return 'risk_daily_max_loss';
+    if (text.includes('consecutive')) return 'risk_max_consecutive_losses';
+    if (text.includes('disabled_until') || text.includes('disabled until')) return 'risk_disabled_until';
+    if (text.includes('slot_limit') || text.includes('slot_guard') || text.includes('slot guard')) return 'slot_guard';
+    if (text.includes('capital_guard') || text.includes('capital guard')) return 'capital_guard';
+    if (text.includes('insufficient_balance') || text.includes('balance_guard') || text.includes('insufficient sol balance') || text.includes('balance guard')) return 'balance_guard';
+    if (text.includes('invalid_price_or_amount')) return 'invalid_price_or_amount';
+    if (text.includes('already_open_trade')) return 'already_open_trade';
+    if (text.includes('cooldown')) return 'cooldown';
+    if (text.includes('price_impact_guard') || text.includes('price impact')) return 'price_impact_guard';
+    if (text.includes('quote') || text.includes('decimals_unavailable') || text.includes('cancelled_decimals_unavailable')) return 'jupiter_quote_failed';
+    if (text.includes('confirm')) return 'confirmation_failed';
+    if (text.includes('swap')) return 'swap_failed';
+    return rawReason || 'unknown_execution_failure';
+}
+
+function normalizeBuyFailureStage(reason: string): 'PRE_SWAP' | 'QUOTE' | 'SWAP' | 'CONFIRMATION' {
+    const normalized = normalizeBuyFailureReason(reason);
+    if ([
+        'risk_max_drawdown',
+        'risk_daily_max_loss',
+        'risk_max_consecutive_losses',
+        'risk_disabled_until',
+        'capital_guard',
+        'slot_guard',
+        'balance_guard',
+        'invalid_price_or_amount',
+        'already_open_trade',
+        'cooldown',
+    ].includes(normalized)) {
+        return 'PRE_SWAP';
+    }
+    if (['price_impact_guard', 'jupiter_quote_failed'].includes(normalized)) {
+        return 'QUOTE';
+    }
+    if (normalized === 'confirmation_failed') {
+        return 'CONFIRMATION';
+    }
+    return 'SWAP';
+}
+
 @Injectable()
 export class TradeService implements OnModuleInit {
     private readonly logger = new Logger(TradeService.name);
@@ -593,22 +637,29 @@ export class TradeService implements OnModuleInit {
         }
         const notifyBuyFailure = async (params: {
             reason: string;
-            stage?: 'PRE_SWAP' | 'SWAP';
+            stage?: 'PRE_SWAP' | 'QUOTE' | 'SWAP' | 'CONFIRMATION';
             amountUsd?: number;
             amountSol?: number;
             details?: string;
         }) => {
             if (!targetChatId) return;
             try {
+                const normalizedReason = normalizeBuyFailureReason(
+                    params.reason || params.details || 'unknown_execution_failure',
+                );
+                const normalizedStage =
+                    params.stage || normalizeBuyFailureStage(normalizedReason);
+
                 await this.reportingService.sendTradeFailureAlert({
                     side: 'BUY',
                     tokenMint,
                     symbol: reportSymbol,
-                    reason: params.reason,
-                    stage: params.stage,
+                    reason: normalizedReason,
+                    stage: normalizedStage,
                     amountUsd: params.amountUsd,
                     amountSol: params.amountSol,
                     targetChatId,
+                    route,
                     details: params.details,
                 });
             } catch (error) {
@@ -675,7 +726,7 @@ export class TradeService implements OnModuleInit {
                 `[BuyTrace] Blocked by slot limit token=${tokenMint} chat=${telegramChatId} openTrades=${openTradesCount} slots=${effectiveTotalSlots}`,
             );
             await notifyBuyFailure({
-                reason: 'slot_limit',
+                reason: 'slot_guard',
                 details: `Open trades: ${openTradesCount}, Slots: ${effectiveTotalSlots}.`,
             });
             return { success: false, message: 'All trading slots are full.' };
@@ -838,7 +889,7 @@ export class TradeService implements OnModuleInit {
                 this.logger.warn(`[Slot ${slotToUse}] ${msg}`);
                 this.logger.warn(`[BuyTrace] Blocked by balance token=${tokenMint} chat=${telegramChatId} wallet=${wallet.publicKey.toBase58()} balanceSol=${balanceSol.toFixed(6)}`);
                 await notifyBuyFailure({
-                    reason: 'insufficient_balance',
+                    reason: 'balance_guard',
                     details: msg,
                     amountUsd: buyAmountUSD,
                     amountSol: executionPayload.amountSol,
@@ -850,7 +901,7 @@ export class TradeService implements OnModuleInit {
             this.logger.error(`[Slot ${slotToUse}] Capital protection check failed: ${msg}`);
             this.logger.error(`[BuyTrace] Capital protection exception token=${tokenMint} chat=${telegramChatId}: ${msg}`);
             await notifyBuyFailure({
-                reason: 'capital_protection_exception',
+                reason: 'capital_guard',
                 details: msg,
                 amountUsd: buyAmountUSD,
             });
@@ -979,25 +1030,11 @@ export class TradeService implements OnModuleInit {
 
         this.logger.warn(`[BuyTrace] Swap failed token=${tokenMint} chat=${telegramChatId}: ${error || 'Unknown error'}`);
         await notifyBuyFailure({
-            reason: 'swap_failed',
-            stage: 'SWAP',
+            reason: error || 'swap_failed',
             details: error || 'Unknown error',
             amountUsd: buyAmountUSD,
             amountSol: amountInSol,
         });
-        if (!isManualBuy) {
-            await this.reportingService.sendSwapResultReport({
-                side: 'BUY',
-                tokenMint,
-                symbol: reportSymbol,
-                success: false,
-                amountUsd: buyAmountUSD,
-                amountSol: amountInSol,
-                error: error || 'Unknown error',
-                dryRun: effectiveDryRun,
-                targetChatId,
-            });
-        }
         return { success: false, message: `Swap failed: ${error || 'Unknown error'}` };
     }
 
