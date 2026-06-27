@@ -1126,11 +1126,11 @@ export class ReportingService implements OnModuleInit {
             ? `\nTarget: TP ${options.targetTakeProfit}% | TSL ${options.targetTrailingDistance}% | SL ${options.targetStopLoss}%`
             : '';
         const header = isDryRun
-            ? '*MUST BUY SIGNAL - NO AUTO BUY*'
-            : '*MUST BUY SIGNAL - LIVE BUY ENABLED*';
+            ? '*MUST BUY SIGNAL - DRY RUN*'
+            : '*MUST BUY SIGNAL - EXECUTION ATTEMPTING*';
         const modeLine = isDryRun
             ? 'Mode: `Signal only. Bot did not execute swap.`'
-            : 'Mode: `Live execution enabled for this chat.`';
+            : 'Mode: `Execution checks and swap attempt are running for this chat.`';
 
         const message =
             `${header}\n` +
@@ -1362,6 +1362,7 @@ export class ReportingService implements OnModuleInit {
                     message: 'No valid liquidity found.',
                     action: permanent ? 'Permanent filter fail. Giving up.' : 'No buy. Background radar may retry later.',
                 };
+            case 'high_concentration':
             case 'high_risk_score':
             case 'safety_rpc_failed':
             case 'creator_high_risk':

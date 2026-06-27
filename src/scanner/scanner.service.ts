@@ -134,7 +134,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         const reason = result.reason || 'unknown';
         const radarWasSent = localNotified || this.notifiedTokens.has(tokenMint);
 
-        if (!radarWasSent || !this.shouldSendWatchlistStatusUpdate(tokenMint, reason, result.permanent)) {
+        if (result.permanent) {
+            if (!this.shouldSendWatchlistStatusUpdate(tokenMint, reason, true)) {
+                return;
+            }
+        } else if (!radarWasSent || !this.shouldSendWatchlistStatusUpdate(tokenMint, reason, false)) {
             return;
         }
 
@@ -153,6 +157,35 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             whaleSignalScore: result.metadata?.whaleSignalScore,
         });
     }
+
+    private normalizeBuyFailureReason(message: string): string {
+        const text = String(message || '').toLowerCase();
+        if (text.includes('max drawdown')) return 'risk_max_drawdown';
+        if (text.includes('consecutive')) return 'risk_max_consecutive_losses';
+        if (text.includes('capital guard')) return 'capital_guard';
+        if (text.includes('slot')) return 'slot_guard';
+        if (text.includes('balance')) return 'balance_guard';
+        if (text.includes('price impact')) return 'price_impact_guard';
+        if (text.includes('quote')) return 'jupiter_quote_failed';
+        if (text.includes('confirm')) return 'confirmation_failed';
+        if (text.includes('swap')) return 'swap_failed';
+        return 'unknown_execution_failure';
+    }
+
+    private normalizeBuyFailureStage(message: string): 'PRE_SWAP' | 'QUOTE' | 'SWAP' | 'CONFIRMATION' {
+        const reason = this.normalizeBuyFailureReason(message);
+        if (['risk_max_drawdown', 'risk_max_consecutive_losses', 'capital_guard', 'slot_guard', 'balance_guard'].includes(reason)) {
+            return 'PRE_SWAP';
+        }
+        if (['price_impact_guard', 'jupiter_quote_failed'].includes(reason)) {
+            return 'QUOTE';
+        }
+        if (reason === 'confirmation_failed') {
+            return 'CONFIRMATION';
+        }
+        return 'SWAP';
+    }
+
     onModuleInit() {
         const wssEndpoint = this.configService.get<string>('WSS_ENDPOINT');
         const rpcEndpoint = this.getSolanaRpcUrl();
@@ -850,6 +883,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     const minMcapForNotif = route === 'MICIN_ROUTE' ? 5000 : 20000;
 
                     if (
+                        !result.safe &&
+                        !result.permanent &&
                         !localNotified &&
                         !this.notifiedTokens.has(tokenMint) &&
                         result.metadata &&
