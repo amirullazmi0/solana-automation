@@ -41,8 +41,19 @@ export interface AIAnalysisResult {
     aiDecisionSnapshotId?: number;
 }
 
-export interface AIThresholdSnapshot {
-    botMode: string;
+export interface AIHealthCheckMetrics extends AIAnalysisMetrics {
+    currentProfitPercent: number;
+    stopLossPercent: number;
+}
+
+export interface AIHealthCheckResult {
+    status: 'HEALTHY' | 'CRITICAL';
+    confidenceLevel: 'high' | 'medium' | 'low';
+    reasoning: string;
+    reentrySignal: boolean;
+}
+
+export interface AIThresholdSnapshot {    botMode: string;
     aiConvictionThreshold: number;
     minLiquidityUsd: number;
     minVolumeUsd: number;

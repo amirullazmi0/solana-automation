@@ -66,6 +66,26 @@ Maknanya:
 - Banyak `zero_liquidity` pada token pump/migration normal terjadi ketika DexScreener pair atau liquidity belum siap, atau pair pertama yang dikembalikan DexScreener belum punya liquidity cukup.
 - Token berubah terminal hanya jika analyzer mengembalikan `permanent: true`, misalnya `high_risk_score`, `honeypot`, `bearish_trend`, `mcap_too_high`, atau `zero_liquidity` pada token yang sudah tidak muda.
 
+#### 2.1.2 Dynamic Hold & AI Health Check
+
+Price monitor sekarang punya guard tambahan sebelum hard stop loss penuh:
+- jika posisi turun sampai minimal 50% dari jarak SL, tetapi belum menyentuh SL penuh, bot memanggil `AIService.evaluateTokenHealth()`
+- health check memakai snapshot DexScreener terbaru plus konteks sosial dari `Watchlist` (`hasWebsite`, `hasTwitter`, `hasTelegram`, CTO, Dex paid, whale score)
+- jika verdict `CRITICAL`, posisi dijual langsung dengan reason `AI_HEALTH_CRITICAL`
+- jika verdict `HEALTHY`, posisi ditahan sampai batas SL penuh dan log menyimpan alasan AI serta flag `reentrySignal`
+- jika OpenAI tidak tersedia, fallback deterministik tetap berjalan dan cenderung konservatif: sell pressure dominan, volume mati, liquidity kosong, volume collapse, atau breakdown momentum akan dianggap `CRITICAL`
+
+Contoh log hold:
+
+```text
+AI Health HOLD. pnl=-6.20% sl=11% reentry=true. reason=Holding karena buy pressure dan volume acceleration masih positif walau harga sedang dip.
+```
+
+Contoh log cut:
+
+```text
+AI Health CRITICAL before full SL. pnl=-6.20% sl=11% reentry=false. reason=Fallback health check critical: sell pressure dominan.
+```
 ### 2.2 Target notification semantics
 
 Target semantik notifikasi yang diinginkan:
@@ -437,24 +457,24 @@ Sell bisa terjadi karena:
 - `DEV_DUMP`
 - `PANIC_SELL`
 
-## 6. Known Limitation: DexScreener Pair Selection
+## 6. DexScreener Pair Selection dan Early Spike Guard
 
-Current implementation belum dijelaskan sebagai pair-ranking engine yang ketat. Ini adalah risk point penting.
+Analyzer tidak lagi memakai `pairs[0]` mentah dari DexScreener. Pair dipilih dengan aturan:
+- hanya pair `chainId = solana`
+- pilih liquidity USD terdalam
+- jika liquidity sama, pakai volume 5m dan aktivitas transaksi 5m sebagai tie breaker
+- jika semua pair Solana liquidity kosong, analyzer tetap bisa memilih pair terbaik untuk metadata lalu reject sebagai `zero_liquidity`
 
-Risiko operasional:
-- pair pertama / pair yang salah bisa punya liquidity tipis
-- volume dan mcap bisa terdistorsi
-- price impact guard bisa menghitung dari pool yang salah
-- token valid bisa false reject
-- token jelek bisa false accept
+Guard early spike yang sudah aktif:
+- `MIN_LIQUIDITY_USD = 5000` sebagai liquidity floor utama
+- `MIN_AGE_HOURS = 0.02` atau sekitar 72 detik sebagai cooldown awal
+- `MICIN_MAX_PRICE_IMPACT_PCT = 3` dan `WHALE_MAX_PRICE_IMPACT_PCT = 1.25` di execution layer
+- creator profile, RugCheck, holder concentration, dan creator holding tetap berjalan setelah market traction lolos
 
-Target improvement yang ideal:
-- filter hanya pair `solana`
-- buang pair dengan liquidity nol
-- pilih pair dengan liquidity terdalam
-- kalau perlu, ranking pair dengan kombinasi liquidity + volume + aktivitas transaksi
-
-Sampai itu diimplementasi penuh, anggap pair selection DexScreener sebagai known limitation analyzer/execution.
+Catatan `uniqueBuyers`:
+- current DexScreener path menyediakan `buys` dan `sells`, bukan unique buyer wallet count yang reliable
+- hard gate `uniqueBuyers < 10` belum diterapkan sampai ada sumber data wallet-level yang benar
+- untuk sementara, bot memakai `MIN_BUY_COUNT`, buy confidence, volume acceleration, dan holder/creator risk sebagai proxy
 
 ## 7. Tabel Config Lengkap: Key -> Rumus/Pemakaian -> Dampak -> Saran Tuning
 

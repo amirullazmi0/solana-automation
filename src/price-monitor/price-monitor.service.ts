@@ -11,6 +11,7 @@ import { DexLimiter } from '../common/dex-limiter';
 import { AIService } from '../ai/ai.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 import { DexScreenerPair } from '../dto/analyzer.dto';
+import { AIHealthCheckMetrics, AIHealthCheckResult } from '../dto/ai.dto';
 
 interface TradeFreshMarketSignals {
     priceUsd: number;
@@ -49,6 +50,7 @@ export class PriceMonitorService {
     private readonly newTokenPatienceThresholdMinutes: number;
     private readonly lastAlertTime = new Map<string, number>(); // Cooldown alert: tokenMint -> timestamp
     private readonly lastRiskAdjustmentAlertTime = new Map<string, number>();
+    private readonly healthCheckCache = new Map<number, { checkedAt: number; result: AIHealthCheckResult }>();
     private ipCache: Record<string, string> = {};
     private readonly fallbackApiIps: Record<string, string> = {
         'api.jup.ag': '18.239.105.107',
@@ -375,6 +377,79 @@ export class PriceMonitorService {
         }
     }
 
+    private isDynamicHoldZone(profitPercent: number, stopLossPercent: number): boolean {
+        if (!Number.isFinite(profitPercent) || !Number.isFinite(stopLossPercent) || stopLossPercent <= 0) {
+            return false;
+        }
+
+        const halfStopLossDistance = -(stopLossPercent * 0.5);
+        return profitPercent <= halfStopLossDistance && profitPercent > -stopLossPercent;
+    }
+
+    private async getWatchlistHealthContext(tokenMint: string) {
+        return this.prismaService.watchlist.findUnique({
+            where: { tokenMint },
+            select: {
+                isPumpFun: true,
+                hasWebsite: true,
+                hasTwitter: true,
+                hasTelegram: true,
+                isDexPaidUpdated: true,
+                isCommunityTakeover: true,
+                tokenName: true,
+                whaleSignalScore: true,
+            },
+        });
+    }
+
+    private async shouldHoldOrCut(
+        trade: TradeWithTelegramChat,
+        profitPercent: number,
+        effectiveStopLossPercent: number,
+        signals: TradeFreshMarketSignals,
+    ): Promise<AIHealthCheckResult> {
+        const now = Date.now();
+        const cached = this.healthCheckCache.get(trade.id);
+        if (cached && now - cached.checkedAt < 60_000) {
+            return cached.result;
+        }
+
+        const watchlist = await this.getWatchlistHealthContext(trade.tokenMint);
+        const ageHours = (now - new Date(trade.createdAt).getTime()) / (1000 * 60 * 60);
+        const route = trade.route === 'WHALE' ? 'WHALE' : 'MICIN';
+        const metrics: AIHealthCheckMetrics = {
+            ageHours,
+            liquidityUsd: signals.liquidityUsd,
+            marketCapUsd: signals.marketCapUsd,
+            volume5mUsd: signals.volume5mUsd,
+            buys5mCount: signals.buys5mCount,
+            sells5mCount: signals.sells5mCount,
+            priceChange1hPct: signals.priceChange1h,
+            isPumpFun: watchlist?.isPumpFun ?? false,
+            hasWebsite: watchlist?.hasWebsite ?? false,
+            hasTwitter: watchlist?.hasTwitter ?? false,
+            hasTelegram: watchlist?.hasTelegram ?? false,
+            isDexPaidUpdated: watchlist?.isDexPaidUpdated ?? undefined,
+            isCommunityTakeover: watchlist?.isCommunityTakeover ?? undefined,
+            tokenName: watchlist?.tokenName ?? trade.symbol ?? undefined,
+            whaleSignalScore: watchlist?.whaleSignalScore ?? undefined,
+            volumeSurge: signals.volumeSurge,
+            volScore: signals.volScore,
+            zScore: signals.zScore,
+            currentProfitPercent: profitPercent,
+            stopLossPercent: effectiveStopLossPercent,
+            route,
+        };
+
+        const result = await this.aiService.evaluateTokenHealth(
+            trade.tokenMint,
+            trade.symbol || trade.tokenMint,
+            metrics,
+        );
+        this.healthCheckCache.set(trade.id, { checkedAt: now, result });
+        return result;
+    }
+
     private async evaluateTrade(
         trade: TradeWithTelegramChat,
         currentPrice: number,
@@ -508,10 +583,32 @@ export class PriceMonitorService {
             return;
         }
 
-        // Route-aware stop loss runs before TP/trailing so loss control is always active.
+        if (this.isDynamicHoldZone(profitPercent, effectiveStopLossPercent)) {
+            const healthCheck = await this.shouldHoldOrCut(
+                trade,
+                profitPercent,
+                effectiveStopLossPercent,
+                normalizedFreshMarketSignals,
+            );
+
+            if (healthCheck.status === 'CRITICAL') {
+                this.logger.warn(
+                    `[Slot ${trade.slotNumber}] AI Health CRITICAL before full SL. pnl=${profitPercent.toFixed(2)}% sl=${effectiveStopLossPercent}% reentry=${healthCheck.reentrySignal}. reason=${healthCheck.reasoning}`,
+                );
+                await this.tradeService.executeSell(trade.id, currentPrice, 'AI_HEALTH_CRITICAL');
+                return;
+            }
+
+            this.logger.log(
+                `[Slot ${trade.slotNumber}] AI Health HOLD. pnl=${profitPercent.toFixed(2)}% sl=${effectiveStopLossPercent}% reentry=${healthCheck.reentrySignal}. reason=${healthCheck.reasoning}`,
+            );
+            return;
+        }
+
+        // Route-aware stop loss remains the hard floor after the dynamic hold zone is exhausted.
         if (profitPercent <= -effectiveStopLossPercent) {
             this.logger.warn(
-                `[Slot ${trade.slotNumber}] STOP_LOSS triggered before trailing. route=${trade.route ?? 'GLOBAL'} pnl=${profitPercent.toFixed(2)}% sl=${effectiveStopLossPercent}%`,
+                `[Slot ${trade.slotNumber}] STOP_LOSS hard floor reached. route=${trade.route ?? 'GLOBAL'} pnl=${profitPercent.toFixed(2)}% sl=${effectiveStopLossPercent}%`,
             );
             await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
             return;

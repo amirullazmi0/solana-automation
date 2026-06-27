@@ -9,6 +9,8 @@ export interface Website {
 }
 
 export interface DexScreenerPair {
+    chainId?: string;
+    dexId?: string;
     liquidity?: { usd?: number };
     fdv?: number;
     pairCreatedAt?: number;

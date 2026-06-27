@@ -1,10 +1,12 @@
-﻿import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { PrismaService } from '../prisma/prisma.service';
 import {
     AIAnalysisMetrics,
     AIAnalysisResult,
+    AIHealthCheckMetrics,
+    AIHealthCheckResult,
     AIThresholdSnapshot,
     OpenAIChatCompletionResponse,
 } from '../dto/ai.dto';
@@ -239,6 +241,168 @@ export class AIService {
         };
     }
 
+    private normalizeHealthCheckResult(parsed: Partial<AIHealthCheckResult>): AIHealthCheckResult {
+        const status = parsed.status === 'HEALTHY' ? 'HEALTHY' : 'CRITICAL';
+        const confidenceLevel = ['high', 'medium', 'low'].includes(parsed.confidenceLevel || '')
+            ? (parsed.confidenceLevel as AIHealthCheckResult['confidenceLevel'])
+            : 'low';
+
+        return {
+            status,
+            confidenceLevel,
+            reasoning:
+                typeof parsed.reasoning === 'string' && parsed.reasoning.trim().length > 0
+                    ? parsed.reasoning.trim().slice(0, 500)
+                    : 'AI health check did not provide a clear reason.',
+            reentrySignal: parsed.reentrySignal === true,
+        };
+    }
+
+    private getDeterministicHealthCheck(metrics: AIHealthCheckMetrics): AIHealthCheckResult {
+        const buyConfidence = this.calculateBuyConfidence(metrics);
+        const socialCount = [metrics.hasWebsite, metrics.hasTwitter, metrics.hasTelegram].filter(Boolean).length;
+        const volumeSurge = metrics.volumeSurge ?? 0;
+        const liquidityDead = metrics.liquidityUsd <= 0;
+        const volumeDead = metrics.volume5mUsd <= 0;
+        const sellPressure = metrics.sells5mCount >= Math.max(5, metrics.buys5mCount * 1.5);
+        const volumeCollapse = volumeSurge > 0 && volumeSurge < 0.5;
+        const deepMomentumBreak = metrics.priceChange1hPct <= -25;
+
+        if (liquidityDead || volumeDead || sellPressure || volumeCollapse || deepMomentumBreak) {
+            const reasons = [
+                liquidityDead ? 'liquidity kosong' : undefined,
+                volumeDead ? 'volume 5m kosong' : undefined,
+                sellPressure ? 'sell pressure dominan' : undefined,
+                volumeCollapse ? 'volume acceleration melemah tajam' : undefined,
+                deepMomentumBreak ? 'momentum 1h breakdown' : undefined,
+            ].filter(Boolean);
+            return {
+                status: 'CRITICAL',
+                confidenceLevel: 'medium',
+                reasoning: `Fallback health check critical: ${reasons.join(', ')}.`,
+                reentrySignal: false,
+            };
+        }
+
+        const hasBouncePressure = metrics.buys5mCount > metrics.sells5mCount && volumeSurge >= 1.1;
+        const hasHealthyStructure = buyConfidence >= 0.55 && metrics.volume5mUsd > 0 && metrics.liquidityUsd > 0;
+        const hasSocialAnchor = socialCount > 0;
+
+        if (hasHealthyStructure && (hasBouncePressure || hasSocialAnchor)) {
+            return {
+                status: 'HEALTHY',
+                confidenceLevel: hasBouncePressure ? 'medium' : 'low',
+                reasoning: hasBouncePressure
+                    ? 'Holding karena buy pressure dan volume acceleration masih positif walau harga sedang dip.'
+                    : 'Holding karena struktur volume masih hidup dan token masih punya social anchor.',
+                reentrySignal: hasBouncePressure,
+            };
+        }
+
+        return {
+            status: 'CRITICAL',
+            confidenceLevel: 'low',
+            reasoning: 'Fallback health check critical: sinyal kesehatan tidak cukup kuat untuk menahan posisi dekat stop loss.',
+            reentrySignal: false,
+        };
+    }
+
+    async evaluateTokenHealth(
+        tokenMint: string,
+        symbol: string,
+        metrics: AIHealthCheckMetrics,
+    ): Promise<AIHealthCheckResult> {
+        const fallback = this.getDeterministicHealthCheck(metrics);
+        const apiKey = this.configService.get<string>('OPENAI_API_KEY');
+        if (!apiKey) {
+            this.logger.warn(`[AI Health] OPENAI_API_KEY is not configured for ${tokenMint}. Using deterministic fallback.`);
+            return fallback;
+        }
+
+        const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
+        const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
+
+        try {
+            const response = await axios.post<OpenAIChatCompletionResponse>(
+                `${baseUrl}/chat/completions`,
+                {
+                    model,
+                    messages: [
+                        {
+                            role: 'system',
+                            content: `You are MaSoul Sniper's AI Health Check Engine for already-open Solana positions.
+Return only valid JSON with exactly these fields:
+{
+  "status": "HEALTHY" | "CRITICAL",
+  "confidenceLevel": "high" | "medium" | "low",
+  "reasoning": "brief Indonesian reason, max 2 sentences",
+  "reentrySignal": true | false
+}
+Rules:
+- CRITICAL means force sell immediately even before full stop loss if liquidity is gone, volume collapses, sells dominate, socials are absent with weak on-chain support, or momentum is structurally broken.
+- HEALTHY means temporary dip can be held until the configured stop-loss limit because volume acceleration, buy pressure, liquidity, or social support still validates the trade.
+- reentrySignal can be true only when status is HEALTHY and buy pressure/volume acceleration suggests a bounce.
+- Be conservative. Do not mark HEALTHY without concrete on-chain or social support.`,
+                        },
+                        {
+                            role: 'user',
+                            content: JSON.stringify({
+                                tokenMint,
+                                symbol,
+                                pnlPercent: metrics.currentProfitPercent,
+                                stopLossPercent: metrics.stopLossPercent,
+                                ageHours: metrics.ageHours,
+                                liquidityUsd: metrics.liquidityUsd,
+                                marketCapUsd: metrics.marketCapUsd,
+                                volume5mUsd: metrics.volume5mUsd,
+                                buys5mCount: metrics.buys5mCount,
+                                sells5mCount: metrics.sells5mCount,
+                                buyConfidence: this.calculateBuyConfidence(metrics),
+                                priceChange1hPct: metrics.priceChange1hPct,
+                                volumeSurge: metrics.volumeSurge,
+                                volScore: metrics.volScore,
+                                zScore: metrics.zScore,
+                                socials: {
+                                    website: metrics.hasWebsite,
+                                    twitter: metrics.hasTwitter,
+                                    telegram: metrics.hasTelegram,
+                                    dexPaidUpdated: metrics.isDexPaidUpdated,
+                                    communityTakeover: metrics.isCommunityTakeover,
+                                },
+                                route: metrics.route,
+                                fallbackVerdict: fallback,
+                            }),
+                        },
+                    ],
+                    response_format: { type: 'json_object' },
+                    temperature: 0.1,
+                },
+                {
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json',
+                    },
+                    timeout: 8000,
+                },
+            );
+
+            const content = response.data.choices?.[0]?.message?.content;
+            if (!content) throw new Error('Empty response from AI health check');
+
+            const result = this.normalizeHealthCheckResult(JSON.parse(content) as Partial<AIHealthCheckResult>);
+            this.logger.log(
+                `[AI Health] ${symbol || tokenMint} verdict=${result.status} confidence=${result.confidenceLevel} reentry=${result.reentrySignal} reason=${result.reasoning}`,
+            );
+            return result;
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[AI Health] Check failed for ${tokenMint}: ${msg}. Using fallback=${fallback.status}.`);
+            return {
+                ...fallback,
+                reasoning: `${fallback.reasoning} AI unavailable: ${msg}`.slice(0, 500),
+            };
+        }
+    }
     async analyzeToken(
         tokenMint: string,
         symbol: string,

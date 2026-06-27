@@ -20,6 +20,42 @@ import {
     TokenMetadata,
 } from '../dto/analyzer.dto';
 
+function getPairLiquidityUsd(pair: DexScreenerPair): number {
+    const value = pair.liquidity?.usd ?? 0;
+    return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function getPairVolume5m(pair: DexScreenerPair): number {
+    const value = pair.volume?.m5 ?? 0;
+    return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function getPairTxns5m(pair: DexScreenerPair): number {
+    const buys = pair.txns?.m5?.buys ?? 0;
+    const sells = pair.txns?.m5?.sells ?? 0;
+    return Math.max(buys, 0) + Math.max(sells, 0);
+}
+
+export function selectBestDexScreenerPair(
+    pairs: DexScreenerPair[] | undefined,
+): DexScreenerPair | undefined {
+    const solanaPairs = (pairs || []).filter(
+        (pair) => pair.chainId?.toLowerCase() === 'solana',
+    );
+
+    return solanaPairs.sort((a, b) => {
+        const liquidityDelta = getPairLiquidityUsd(b) - getPairLiquidityUsd(a);
+        if (liquidityDelta !== 0) return liquidityDelta;
+
+        const volumeDelta = getPairVolume5m(b) - getPairVolume5m(a);
+        if (volumeDelta !== 0) return volumeDelta;
+
+        const txnDelta = getPairTxns5m(b) - getPairTxns5m(a);
+        if (txnDelta !== 0) return txnDelta;
+
+        return (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0);
+    })[0];
+}
 @Injectable()
 export class AnalyzerService {
     private readonly logger = new Logger(AnalyzerService.name);
@@ -694,9 +730,14 @@ export class AnalyzerService {
                     httpsAgent: this.getHttpsAgent(),
                 },
             );
-
-            const pair = response.data.pairs?.[0];
-            if (!pair) return { passed: false, reason: 'no_dex_pair', permanent: false };
+            const pairs = response.data.pairs || [];
+            const pair = selectBestDexScreenerPair(pairs);
+            if (!pair) {
+                this.logger.debug(
+                    `[${tokenMint}] Market pair selection failed: no_solana_pair pairsCount=${pairs.length}`,
+                );
+                return { passed: false, reason: 'no_dex_pair', permanent: false };
+            }
 
             const liquidity = pair.liquidity?.usd || 0;
             const volume5m = pair.volume?.m5 || 0;
@@ -713,10 +754,19 @@ export class AnalyzerService {
                 telegram: pair.info?.socials?.find((s) => s.type === 'telegram')?.url,
                 website: pair.info?.websites?.[0]?.url,
             };
+            const logMarketMetricReject = (reason: string): void => {
+                const ageSeconds = pairCreatedAt
+                    ? Math.max((Date.now() - pairCreatedAt) / 1000, 0)
+                    : 0;
+                this.logger.debug(
+                    `[${tokenMint}] Market metric context reason=${reason} pairsCount=${pairs.length} selectedDexId=${pair.dexId || 'unknown'} liquidity=${liquidity.toFixed(2)} volume5m=${volume5m.toFixed(2)} buys5m=${buys5m} sells5m=${sells5m} marketCap=${marketCap.toFixed(2)} ageSeconds=${ageSeconds.toFixed(1)}`,
+                );
+            };
 
             // 🛡️ HARD REJECT: Token tanpa liquidity = impossible to sell tanpa massive slippage
             if (!liquidity || liquidity < 1000) {
                 const isYoung = Date.now() - (pair.pairCreatedAt || 0) < 1000 * 60 * 60; // < 1 hour
+                logMarketMetricReject('zero_liquidity');
                 return {
                     passed: false,
                     reason: 'zero_liquidity',
@@ -731,6 +781,7 @@ export class AnalyzerService {
 
             // 🚀 EARLY REJECT: Cek filter murah dulu sebelum kalkulasi mahal
             if (liquidity < minLiq) {
+                logMarketMetricReject('low_metrics');
                 return {
                     passed: false,
                     reason: 'low_metrics',
@@ -742,6 +793,7 @@ export class AnalyzerService {
                 };
             }
             if (volume5m < minVol) {
+                logMarketMetricReject('low_metrics');
                 return {
                     passed: false,
                     reason: 'low_metrics',
@@ -753,6 +805,7 @@ export class AnalyzerService {
                 };
             }
             if (buys5m < minBuys) {
+                logMarketMetricReject('low_metrics');
                 return {
                     passed: false,
                     reason: 'low_metrics',
@@ -802,6 +855,7 @@ export class AnalyzerService {
 
             if (marketCap < minMCap || marketCap > maxMCap) {
                 const isPerm = marketCap > maxMCap; // MCap kegedean baru permanent
+                logMarketMetricReject(marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low');
                 return {
                     passed: false,
                     reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low',
@@ -832,6 +886,7 @@ export class AnalyzerService {
             if (ageHours < minAge || ageHours > maxAge) {
                 const isTooOld = ageHours > maxAge;
                 const isPerm = isTooOld && ageHours > absoluteMaxAge;
+                logMarketMetricReject(isTooOld ? 'too_old' : 'too_young');
                 return {
                     passed: false,
                     reason: isTooOld ? 'too_old' : 'too_young',
@@ -855,6 +910,7 @@ export class AnalyzerService {
                 this.configService.get<string>('ANALYZER_MIN_VOLUME_SURGE', '1.5'),
             );
             if (volumeSurge < minSurge) {
+                logMarketMetricReject('low_surge');
                 return {
                     passed: false,
                     reason: 'low_surge',
@@ -873,6 +929,7 @@ export class AnalyzerService {
                 };
             }
             if (priceChange1h < -15) {
+                logMarketMetricReject('bearish_trend');
                 return {
                     passed: false,
                     reason: 'bearish_trend',
@@ -892,6 +949,7 @@ export class AnalyzerService {
             }
 
             if (vlRatio < minVlRatio) {
+                logMarketMetricReject('low_vl_ratio');
                 return {
                     passed: false,
                     reason: 'low_vl_ratio',
@@ -912,6 +970,7 @@ export class AnalyzerService {
 
             // 📊 BUY VS SELL RATIO (Confidence Score)
             if (confidenceScore < minConfidence) {
+                logMarketMetricReject('low_buy_confidence');
                 return {
                     passed: false,
                     reason: 'low_buy_confidence',
@@ -930,6 +989,7 @@ export class AnalyzerService {
             }
 
             if (velocity < minVelocity) {
+                logMarketMetricReject('low_velocity');
                 return {
                     passed: false,
                     reason: 'low_velocity',

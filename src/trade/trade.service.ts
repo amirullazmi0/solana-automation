@@ -1174,6 +1174,7 @@ export class TradeService implements OnModuleInit {
                 'DEV_DUMP',
                 'RUGPULL',
                 'PANIC_SELL',
+                'AI_HEALTH_CRITICAL',
             ].includes(exitReason);
             const sellSlippage = isUrgent ? 1500 : this.slippageBps;
 
