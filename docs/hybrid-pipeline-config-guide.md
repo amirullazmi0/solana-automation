@@ -33,6 +33,10 @@ Bagian ini penting supaya guide tidak bentrok dengan implementasi sekarang dan a
 ### 2.1 Current runtime behavior
 
 Perilaku code saat ini:
+- token muda dengan liquidity kosong / sangat kecil akan fail `zero_liquidity` sebagai temporary fail, status watchlist tetap `PENDING`, active monitor keluar, lalu background radar akan re-check lagi nanti
+- `no_dex_pair` di active monitor di-retry cepat sampai 3 kali dengan backoff pendek; setelah itu token ditahan di `seenTokens` sekitar 5 menit dan watchlist reason disimpan sebagai `no_dex_pair`
+- market metric temporary fail seperti `zero_liquidity`, `low_buy_confidence`, `low_metrics`, `low_surge`, `low_vl_ratio`, dan `low_velocity` tidak terus menahan slot active monitor; slot dilepas supaya scanner tetap bisa memproses token lain
+- background radar membaca watchlist `PENDING` yang `lastCheckedAt` lebih tua dari 3 menit, mengambil sampai 20 token, lalu men-stagger enqueue sekitar 100ms per token
 - hard fail / permanent fail tidak mengirim `SECOND-WAVE RADAR`
 - hard fail saat ini juga di-suppress dari Telegram oleh scanner, jadi tidak otomatis kirim `WATCHLIST BLOCKED`
 - soft reason hanya masuk radar jika termasuk allowlist runtime:
@@ -43,6 +47,24 @@ Perilaku code saat ini:
 - `low_metrics`, `ai_rejected`, dan `noisy_pump` saat ini bukan radar candidate
 - signal yang lolos analyzer akan kirim `MUST BUY SIGNAL - EXECUTION ATTEMPTING` untuk live mode atau `MUST BUY SIGNAL - DRY RUN` untuk dry run
 - buy yang gagal di execution layer bisa mengirim `BUY EXECUTION FAILED`
+
+### 2.1.1 Cara baca log scanner aktif
+
+Contoh pola log:
+
+```text
+Monitoring for traction... [Active: 1/40]
+Token ... skipped: zero_liquidity
+Market metric temporary fail (zero_liquidity). Exiting active monitor to let background radar handle it.
+[Heartbeat] Scanner Active: 0/40 | Seen: 70 tokens
+```
+
+Maknanya:
+- `Active: 0/40` bukan berarti scanner mati. Itu berarti tidak ada token yang sedang ditahan di active loop saat heartbeat berjalan.
+- Token yang fail metric sementara tetap bisa berada di watchlist `PENDING` dan akan diambil ulang oleh persistent radar setelah cukup lama tidak dicek.
+- `Seen` adalah cache anti-duplikasi in-memory, bukan jumlah watchlist database.
+- Banyak `zero_liquidity` pada token pump/migration normal terjadi ketika DexScreener pair atau liquidity belum siap, atau pair pertama yang dikembalikan DexScreener belum punya liquidity cukup.
+- Token berubah terminal hanya jika analyzer mengembalikan `permanent: true`, misalnya `high_risk_score`, `honeypot`, `bearish_trend`, `mcap_too_high`, atau `zero_liquidity` pada token yang sudah tidak muda.
 
 ### 2.2 Target notification semantics
 
@@ -82,29 +104,29 @@ Invariant yang harus dianggap source of truth:
   "TAKE_PROFIT_PERCENT": 15,
   "STOP_LOSS_PERCENT": 12,
   "TRAILING_DISTANCE_PERCENT": 1.5,
-  "MICIN_TRAILING_ACTIVATION_PERCENT": 10,
-  "WHALE_TRAILING_ACTIVATION_PERCENT": 8,
-  "MICIN_TRAILING_DISTANCE_PERCENT": 5,
-  "WHALE_TRAILING_DISTANCE_PERCENT": 3,
-  "MICIN_TAKE_PROFIT_PERCENT": 22,
-  "WHALE_TAKE_PROFIT_PERCENT": 15,
-  "MICIN_STOP_LOSS_PERCENT": 12,
-  "WHALE_STOP_LOSS_PERCENT": 10,
+  "MICIN_TRAILING_ACTIVATION_PERCENT": 8,
+  "WHALE_TRAILING_ACTIVATION_PERCENT": 7,
+  "MICIN_TRAILING_DISTANCE_PERCENT": 6,
+  "WHALE_TRAILING_DISTANCE_PERCENT": 3.5,
+  "MICIN_TAKE_PROFIT_PERCENT": 25,
+  "WHALE_TAKE_PROFIT_PERCENT": 18,
+  "MICIN_STOP_LOSS_PERCENT": 11,
+  "WHALE_STOP_LOSS_PERCENT": 9,
   "DISABLE_SL_PATIENCE": true,
   "MIN_MCAP": 5000,
   "MAX_MCAP": 3000000,
   "MIN_AGE_HOURS": 0.02,
   "MAX_AGE_HOURS": 72,
-  "MIN_BUY_CONFIDENCE": 0.6,
+  "MIN_BUY_CONFIDENCE": 0.58,
   "RUGCHECK_MIN_SAFETY_INDEX": 0.8,
   "MIN_LIQUIDITY_USD": 5000,
-  "MIN_VOLUME_USD": 200,
+  "MIN_VOLUME_USD": 150,
   "MIN_BUY_COUNT": 3,
-  "MIN_VL_RATIO": 0.08,
-  "MIN_VOLUME_MCAP_RATIO": 0.05,
+  "MIN_VL_RATIO": 0.06,
+  "MIN_VOLUME_MCAP_RATIO": 0.035,
   "ANALYZER_MIN_VOL_SCORE": 0.02,
-  "ANALYZER_MIN_Z_SCORE": 1.5,
-  "ANALYZER_MIN_VOLUME_SURGE": 1.5,
+  "ANALYZER_MIN_Z_SCORE": 1.2,
+  "ANALYZER_MIN_VOLUME_SURGE": 1.3,
   "ESTABLISHED_MIN_AGE_HOURS": 24,
   "ESTABLISHED_MAX_AGE_HOURS": 72,
   "ESTABLISHED_MIN_BUYS": 5,
@@ -124,8 +146,8 @@ Invariant yang harus dianggap source of truth:
   "TRADE_MAX_RETRIES": 5,
   "TRADE_PRIORITY_MULTIPLIER": 3,
   "MAX_PRICE_IMPACT_PCT": 10,
-  "MICIN_MAX_PRICE_IMPACT_PCT": 2.5,
-  "WHALE_MAX_PRICE_IMPACT_PCT": 1,
+  "MICIN_MAX_PRICE_IMPACT_PCT": 3,
+  "WHALE_MAX_PRICE_IMPACT_PCT": 1.25,
   "USE_JITO": true,
   "JITO_TIP_SOL": 0.001,
   "JITO_BLOCK_ENGINE_URL": "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
@@ -140,11 +162,13 @@ Invariant yang harus dianggap source of truth:
   "RISK_APPLY_TO_MANUAL": false,
   "AI_BASE_URL": "https://api.openai.com/v1",
   "AI_MODEL": "gpt-4o-mini",
-  "AI_CONVICTION_THRESHOLD": 75,
-  "WHALE_SIGNAL_SCORE_FLOOR": 45,
+  "AI_CONVICTION_THRESHOLD": 70,
+  "WHALE_SIGNAL_SCORE_FLOOR": 38,
   "COOLDOWN_WIN_HOURS": 6,
-  "COOLDOWN_LOSS_HOURS": 24
+  "COOLDOWN_LOSS_HOURS": 24,
+  "RISK_PNL_START_AT": "2026-06-27T05:20:00+07:00"
 }
+
 ```
 
 ## 4. Formula Utama
@@ -250,7 +274,9 @@ Kalau total realized PnL <= `-5`, buy baru diblok.
 Peringatan operasional:
 - ini bukan analyzer bug
 - ini portfolio lockout
-- kalau historical realized PnL sudah jauh negatif, bot bisa terus terkunci sampai baseline capital atau risk state direset sesuai policy
+- `RISK_PNL_START_AT` membatasi query total PnL dan consecutive loss ke trade `CLOSED` live sejak timestamp itu
+- daily loss tetap memakai awal hari UTC, kecuali `RISK_PNL_START_AT` lebih baru dari awal hari UTC
+- kalau `RISK_PNL_START_AT` kosong, total realized PnL memakai seluruh histori closed live trade
 
 Contoh:
 - `TOTAL_CAPITAL = 25`
@@ -457,14 +483,14 @@ Sampai itu diimplementasi penuh, anggap pair selection DexScreener sebagai known
 | Key | Rumus / Pemakaian | Dampak | Saran Tuning |
 |---|---|---|---|
 | `MIN_LIQUIDITY_USD` | liquidity minimal | Buang token terlalu tipis | Micin `5000-15000`, Whale `10000+` |
-| `MIN_VOLUME_USD` | volume 5m minimal | Buang token sepi | `200` cukup rendah |
+| `MIN_VOLUME_USD` | volume 5m minimal | Buang token sepi | `150` cukup longgar untuk early discovery |
 | `MIN_BUY_COUNT` | buys 5m minimal | Buang token tanpa flow real | `3-5` |
-| `MIN_BUY_CONFIDENCE` | `buys / (buys+sells)` | Filter buy pressure | `0.6 - 0.65` |
-| `MIN_VL_RATIO` | `volume5m / liquidity` | Tekanan volume terhadap LP | `0.05 - 0.10` |
-| `MIN_VOLUME_MCAP_RATIO` | `volume5m / marketCap` | Filter velocity lemah | `0.03 - 0.08` |
+| `MIN_BUY_CONFIDENCE` | `buys / (buys+sells)` | Filter buy pressure | config aktif `0.58`, umum `0.58 - 0.65` |
+| `MIN_VL_RATIO` | `volume5m / liquidity` | Tekanan volume terhadap LP | config aktif `0.06`, umum `0.05 - 0.10` |
+| `MIN_VOLUME_MCAP_RATIO` | `volume5m / marketCap` | Filter velocity lemah | config aktif `0.035`, umum `0.03 - 0.08` |
 | `ANALYZER_MIN_VOL_SCORE` | `(volume5m/liquidity) * confidence` | Filter shock volume lemah | `0.02` longgar |
-| `ANALYZER_MIN_Z_SCORE` | pseudo anomaly z-score | Butuh volume anomaly | `1.3 - 1.8` |
-| `ANALYZER_MIN_VOLUME_SURGE` | `volume5m / (volume1h/12)` | Butuh percepatan volume | `1.5 - 2.0` |
+| `ANALYZER_MIN_Z_SCORE` | pseudo anomaly z-score | Butuh volume anomaly | config aktif `1.2`, umum `1.2 - 1.8` |
+| `ANALYZER_MIN_VOLUME_SURGE` | `volume5m / (volume1h/12)` | Butuh percepatan volume | config aktif `1.3`, umum `1.3 - 2.0` |
 
 ### 7.4 Market shape
 
@@ -481,7 +507,7 @@ Sampai itu diimplementasi penuh, anggap pair selection DexScreener sebagai known
 
 | Key | Rumus / Pemakaian | Dampak | Saran Tuning |
 |---|---|---|---|
-| `WHALE_SIGNAL_SCORE_FLOOR` | floor whale score | Makin tinggi, whale makin strict | `40 - 50` |
+| `WHALE_SIGNAL_SCORE_FLOOR` | floor whale score | Makin tinggi, whale makin strict | config aktif `38`, umum `38 - 50` |
 | social booleans | masuk whale score | Filter token tua tanpa komunitas | Harus tetap aktif |
 | narrative match | bonus whale score | Bias ke meta yang lagi hidup | Biarkan |
 
@@ -493,8 +519,8 @@ Sampai itu diimplementasi penuh, anggap pair selection DexScreener sebagai known
 | `MICIN_MAX_SLIPPAGE_BPS` | cap slippage micin | Menahan bad fill micin | `200 - 300` |
 | `WHALE_MAX_SLIPPAGE_BPS` | cap slippage whale | Whale harus rapih | `100 - 150` |
 | `MAX_PRICE_IMPACT_PCT` | fallback impact global | Guard generic | `10` boleh fallback |
-| `MICIN_MAX_PRICE_IMPACT_PCT` | cap impact micin | Hindari fill jelek | `2.0 - 3.0` |
-| `WHALE_MAX_PRICE_IMPACT_PCT` | cap impact whale | Whale harus ketat | `0.75 - 1.25` |
+| `MICIN_MAX_PRICE_IMPACT_PCT` | cap impact micin | Hindari fill jelek | config aktif `3`, umum `2.0 - 3.0` |
+| `WHALE_MAX_PRICE_IMPACT_PCT` | cap impact whale | Whale harus ketat | config aktif `1.25`, umum `0.75 - 1.25` |
 | `TRADE_FEE_CUSHION_SOL` | cushion fee | Sisakan SOL untuk fee dan retry | `0.005` oke |
 | `TRADE_TIMEOUT_MS` | timeout request trade | Lindungi bot dari request macet | `10000 - 15000` |
 | `TRADE_MAX_RETRIES` | retry swap/quote | Lebih tahan error, tapi lebih agresif | `3 - 5` |
@@ -508,6 +534,7 @@ Sampai itu diimplementasi penuh, anggap pair selection DexScreener sebagai known
 | `MICIN_MAX_CONSECUTIVE_LOSSES` | route-specific streak | Micin boleh lebih tahan | `3` |
 | `WHALE_MAX_CONSECUTIVE_LOSSES` | route-specific streak | Whale lebih ketat | `2` |
 | `MAX_DRAWDOWN_PCT` | drawdown portfolio max | Guard modal total | `15 - 25` |
+| `RISK_PNL_START_AT` | ISO timestamp untuk batas awal query PnL risk | Menghindari histori lama mengunci risk breaker setelah baseline direset | kosongkan untuk pakai seluruh histori; isi timestamp valid untuk baseline baru |
 | `DISABLE_BUY_UNTIL` | freeze sampai timestamp | Emergency stop manual | kosong saat normal |
 | `RISK_APPLY_TO_MANUAL` | apply breaker ke manual buy | Kalau `false`, manual buy lebih bebas | `false` untuk debug |
 
@@ -522,10 +549,10 @@ Sampai itu diimplementasi penuh, anggap pair selection DexScreener sebagai known
 | `WHALE_STOP_LOSS_PERCENT` | SL whale | Whale lebih rapat | `8 - 12` |
 | `MICIN_TAKE_PROFIT_PERCENT` | TP micin | Target upside micin | `18 - 30` |
 | `WHALE_TAKE_PROFIT_PERCENT` | TP whale | Target upside whale | `12 - 20` |
-| `MICIN_TRAILING_ACTIVATION_PERCENT` | trailing start micin | Cegah exit terlalu cepat | `10 - 15` |
-| `WHALE_TRAILING_ACTIVATION_PERCENT` | trailing start whale | Whale lebih cepat lock | `8 - 12` |
-| `MICIN_TRAILING_DISTANCE_PERCENT` | trailing distance micin | Harus lebih lebar | `4 - 8` |
-| `WHALE_TRAILING_DISTANCE_PERCENT` | trailing distance whale | Lebih ketat | `2.5 - 5` |
+| `MICIN_TRAILING_ACTIVATION_PERCENT` | trailing start micin | Cegah exit terlalu cepat | config aktif `8`, umum `8 - 15` |
+| `WHALE_TRAILING_ACTIVATION_PERCENT` | trailing start whale | Whale lebih cepat lock | config aktif `7`, umum `7 - 12` |
+| `MICIN_TRAILING_DISTANCE_PERCENT` | trailing distance micin | Harus lebih lebar | config aktif `6`, umum `4 - 8` |
+| `WHALE_TRAILING_DISTANCE_PERCENT` | trailing distance whale | Lebih ketat | config aktif `3.5`, umum `2.5 - 5` |
 
 ### 7.9 Scanner timing
 
@@ -544,7 +571,7 @@ Sampai itu diimplementasi penuh, anggap pair selection DexScreener sebagai known
 |---|---|---|---|
 | `AI_BASE_URL` | endpoint AI | Infrastruktur | jangan ubah kecuali provider berubah |
 | `AI_MODEL` | model conviction | Kualitas AI judge | `gpt-4o-mini` cukup cepat |
-| `AI_CONVICTION_THRESHOLD` | buy jika score >= threshold | Makin tinggi, makin ketat | `70 - 80` |
+| `AI_CONVICTION_THRESHOLD` | buy jika score >= threshold | Makin tinggi, makin ketat | config aktif `70`, umum `70 - 80` |
 | `MARKET_REGIME` | label konteks AI / guide | Saat ini tidak mengubah math core execution | Anggap `AI-only` sampai ada route/threshold tuning berbasis regime |
 
 Catatan `MARKET_REGIME`:
@@ -639,12 +666,12 @@ Urutan faktor paling besar ke performa:
 ## 11. Saran Tuning Singkat
 
 ### 11.1 Kalau terlalu sepi
-- turunkan `AI_CONVICTION_THRESHOLD` ke `72`
-- atau turunkan `WHALE_SIGNAL_SCORE_FLOOR` ke `40`
-- atau longgarkan `ANALYZER_MIN_Z_SCORE` ke `1.3`
+- turunkan `AI_CONVICTION_THRESHOLD` hanya jika mau lebih longgar dari config aktif `70`
+- atau turunkan `WHALE_SIGNAL_SCORE_FLOOR` hanya jika mau lebih longgar dari config aktif `38`
+- atau longgarkan `ANALYZER_MIN_Z_SCORE` hanya jika mau lebih longgar dari config aktif `1.2`
 
 ### 11.2 Kalau fake pump masih banyak lolos
-- naikkan `MIN_BUY_CONFIDENCE` ke `0.65`
+- naikkan `MIN_BUY_CONFIDENCE` ke `0.62 - 0.65`
 - perketat `MICIN_MAX_PRICE_IMPACT_PCT` ke `2.0`
 - jangan naikkan cap slippage whale
 
