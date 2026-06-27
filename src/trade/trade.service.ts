@@ -18,16 +18,12 @@ import * as https from 'https';
 import { DexLimiter } from '../common/dex-limiter';
 import { TokenMetadata, TradeExecutionPayload } from '../dto/analyzer.dto';
 import { PrismaService } from '../prisma/prisma.service';
+import { BuyExecutionOptions, BuyRiskConfig, BuyRiskMetrics, TradeAuditFields } from '../dto/trade.dto';
 import { ReportingService } from '../reporting/reporting.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 
 export const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
-type TradeAuditFields = {
-    solPriceAtEntry?: number | null;
-    entryValueUsd?: number | null;
-    totalFeesSol?: number | null;
-};
 
 export class TokenDecimalsUnavailableError extends Error {
     constructor(public readonly mint: string) {
@@ -125,29 +121,6 @@ export function capSlippageBps(requestedSlippageBps: number, maxSlippageBps: num
     const max = Number.isFinite(maxSlippageBps) && maxSlippageBps > 0 ? maxSlippageBps : 100;
     return Math.max(1, Math.min(Math.round(requested), Math.round(max)));
 }
-export type BuyRiskMetrics = {
-    dailyRealizedPnlUsd: number;
-    consecutiveLosses: number;
-    totalRealizedPnlUsd: number;
-};
-
-export type BuyRiskConfig = {
-    disabledUntilMs: number | null;
-    dailyMaxLossUsd: number; // blocks when daily PnL <= -dailyMaxLossUsd
-    maxConsecutiveLosses: number; // blocks when consecutiveLosses >= limit
-    maxDrawdownPct: number; // blocks when total PnL <= -(totalCapital * pct/100)
-};
-
-export type BuyExecutionOptions = {
-    customSlippageBps?: number;
-    priorityFeeSol?: number;
-    targetTakeProfit?: number;
-    targetStopLoss?: number;
-    targetTrailingDistance?: number;
-    route?: TradeRoute;
-    positionSizeMultiplier?: number;
-    aiDecisionSnapshotId?: number;
-};
 
 export function evaluateBuyRisk(
     metrics: BuyRiskMetrics,

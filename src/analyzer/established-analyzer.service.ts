@@ -18,12 +18,8 @@ import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { DexLimiter } from '../common/dex-limiter';
 import { CreatorProfileService } from './creator-profile.service';
+import { ReboundResult } from '../dto/established-analyzer.dto';
 
-export interface ReboundResult {
-    isEstablished: boolean;
-    executed: boolean;
-    reason?: string;
-}
 
 @Injectable()
 export class EstablishedAnalyzerService {

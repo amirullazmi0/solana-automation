@@ -20,17 +20,8 @@ import {
     HeliusTokenTransfer,
 } from '../dto/helius-webhook.dto';
 import { ScannerService } from './scanner.service';
+import { DepositLedgerInsertResult, NativeDepositBatch } from '../dto/helius-controller.dto';
 
-interface NativeDepositBatch {
-    walletPublicKey: string;
-    amountLamports: number;
-}
-
-interface DepositLedgerInsertResult {
-    chatId: string;
-    newBalanceSol: number;
-    amountSol: number;
-}
 
 @Controller('helius')
 export class HeliusWebhookController {

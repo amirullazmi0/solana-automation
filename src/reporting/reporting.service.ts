@@ -8,38 +8,18 @@ import * as https from 'https';
 import * as TelegramBot from 'node-telegram-bot-api';
 import { DexLimiter } from '../common/dex-limiter';
 import { TokenMetadata } from '../dto/analyzer.dto';
+import {
+    TradeFailureAlertParams,
+    WatchlistReasonMapping,
+    WatchlistStatusUpdateParams,
+    WatchlistTelegramSeverity,
+    WatchlistTelegramStatus,
+} from '../dto/reporting.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 import { ScannerService } from '../scanner/scanner.service';
 import { TradeService } from '../trade/trade.service';
 
-type WatchlistTelegramStatus = 'WAITING' | 'REJECTED' | 'BLOCKED';
-type WatchlistTelegramSeverity = 'soft_fail' | 'hard_fail' | 'unknown';
-
-interface WatchlistStatusUpdateParams {
-    tokenMint: string;
-    symbol?: string;
-    route?: string;
-    reason?: string;
-    permanent?: boolean;
-    mcap?: number;
-    liquidity?: number;
-    ageHours?: number;
-    volumeSurge?: number;
-    volScore?: number;
-    zScore?: number;
-    whaleSignalScore?: number;
-    retryCount?: number;
-    maxRetries?: number;
-}
-
-interface WatchlistReasonMapping {
-    status: WatchlistTelegramStatus;
-    label: string;
-    severity: WatchlistTelegramSeverity;
-    message: string;
-    action: string;
-}
 @Injectable()
 export class ReportingService implements OnModuleInit {
     private readonly logger = new Logger(ReportingService.name);
@@ -1252,17 +1232,7 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(message, {}, 0, targetChatId);
     }
 
-    async sendTradeFailureAlert(params: {
-        side: 'BUY' | 'SELL';
-        tokenMint: string;
-        symbol?: string;
-        reason: string;
-        stage?: 'PRE_SWAP' | 'SWAP';
-        amountUsd?: number;
-        amountSol?: number;
-        targetChatId?: string;
-        details?: string;
-    }): Promise<void> {
+    async sendTradeFailureAlert(params: TradeFailureAlertParams): Promise<void> {
         const displaySymbol = params.symbol || 'UNKNOWN';
         const stageLabel = params.stage || 'PRE_SWAP';
         const amountUsdLine =
