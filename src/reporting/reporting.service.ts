@@ -1235,29 +1235,30 @@ export class ReportingService implements OnModuleInit {
     async sendTradeFailureAlert(params: TradeFailureAlertParams): Promise<void> {
         const displaySymbol = params.symbol || 'UNKNOWN';
         const stageLabel = params.stage || 'PRE_SWAP';
-        const routeLine = params.route ? `Route: \`${params.route}\`\n` : '';
+        const routeLine = params.route ? `\u{1F9ED} Route: ${params.route}\n` : '';
         const amountUsdLine =
-            params.amountUsd !== undefined ? `Attempted USD: \`$${params.amountUsd.toFixed(2)}\`\n` : '';
+            params.amountUsd !== undefined ? `\u{1F4B5} Attempted USD: $${params.amountUsd.toFixed(2)}\n` : '';
         const amountSolLine =
-            params.amountSol !== undefined ? `Attempted SOL: \`${params.amountSol.toFixed(4)} SOL\`\n` : '';
-        const detailsLine = params.details ? `\nDetails:\n${params.details}\n` : '';
+            params.amountSol !== undefined ? `\u{1F48E} Attempted SOL: ${params.amountSol.toFixed(4)} SOL\n` : '';
+        const detailsLine = params.details ? `\n\u{1F4CB} Details:\n${params.details}\n` : '';
 
         const message =
-            `*${params.side} EXECUTION FAILED*\n` +
-            `??????????????????\n` +
-            `Token: ${displaySymbol}\n` +
-            `Mint: \`${params.tokenMint}\`\n` +
+            `\u{26A0}\u{FE0F} ${params.side} EXECUTION FAILED\n` +
+            `------------------\n` +
+            `\u{1F48E} Token: ${displaySymbol}\n` +
+            `\u{1F194} Mint: ${params.tokenMint}\n` +
             routeLine +
-            `Stage: \`${stageLabel}\`\n` +
-            `Reason: \`${params.reason}\`\n` +
+            `\u{1F9F1} Stage: ${stageLabel}\n` +
+            `\u{1F6AB} Reason: ${params.reason}\n` +
             amountUsdLine +
             amountSolLine +
             detailsLine +
-            `??????????????????\n` +
-            `Status: \`No live trade was opened.\``;
+            `------------------\n` +
+            `\u{1F6A6} Status: No live trade was opened.`;
 
-        await this.sendMessage(message, {}, 0, params.targetChatId);
+        await this.sendMessage(message, { parse_mode: undefined }, 0, params.targetChatId);
     }
+
     async sendDepositNotification(params: {
         targetChatId: string;
         walletAddress: string;
@@ -1498,10 +1499,15 @@ export class ReportingService implements OnModuleInit {
         retryCount = 0,
     ) {
         try {
-            await this.bot.sendMessage(destinationChatId, message, {
-                parse_mode: 'Markdown',
-                ...options,
-            });
+            const hasExplicitParseMode = Object.prototype.hasOwnProperty.call(options, 'parse_mode');
+            const sendOptions = hasExplicitParseMode
+                ? options
+                : {
+                      parse_mode: 'Markdown' as const,
+                      ...options,
+                  };
+
+            await this.bot.sendMessage(destinationChatId, message, sendOptions);
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error);
 

@@ -105,12 +105,6 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         ].includes(normalizedReason);
     }
 
-    private isWatchlistSoftRejectReason(reason?: string): boolean {
-        const normalizedReason = (reason || '').toLowerCase();
-        return ['low_metrics', 'ai_rejected', 'noisy_pump'].includes(normalizedReason);
-    }
-
-
     private shouldSendWatchlistStatusUpdate(
         tokenMint: string,
         reason: string,
@@ -147,40 +141,12 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         localNotified: boolean,
     ): Promise<void> {
         const reason = result.reason || 'unknown';
-
-        if (result.permanent) {
-            if (!this.shouldSendWatchlistStatusUpdate(tokenMint, reason, true)) {
-                return;
-            }
-
-            await this.reportingService.sendWatchlistStatusUpdate({
-                tokenMint,
-                symbol: result.metadata?.symbol,
-                route,
-                reason,
-                permanent: true,
-                mcap: result.metadata?.mcap,
-                liquidity: result.metadata?.liquidity,
-                ageHours,
-                volumeSurge: result.metadata?.volumeSurge,
-                volScore: result.metadata?.volScore,
-                zScore: result.metadata?.zScore,
-                whaleSignalScore: result.metadata?.whaleSignalScore,
-            });
+        if (result.permanent || !this.isWatchlistCandidateReason(reason)) {
             return;
         }
 
         const radarWasSent = localNotified || this.notifiedTokens.has(tokenMint);
-
-        if (this.isWatchlistCandidateReason(reason)) {
-            if (!radarWasSent || !this.shouldSendWatchlistStatusUpdate(tokenMint, reason, false)) {
-                return;
-            }
-        } else if (this.isWatchlistSoftRejectReason(reason)) {
-            if (!this.shouldSendWatchlistStatusUpdate(tokenMint, reason, false)) {
-                return;
-            }
-        } else {
+        if (!radarWasSent || !this.shouldSendWatchlistStatusUpdate(tokenMint, reason, false)) {
             return;
         }
 
@@ -199,7 +165,6 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             whaleSignalScore: result.metadata?.whaleSignalScore,
         });
     }
-
     private normalizeBuyFailureReason(message: string): string {
         const text = String(message || '').toLowerCase();
         if (text.includes('max drawdown')) return 'risk_max_drawdown';
