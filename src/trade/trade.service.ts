@@ -502,22 +502,30 @@ export class TradeService implements OnModuleInit {
     private async getBuyRiskMetrics(
         maxConsecutiveLosses: number,
         route?: TradeRoute,
+        riskPnlStartAt?: Date | null,
     ): Promise<BuyRiskMetrics> {
         const dayStart = this.getStartOfDayUtc();
+        const effectiveDailyStart =
+            riskPnlStartAt && riskPnlStartAt.getTime() > dayStart.getTime()
+                ? riskPnlStartAt
+                : dayStart;
+        const baseWhere = riskPnlStartAt
+            ? { status: 'CLOSED' as const, mode: 'LIVE' as const, updatedAt: { gte: riskPnlStartAt } }
+            : { status: 'CLOSED' as const, mode: 'LIVE' as const };
         const routeWhere = route ? { route } : {};
 
         const [dailyAgg, totalAgg, recentClosed] = await Promise.all([
             this.prismaService.trade.aggregate({
-                where: { status: 'CLOSED', mode: 'LIVE', updatedAt: { gte: dayStart } },
+                where: { status: 'CLOSED', mode: 'LIVE', updatedAt: { gte: effectiveDailyStart } },
                 _sum: { profitUsd: true },
             }),
             this.prismaService.trade.aggregate({
-                where: { status: 'CLOSED', mode: 'LIVE' },
+                where: baseWhere,
                 _sum: { profitUsd: true },
             }),
             maxConsecutiveLosses > 0
                 ? this.prismaService.trade.findMany({
-                      where: { status: 'CLOSED', mode: 'LIVE', ...routeWhere },
+                      where: { ...baseWhere, ...routeWhere },
                       orderBy: { updatedAt: 'desc' },
                       take: Math.min(maxConsecutiveLosses, 50),
                       select: { profitUsd: true },
@@ -543,6 +551,19 @@ export class TradeService implements OnModuleInit {
     /**
      * Helper to resolve DNS using Google DNS-over-HTTPS if standard lookup fails
      */
+    private getRiskPnlStartAt(): Date | null {
+        const raw = (this.configService.get<string>('RISK_PNL_START_AT', '') || '').trim();
+        if (!raw) return null;
+
+        const parsedMs = Date.parse(raw);
+        if (!Number.isFinite(parsedMs)) {
+            this.logger.warn(`[Risk] Ignoring invalid RISK_PNL_START_AT="${raw}". Use an ISO timestamp.`);
+            return null;
+        }
+
+        return new Date(parsedMs);
+    }
+
     private async resolveDns(hostname: string): Promise<string | null> {
         if (this.ipCache[hostname]) return this.ipCache[hostname];
 
@@ -785,7 +806,13 @@ export class TradeService implements OnModuleInit {
                 this.configService.get<string>('MAX_DRAWDOWN_PCT', '0'),
             );
 
-            const metrics = await this.getBuyRiskMetrics(maxConsecutiveLosses, route);
+            const riskPnlStartAt = this.getRiskPnlStartAt();
+            const metrics = await this.getBuyRiskMetrics(maxConsecutiveLosses, route, riskPnlStartAt);
+            if (riskPnlStartAt) {
+                this.logger.log(
+                    `[Risk] PnL baseline active from ${riskPnlStartAt.toISOString()}. Historical trades before this timestamp are ignored for buy lockout.`,
+                );
+            }
             const decision = evaluateBuyRisk(
                 metrics,
                 {
