@@ -95,6 +95,16 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         return this.moduleRef.get(ReportingService, { strict: false });
     }
 
+    private isWatchlistCandidateReason(reason?: string): boolean {
+        const normalizedReason = (reason || '').toLowerCase();
+        return [
+            'low_surge',
+            'no_volume_anomaly',
+            'low_vol_score',
+            'whale_signal_too_weak',
+        ].includes(normalizedReason);
+    }
+
 
     private shouldSendWatchlistStatusUpdate(
         tokenMint: string,
@@ -131,14 +141,17 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         ageHours: number,
         localNotified: boolean,
     ): Promise<void> {
-        const reason = result.reason || 'unknown';
-        const radarWasSent = localNotified || this.notifiedTokens.has(tokenMint);
-
         if (result.permanent) {
-            if (!this.shouldSendWatchlistStatusUpdate(tokenMint, reason, true)) {
-                return;
-            }
-        } else if (!radarWasSent || !this.shouldSendWatchlistStatusUpdate(tokenMint, reason, false)) {
+            return;
+        }
+
+        const reason = result.reason || 'unknown';
+        if (!this.isWatchlistCandidateReason(reason)) {
+            return;
+        }
+
+        const radarWasSent = localNotified || this.notifiedTokens.has(tokenMint);
+        if (!radarWasSent || !this.shouldSendWatchlistStatusUpdate(tokenMint, reason, false)) {
             return;
         }
 
@@ -147,7 +160,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             symbol: result.metadata?.symbol,
             route,
             reason,
-            permanent: result.permanent,
+            permanent: false,
             mcap: result.metadata?.mcap,
             liquidity: result.metadata?.liquidity,
             ageHours,
@@ -885,6 +898,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     if (
                         !result.safe &&
                         !result.permanent &&
+                        this.isWatchlistCandidateReason(result.reason) &&
                         !localNotified &&
                         !this.notifiedTokens.has(tokenMint) &&
                         result.metadata &&
@@ -908,7 +922,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     }
 
 
-                    if (!result.safe && result.reason) {
+                    if (!result.safe && !result.permanent && result.reason) {
                         await this.sendWatchlistStatusUpdateForResult(
                             tokenMint,
                             result,
