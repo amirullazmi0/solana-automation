@@ -79,15 +79,17 @@ export function calculateCleanSwapSolAmount(
     networkFeeLamports: number,
     rentDeltaLamports: number,
     jitoTipLamports: number,
+    side: 'BUY' | 'SELL' = 'BUY',
 ): { cleanSolAmount: number | null; totalFeesSol: number } {
-    const totalNoiseLamports = networkFeeLamports + rentDeltaLamports + jitoTipLamports;
-    const cleanLamports = rawSolDeltaLamports - totalNoiseLamports;
+    const totalFeeLamports = networkFeeLamports + jitoTipLamports;
+    const cleanLamports =
+        side === 'SELL'
+            ? rawSolDeltaLamports + totalFeeLamports - rentDeltaLamports
+            : rawSolDeltaLamports - totalFeeLamports - rentDeltaLamports;
+
     return {
-        cleanSolAmount:
-            cleanLamports > 0 && cleanLamports <= rawSolDeltaLamports
-                ? cleanLamports / 1_000_000_000
-                : null,
-        totalFeesSol: totalNoiseLamports / 1_000_000_000,
+        cleanSolAmount: cleanLamports > 0 ? cleanLamports / 1_000_000_000 : null,
+        totalFeesSol: (totalFeeLamports + Math.max(rentDeltaLamports, 0)) / 1_000_000_000,
     };
 }
 
@@ -1744,6 +1746,7 @@ export class TradeService implements OnModuleInit {
                     activeWallet.publicKey.toBase58(),
                     side === 'BUY' ? outputMint : inputMint,
                     jitoTipLamports,
+                    side,
                 );
                 if (actualSwap) {
                     const solPrice = await this.getSolPrice();
@@ -1820,6 +1823,7 @@ export class TradeService implements OnModuleInit {
         wallet: string,
         tokenMint: string,
         bundleTipLamports = 0,
+        side: 'BUY' | 'SELL' = 'BUY',
     ): Promise<{
         solChange: number;
         tokenChange: number;
@@ -1865,18 +1869,18 @@ export class TradeService implements OnModuleInit {
         const tokenChange = postTokenAmount - preTokenAmount;
 
         const networkFeeLamports = tx.meta?.fee || 0;
-        const rentDeltaLamports = this.calculateRentDelta(tx, walletIndex);
+        const rentDeltaLamports = this.calculateWalletTokenAccountRentDelta(tx, wallet, tokenMint);
         const { cleanSolAmount, totalFeesSol } = calculateCleanSwapSolAmount(
             rawSolDeltaLamports,
             networkFeeLamports,
             rentDeltaLamports,
-            0,
+            bundleTipLamports,
+            side,
         );
-        const totalFeesWithBundleTipSol = totalFeesSol + bundleTipLamports / 1_000_000_000;
 
         if (cleanSolAmount === null) {
             this.logger.error(
-                `[SwapDetails] Invalid clean SOL amount. raw=${rawSolDeltaLamports}, feesSol=${totalFeesWithBundleTipSol}. Falling back to quote price.`,
+                `[SwapDetails] Invalid clean SOL amount. raw=${rawSolDeltaLamports}, feesSol=${totalFeesSol}. Falling back to quote price.`,
             );
         }
 
@@ -1884,19 +1888,38 @@ export class TradeService implements OnModuleInit {
             solChange,
             tokenChange,
             cleanSolAmount,
-            totalFeesSol: totalFeesWithBundleTipSol,
+            totalFeesSol,
         };
     }
 
-    private calculateRentDelta(tx: ParsedTransactionWithMeta, walletIndex: number): number {
+    private calculateWalletTokenAccountRentDelta(
+        tx: ParsedTransactionWithMeta,
+        wallet: string,
+        tokenMint: string,
+    ): number {
         const preBalances = tx.meta?.preBalances || [];
         const postBalances = tx.meta?.postBalances || [];
-        let rentDelta = 0;
+        const accountIndexes = new Set<number>();
 
-        for (let i = 0; i < Math.min(preBalances.length, postBalances.length); i++) {
-            if (i === walletIndex) continue;
-            const delta = Math.abs((postBalances[i] || 0) - (preBalances[i] || 0));
-            if (delta > 0 && delta <= 20_000_000) rentDelta += delta;
+        for (const balance of tx.meta?.preTokenBalances || []) {
+            if (balance.owner === wallet && balance.mint === tokenMint) {
+                accountIndexes.add(balance.accountIndex);
+            }
+        }
+        for (const balance of tx.meta?.postTokenBalances || []) {
+            if (balance.owner === wallet && balance.mint === tokenMint) {
+                accountIndexes.add(balance.accountIndex);
+            }
+        }
+
+        let rentDelta = 0;
+        for (const accountIndex of accountIndexes) {
+            const delta = Math.abs(
+                (postBalances[accountIndex] || 0) - (preBalances[accountIndex] || 0),
+            );
+            if (delta > 0 && delta <= 20_000_000) {
+                rentDelta += delta;
+            }
         }
 
         return rentDelta;

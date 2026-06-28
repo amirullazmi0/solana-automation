@@ -69,6 +69,23 @@ describe('TradeService calculation helpers', () => {
             expect(result.totalFeesSol).toBe(0.00303928);
         });
 
+        it('adds network fee back to sell proceeds before subtracting rent', () => {
+            const rawSolDeltaLamports = 999_495_000;
+            const networkFeeLamports = 505_000;
+            const rentDeltaLamports = 0;
+            const jitoTipLamports = 0;
+
+            const result = calculateCleanSwapSolAmount(
+                rawSolDeltaLamports,
+                networkFeeLamports,
+                rentDeltaLamports,
+                jitoTipLamports,
+                'SELL',
+            );
+
+            expect(result.cleanSolAmount).toBe(1);
+            expect(result.totalFeesSol).toBe(0.000505);
+        });
         it('returns null when fees exceed the raw SOL delta', () => {
             const result = calculateCleanSwapSolAmount(100, 50, 50, 1);
             expect(result.cleanSolAmount).toBeNull();

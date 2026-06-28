@@ -582,9 +582,9 @@ export class ReportingService implements OnModuleInit {
                 { text: '$4 / entry', callback_data: 'settings:position|4' },
                 { text: '$5 / entry', callback_data: 'settings:position|5' },
                 { text: '$10 / entry', callback_data: 'settings:position|10' },
-                { text: '$15 / entry', callback_data: 'settings:position|15' },
             ],
             [
+                { text: '$15 / entry', callback_data: 'settings:position|15' },
                 { text: '$20 / entry', callback_data: 'settings:position|20' },
                 { text: '$50 / entry', callback_data: 'settings:position|50' },
                 { text: '$100 / entry', callback_data: 'settings:position|100' },
@@ -1237,9 +1237,13 @@ export class ReportingService implements OnModuleInit {
         const stageLabel = params.stage || 'PRE_SWAP';
         const routeLine = params.route ? `\u{1F9ED} Route: ${params.route}\n` : '';
         const amountUsdLine =
-            params.amountUsd !== undefined ? `\u{1F4B5} Attempted USD: $${params.amountUsd.toFixed(2)}\n` : '';
+            params.amountUsd !== undefined
+                ? `\u{1F4B5} Attempted USD: $${params.amountUsd.toFixed(2)}\n`
+                : '';
         const amountSolLine =
-            params.amountSol !== undefined ? `\u{1F48E} Attempted SOL: ${params.amountSol.toFixed(4)} SOL\n` : '';
+            params.amountSol !== undefined
+                ? `\u{1F48E} Attempted SOL: ${params.amountSol.toFixed(4)} SOL\n`
+                : '';
         const detailsLine = params.details ? `\n\u{1F4CB} Details:\n${params.details}\n` : '';
 
         const message =
@@ -1287,14 +1291,18 @@ export class ReportingService implements OnModuleInit {
     ): WatchlistReasonMapping {
         const normalizedReason = reason || 'unknown';
         const zeroLiquidityStillRetrying =
-            normalizedReason === 'zero_liquidity' && !permanent && maxRetries > 0 && retryCount < maxRetries;
+            normalizedReason === 'zero_liquidity' &&
+            !permanent &&
+            maxRetries > 0 &&
+            retryCount < maxRetries;
 
         if (zeroLiquidityStillRetrying) {
             return {
                 status: 'WAITING',
                 label: 'WAITING: zero_liquidity',
                 severity: 'soft_fail',
-                message: 'No valid liquidity found yet. New token liquidity can lag for a short window.',
+                message:
+                    'No valid liquidity found yet. New token liquidity can lag for a short window.',
                 action: 'No buy. Continue monitoring until retry window is exhausted.',
             };
         }
@@ -1362,7 +1370,9 @@ export class ReportingService implements OnModuleInit {
                     label: 'REJECTED: zero_liquidity',
                     severity: permanent ? 'hard_fail' : 'soft_fail',
                     message: 'No valid liquidity found.',
-                    action: permanent ? 'Permanent filter fail. Giving up.' : 'No buy. Background radar may retry later.',
+                    action: permanent
+                        ? 'Permanent filter fail. Giving up.'
+                        : 'No buy. Background radar may retry later.',
                 };
             case 'high_concentration':
             case 'high_risk_score':
@@ -1382,7 +1392,9 @@ export class ReportingService implements OnModuleInit {
                     label: `${permanent ? 'BLOCKED' : 'REJECTED'}: ${normalizedReason}`,
                     severity: permanent ? 'hard_fail' : 'unknown',
                     message: 'Analyzer rejected token.',
-                    action: permanent ? 'Permanent filter fail. Giving up.' : 'No buy. Continue only if radar sees a better setup.',
+                    action: permanent
+                        ? 'Permanent filter fail. Giving up.'
+                        : 'No buy. Continue only if radar sees a better setup.',
                 };
         }
     }
@@ -1401,17 +1413,24 @@ export class ReportingService implements OnModuleInit {
                 ? `Retry: \`${params.retryCount}/${params.maxRetries}\`\n`
                 : '';
         const metricsLines = [
-            params.volumeSurge !== undefined ? `volumeSurge: \`${params.volumeSurge.toFixed(2)}x\`` : undefined,
-            params.volScore !== undefined ? `volScore: \`${params.volScore.toFixed(4)}\`` : undefined,
+            params.volumeSurge !== undefined
+                ? `volumeSurge: \`${params.volumeSurge.toFixed(2)}x\``
+                : undefined,
+            params.volScore !== undefined
+                ? `volScore: \`${params.volScore.toFixed(4)}\``
+                : undefined,
             params.zScore !== undefined ? `zScore: \`${params.zScore.toFixed(2)}\`` : undefined,
-            params.liquidity !== undefined ? `liquidity: \`$${params.liquidity.toLocaleString()}\`` : undefined,
+            params.liquidity !== undefined
+                ? `liquidity: \`$${params.liquidity.toLocaleString()}\``
+                : undefined,
             params.mcap !== undefined ? `mcap: \`$${params.mcap.toLocaleString()}\`` : undefined,
             params.ageHours !== undefined ? `age: \`${params.ageHours.toFixed(2)}h\`` : undefined,
             params.whaleSignalScore !== undefined
                 ? `whaleSignalScore: \`${params.whaleSignalScore.toFixed(1)}\``
                 : undefined,
         ].filter(Boolean);
-        const metricsBlock = metricsLines.length > 0 ? `\nCurrent:\n${metricsLines.join('\n')}\n` : '';
+        const metricsBlock =
+            metricsLines.length > 0 ? `\nCurrent:\n${metricsLines.join('\n')}\n` : '';
         const title =
             mapping.status === 'WAITING'
                 ? 'WATCHLIST UPDATE'
@@ -1499,7 +1518,10 @@ export class ReportingService implements OnModuleInit {
         retryCount = 0,
     ) {
         try {
-            const hasExplicitParseMode = Object.prototype.hasOwnProperty.call(options, 'parse_mode');
+            const hasExplicitParseMode = Object.prototype.hasOwnProperty.call(
+                options,
+                'parse_mode',
+            );
             const sendOptions = hasExplicitParseMode
                 ? options
                 : {
