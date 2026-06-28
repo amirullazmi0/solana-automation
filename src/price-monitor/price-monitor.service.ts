@@ -604,7 +604,10 @@ export class PriceMonitorService {
                   : noisePressure.severity >= 50
                     ? Math.min(baseTrailingDistancePercent, aiRecommendedTrailingDistance, 3.0)
                     : Math.min(baseTrailingDistancePercent, aiRecommendedTrailingDistance);
-        const effectiveTrailingDistancePercent = noiseAdjustedTrailingDistance;
+        const runnerTrailingMultiplier = trade.partialTakeProfitAt
+            ? Math.max(1, this.getNumberConfig('RUNNER_TRAILING_DISTANCE_MULTIPLIER', 2))
+            : 1;
+        const effectiveTrailingDistancePercent = noiseAdjustedTrailingDistance * runnerTrailingMultiplier;
 
         this.logger.debug(
             `[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)}, Profit: ${profitPercent.toFixed(2)}%, SL: -${effectiveStopLossPercent}%, TSL: $${trade.trailingStopPrice.toFixed(8)}`,

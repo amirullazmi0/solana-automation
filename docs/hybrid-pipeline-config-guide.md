@@ -137,6 +137,7 @@ Invariant yang harus dianggap source of truth:
   "MIN_NON_CRITICAL_HOLD_SECONDS": 60,
   "HEALTH_CHECK_BEFORE_EARLY_SL": true,
   "HEALTH_CHECK_BEFORE_EARLY_TRAILING": true,
+  "RUNNER_TRAILING_DISTANCE_MULTIPLIER": 2,
   "MIN_MCAP": 5000,
   "MAX_MCAP": 3000000,
   "MIN_AGE_HOURS": 0.02,
@@ -583,6 +584,7 @@ Catatan `uniqueBuyers`:
 | `MIN_NON_CRITICAL_HOLD_SECONDS` | minimum hold SL/trailing | Memberi waktu price action stabil | `60` |
 | `HEALTH_CHECK_BEFORE_EARLY_SL` | AI check sebelum early SL | Critical tetap sell, healthy hold | `true` |
 | `HEALTH_CHECK_BEFORE_EARLY_TRAILING` | AI check sebelum early trailing | Critical tetap sell, healthy hold | `true` |
+| `RUNNER_TRAILING_DISTANCE_MULTIPLIER` | trailing sisa posisi setelah partial TP | Biar runner tidak cepat kesell | `2` |
 
 ### 7.9 Scanner timing
 

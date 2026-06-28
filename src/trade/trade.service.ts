@@ -1284,15 +1284,22 @@ export class TradeService implements OnModuleInit {
                         trade.entryValueUsd !== null && trade.entryValueUsd !== undefined
                             ? trade.entryValueUsd * (1 - percentage)
                             : undefined;
+                    const partialTakeProfitAt =
+                        exitReason === 'PARTIAL_TAKE_PROFIT'
+                            ? new Date()
+                            : trade.partialTakeProfitAt;
+                    const runnerStopPrice =
+                        exitReason === 'PARTIAL_TAKE_PROFIT'
+                            ? trade.entryPrice * 1.02
+                            : trade.trailingStopPrice;
+
                     await this.prismaService.trade.update({
                         where: { id: tradeId },
                         data: {
                             amountInSol: trade.amountInSol * (1 - percentage),
                             entryValueUsd: remainingEntryValueUsd,
-                            partialTakeProfitAt:
-                                exitReason === 'PARTIAL_TAKE_PROFIT'
-                                    ? new Date()
-                                    : trade.partialTakeProfitAt,
+                            partialTakeProfitAt,
+                            trailingStopPrice: runnerStopPrice,
                             profitUsd: (trade.profitUsd || 0) + estimatedProfitUsd,
                         },
                     });
