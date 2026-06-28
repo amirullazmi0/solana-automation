@@ -133,6 +133,10 @@ Invariant yang harus dianggap source of truth:
   "MICIN_STOP_LOSS_PERCENT": 11,
   "WHALE_STOP_LOSS_PERCENT": 9,
   "DISABLE_SL_PATIENCE": true,
+  "ENABLE_CONSERVATIVE_EXIT_GUARD": true,
+  "MIN_NON_CRITICAL_HOLD_SECONDS": 60,
+  "HEALTH_CHECK_BEFORE_EARLY_SL": true,
+  "HEALTH_CHECK_BEFORE_EARLY_TRAILING": true,
   "MIN_MCAP": 5000,
   "MAX_MCAP": 3000000,
   "MIN_AGE_HOURS": 0.02,
@@ -573,6 +577,10 @@ Catatan `uniqueBuyers`:
 | `WHALE_TRAILING_ACTIVATION_PERCENT` | trailing start whale | Whale lebih cepat lock | config aktif `7`, umum `7 - 12` |
 | `MICIN_TRAILING_DISTANCE_PERCENT` | trailing distance micin | Harus lebih lebar | config aktif `6`, umum `4 - 8` |
 | `WHALE_TRAILING_DISTANCE_PERCENT` | trailing distance whale | Lebih ketat | config aktif `3.5`, umum `2.5 - 5` |
+| `ENABLE_CONSERVATIVE_EXIT_GUARD` | tahan exit non-critical awal | Cegah SL/trailing whipsaw setelah buy | `true` |
+| `MIN_NON_CRITICAL_HOLD_SECONDS` | minimum hold SL/trailing | Memberi waktu price action stabil | `60` |
+| `HEALTH_CHECK_BEFORE_EARLY_SL` | AI check sebelum early SL | Critical tetap sell, healthy hold | `true` |
+| `HEALTH_CHECK_BEFORE_EARLY_TRAILING` | AI check sebelum early trailing | Critical tetap sell, healthy hold | `true` |
 
 ### 7.9 Scanner timing
 

@@ -48,6 +48,10 @@ export class PriceMonitorService {
     private jupiterApiKey: string;
     private stopLossPercent: number;
     private readonly newTokenPatienceThresholdMinutes: number;
+    private readonly conservativeExitGuardEnabled: boolean;
+    private readonly minNonCriticalHoldMs: number;
+    private readonly healthCheckBeforeEarlySl: boolean;
+    private readonly healthCheckBeforeEarlyTrailing: boolean;
     private readonly lastAlertTime = new Map<string, number>(); // Cooldown alert: tokenMint -> timestamp
     private readonly lastRiskAdjustmentAlertTime = new Map<string, number>();
     private readonly healthCheckCache = new Map<number, { checkedAt: number; result: AIHealthCheckResult }>();
@@ -73,7 +77,32 @@ export class PriceMonitorService {
         this.newTokenPatienceThresholdMinutes = parseFloat(
             this.configService.get<string>('SL_PATIENCE_NEW_TOKEN_MINUTES', '30'),
         );
+        this.conservativeExitGuardEnabled = this.getBooleanConfig(
+            'ENABLE_CONSERVATIVE_EXIT_GUARD',
+            true,
+        );
+        this.minNonCriticalHoldMs = Math.max(
+            0,
+            this.getNumberConfig('MIN_NON_CRITICAL_HOLD_SECONDS', 60) * 1000,
+        );
+        this.healthCheckBeforeEarlySl = this.getBooleanConfig(
+            'HEALTH_CHECK_BEFORE_EARLY_SL',
+            true,
+        );
+        this.healthCheckBeforeEarlyTrailing = this.getBooleanConfig(
+            'HEALTH_CHECK_BEFORE_EARLY_TRAILING',
+            true,
+        );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
+    }
+
+    private getBooleanConfig(key: string, fallback: boolean): boolean {
+        const raw = this.configService.get<string>(key, String(fallback));
+        if (typeof raw === 'boolean') return raw;
+        const normalized = String(raw).trim().toLowerCase();
+        if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+        if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+        return fallback;
     }
 
     private getNumberConfig(key: string, fallback: number): number {
@@ -386,6 +415,73 @@ export class PriceMonitorService {
         return profitPercent <= halfStopLossDistance && profitPercent > -stopLossPercent;
     }
 
+    private getTradeAgeMs(trade: Pick<Trade, 'createdAt'>, nowMs = Date.now()): number {
+        const createdAtMs = new Date(trade.createdAt).getTime();
+        if (!Number.isFinite(createdAtMs)) return Number.MAX_SAFE_INTEGER;
+        return Math.max(0, nowMs - createdAtMs);
+    }
+
+    private isEmergencyExitReason(exitReason: string): boolean {
+        return ['PANIC_SELL', 'DEV_DUMP', 'RUGPULL', 'AI_HEALTH_CRITICAL'].includes(exitReason);
+    }
+
+    private shouldGuardEarlyNonCriticalExit(
+        trade: Pick<Trade, 'createdAt'>,
+        exitReason: string,
+        nowMs = Date.now(),
+    ): boolean {
+        if (!this.conservativeExitGuardEnabled || this.minNonCriticalHoldMs <= 0) return false;
+        if (this.isEmergencyExitReason(exitReason)) return false;
+        return this.getTradeAgeMs(trade, nowMs) < this.minNonCriticalHoldMs;
+    }
+
+    private shouldRunEarlyExitHealthCheck(exitReason: string): boolean {
+        if (exitReason === 'STOP_LOSS') return this.healthCheckBeforeEarlySl;
+        if (exitReason === 'TRAILING_STOP') return this.healthCheckBeforeEarlyTrailing;
+        return false;
+    }
+
+    private async handleEarlyNonCriticalExitGuard(
+        trade: TradeWithTelegramChat,
+        currentPrice: number,
+        exitReason: 'STOP_LOSS' | 'TRAILING_STOP',
+        profitPercent: number,
+        effectiveStopLossPercent: number,
+        signals: TradeFreshMarketSignals,
+    ): Promise<boolean> {
+        if (!this.shouldGuardEarlyNonCriticalExit(trade, exitReason)) return false;
+
+        const ageSeconds = this.getTradeAgeMs(trade) / 1000;
+        const minHoldSeconds = this.minNonCriticalHoldMs / 1000;
+
+        if (this.shouldRunEarlyExitHealthCheck(exitReason)) {
+            const healthCheck = await this.shouldHoldOrCut(
+                trade,
+                profitPercent,
+                effectiveStopLossPercent,
+                signals,
+            );
+
+            if (healthCheck.status === 'CRITICAL') {
+                this.logger.warn(
+                    `[Slot ${trade.slotNumber}] Early ${exitReason} override: AI Health CRITICAL. age=${ageSeconds.toFixed(1)}s/${minHoldSeconds.toFixed(0)}s pnl=${profitPercent.toFixed(2)}% reentry=${healthCheck.reentrySignal}. reason=${healthCheck.reasoning}`,
+                );
+                await this.tradeService.executeSell(trade.id, currentPrice, 'AI_HEALTH_CRITICAL');
+                return true;
+            }
+
+            this.logger.log(
+                `[Slot ${trade.slotNumber}] Early ${exitReason} guarded by AI Health HOLD. age=${ageSeconds.toFixed(1)}s/${minHoldSeconds.toFixed(0)}s pnl=${profitPercent.toFixed(2)}% reentry=${healthCheck.reentrySignal}. reason=${healthCheck.reasoning}`,
+            );
+            return true;
+        }
+
+        this.logger.log(
+            `[Slot ${trade.slotNumber}] Early ${exitReason} guarded. age=${ageSeconds.toFixed(1)}s/${minHoldSeconds.toFixed(0)}s pnl=${profitPercent.toFixed(2)}%. Waiting for minimum hold window.`,
+        );
+        return true;
+    }
+
     private async getWatchlistHealthContext(tokenMint: string) {
         return this.prismaService.watchlist.findUnique({
             where: { tokenMint },
@@ -607,6 +703,19 @@ export class PriceMonitorService {
 
         // Route-aware stop loss remains the hard floor after the dynamic hold zone is exhausted.
         if (profitPercent <= -effectiveStopLossPercent) {
+            if (
+                await this.handleEarlyNonCriticalExitGuard(
+                    trade,
+                    currentPrice,
+                    'STOP_LOSS',
+                    profitPercent,
+                    effectiveStopLossPercent,
+                    normalizedFreshMarketSignals,
+                )
+            ) {
+                return;
+            }
+
             this.logger.warn(
                 `[Slot ${trade.slotNumber}] STOP_LOSS hard floor reached. route=${trade.route ?? 'GLOBAL'} pnl=${profitPercent.toFixed(2)}% sl=${effectiveStopLossPercent}%`,
             );
@@ -709,6 +818,19 @@ export class PriceMonitorService {
         // 🛡️ Trailing Stop Trigger
         if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice) {
             const reason = 'TRAILING_STOP';
+            if (
+                await this.handleEarlyNonCriticalExitGuard(
+                    trade,
+                    currentPrice,
+                    reason,
+                    profitPercent,
+                    effectiveStopLossPercent,
+                    normalizedFreshMarketSignals,
+                )
+            ) {
+                return;
+            }
+
             this.logger.log(
                 `[Slot ${trade.slotNumber}] 💸 ${reason} at $${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`,
             );

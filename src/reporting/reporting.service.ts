@@ -1014,13 +1014,17 @@ export class ReportingService implements OnModuleInit {
         targetChatId?: string;
     }): Promise<void> {
         const displaySymbol = params.symbol || 'UNKNOWN';
+        const trailingStopLine =
+            params.newTrailingStop > 0
+                ? `Trailing Stop: $${params.newTrailingStop.toFixed(8)}\n`
+                : `Trailing Stop: pending activation\n`;
         const message =
             `🧠 *AI RISK ADJUSTMENT*\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `💎 *Token:* ${displaySymbol}\n` +
             `🆔 *Mint:* \`${params.tokenMint}\`\n` +
             `📉 *Price:* \`$${params.currentPrice.toFixed(8)}\`\n` +
-            `🛑 *Trailing Stop:* \`$${params.newTrailingStop.toFixed(8)}\`\n` +
+            trailingStopLine +
             `📏 *Base Trail:* \`${params.baseTrailingDistancePercent.toFixed(1)}%\`\n` +
             `📏 *AI Trail:* \`${params.effectiveTrailingDistancePercent.toFixed(1)}%\`\n` +
             `🌪️ *VoL:* \`${params.volScore.toFixed(4)}\` | 1h: \`${params.priceChange1h.toFixed(2)}%\`\n` +
