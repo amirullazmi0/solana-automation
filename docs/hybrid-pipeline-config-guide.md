@@ -184,6 +184,7 @@ Invariant yang harus dianggap source of truth:
   "MAX_DRAWDOWN_PCT": 20,
   "DISABLE_BUY_UNTIL": "",
   "RISK_APPLY_TO_MANUAL": false,
+  "RISK_CONSECUTIVE_LOOKBACK_HOURS": 3,
   "AI_BASE_URL": "https://api.openai.com/v1",
   "AI_MODEL": "gpt-4o-mini",
   "AI_CONVICTION_THRESHOLD": 70,
@@ -561,6 +562,7 @@ Catatan `uniqueBuyers`:
 | `RISK_PNL_START_AT` | ISO timestamp untuk batas awal query PnL risk | Menghindari histori lama mengunci risk breaker setelah baseline direset | kosongkan untuk pakai seluruh histori; isi timestamp valid untuk baseline baru |
 | `DISABLE_BUY_UNTIL` | freeze sampai timestamp | Emergency stop manual | kosong saat normal |
 | `RISK_APPLY_TO_MANUAL` | apply breaker ke manual buy | Kalau `false`, manual buy lebih bebas | `false` untuk debug |
+| `RISK_CONSECUTIVE_LOOKBACK_HOURS` | window hitung loss streak | Loss lama otomatis expired dari streak lockout | `3` agresif, `6` lebih konservatif |
 
 ### 7.8 Exit settings
 

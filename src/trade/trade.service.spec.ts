@@ -4,6 +4,7 @@ import {
     capSlippageBps,
     evaluateBuyRisk,
     normalizePriceImpactPct,
+    resolveRiskLookbackStart,
     PriceAnomalyError,
     validateSellPrice,
 } from './trade.service';
@@ -103,6 +104,25 @@ describe('TradeService calculation helpers', () => {
         });
     });
 
+    describe('resolveRiskLookbackStart', () => {
+        it('uses the newer value between manual baseline and consecutive lookback', () => {
+            const nowMs = Date.parse('2026-06-28T12:00:00Z');
+            const oldBaseline = new Date('2026-06-27T00:00:00Z');
+
+            expect(resolveRiskLookbackStart(oldBaseline, 3, nowMs)?.toISOString()).toBe(
+                '2026-06-28T09:00:00.000Z',
+            );
+        });
+
+        it('uses manual baseline when it is newer than the lookback window', () => {
+            const nowMs = Date.parse('2026-06-28T12:00:00Z');
+            const freshBaseline = new Date('2026-06-28T11:00:00Z');
+
+            expect(resolveRiskLookbackStart(freshBaseline, 3, nowMs)?.toISOString()).toBe(
+                '2026-06-28T11:00:00.000Z',
+            );
+        });
+    });
     describe('evaluateBuyRisk', () => {
         it('allows when all guards disabled', () => {
             const res = evaluateBuyRisk(

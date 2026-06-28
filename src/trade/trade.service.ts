@@ -124,6 +124,22 @@ export function capSlippageBps(requestedSlippageBps: number, maxSlippageBps: num
     return Math.max(1, Math.min(Math.round(requested), Math.round(max)));
 }
 
+export function resolveRiskLookbackStart(
+    riskPnlStartAt: Date | null | undefined,
+    lookbackHours: number,
+    nowMs: number = Date.now(),
+): Date | null {
+    const candidates: number[] = [];
+    if (riskPnlStartAt && Number.isFinite(riskPnlStartAt.getTime())) {
+        candidates.push(riskPnlStartAt.getTime());
+    }
+    if (Number.isFinite(lookbackHours) && lookbackHours > 0) {
+        candidates.push(nowMs - lookbackHours * 60 * 60 * 1000);
+    }
+    if (candidates.length === 0) return null;
+    return new Date(Math.max(...candidates));
+}
+
 export function evaluateBuyRisk(
     metrics: BuyRiskMetrics,
     config: BuyRiskConfig,
@@ -505,6 +521,7 @@ export class TradeService implements OnModuleInit {
         maxConsecutiveLosses: number,
         route?: TradeRoute,
         riskPnlStartAt?: Date | null,
+        consecutiveLookbackHours = 3,
     ): Promise<BuyRiskMetrics> {
         const dayStart = this.getStartOfDayUtc();
         const effectiveDailyStart =
@@ -513,6 +530,13 @@ export class TradeService implements OnModuleInit {
                 : dayStart;
         const baseWhere = riskPnlStartAt
             ? { status: 'CLOSED' as const, mode: 'LIVE' as const, updatedAt: { gte: riskPnlStartAt } }
+            : { status: 'CLOSED' as const, mode: 'LIVE' as const };
+        const consecutiveStartAt = resolveRiskLookbackStart(
+            riskPnlStartAt,
+            consecutiveLookbackHours,
+        );
+        const consecutiveWhere = consecutiveStartAt
+            ? { status: 'CLOSED' as const, mode: 'LIVE' as const, updatedAt: { gte: consecutiveStartAt } }
             : { status: 'CLOSED' as const, mode: 'LIVE' as const };
         const routeWhere = route ? { route } : {};
 
@@ -527,7 +551,7 @@ export class TradeService implements OnModuleInit {
             }),
             maxConsecutiveLosses > 0
                 ? this.prismaService.trade.findMany({
-                      where: { ...baseWhere, ...routeWhere },
+                      where: { ...consecutiveWhere, ...routeWhere },
                       orderBy: { updatedAt: 'desc' },
                       take: Math.min(maxConsecutiveLosses, 50),
                       select: { profitUsd: true },
@@ -809,10 +833,24 @@ export class TradeService implements OnModuleInit {
             );
 
             const riskPnlStartAt = this.getRiskPnlStartAt();
-            const metrics = await this.getBuyRiskMetrics(maxConsecutiveLosses, route, riskPnlStartAt);
-            if (riskPnlStartAt) {
+            const consecutiveLookbackHours = Number.parseFloat(
+                this.configService.get<string>('RISK_CONSECUTIVE_LOOKBACK_HOURS', '3'),
+            );
+            const effectiveConsecutiveLookbackHours = Number.isFinite(consecutiveLookbackHours)
+                ? consecutiveLookbackHours
+                : 3;
+            const metrics = await this.getBuyRiskMetrics(
+                maxConsecutiveLosses,
+                route,
+                riskPnlStartAt,
+                effectiveConsecutiveLookbackHours,
+            );
+            if (riskPnlStartAt || effectiveConsecutiveLookbackHours > 0) {
+                const baselineText = riskPnlStartAt
+                    ? `baseline=${riskPnlStartAt.toISOString()}`
+                    : 'baseline=all_time';
                 this.logger.log(
-                    `[Risk] PnL baseline active from ${riskPnlStartAt.toISOString()}. Historical trades before this timestamp are ignored for buy lockout.`,
+                    `[Risk] PnL risk window active (${baselineText}, consecutiveLookbackHours=${effectiveConsecutiveLookbackHours}). Older trades are ignored for applicable buy lockouts.`,
                 );
             }
             const decision = evaluateBuyRisk(
