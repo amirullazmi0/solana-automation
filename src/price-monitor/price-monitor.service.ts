@@ -518,7 +518,10 @@ export class PriceMonitorService {
         const totalEstimatedFeesUsd =
             (buyFeesSol + sellTipSol + estimatedSellNetworkFeeSol) * solPriceAtEntry;
 
-        return (totalEstimatedFeesUsd / entryValueUsd) * 100;
+        // Add the DEX/AMM pool fee + a slippage allowance as a flat % of position; the
+        // tip-based term above misses these entirely.
+        const dexAndSlippagePercent = this.getNumberConfig('DEX_FEE_ROUNDTRIP_PERCENT', 1.0);
+        return (totalEstimatedFeesUsd / entryValueUsd) * 100 + dexAndSlippagePercent;
     }
 
     private estimateNetProfitPercent(
@@ -846,9 +849,14 @@ export class PriceMonitorService {
             // Jarak trailing stop murni dari peak tanpa floor buatan di awal
             let newTrailingStop = calculatedStop;
 
-            // 🛡️ ZERO-LOSS PROTECTION: Hanya kunci profit minimal +2% (untuk cover fee) jika koin sudah terbang >= 15%
+            // 🛡️ BREAK-EVEN PROTECTION: lock a floor that actually covers round-trip fees,
+            // not a cosmetic +2%. Uses the fee-aware estimate when available, else config.
             if (profitPercent >= 15) {
-                const breakEvenPlus = trade.entryPrice * 1.02;
+                const feeDragPercent = this.estimateFeeDragPercent(trade);
+                const marginPercent = this.getNumberConfig('BREAKEVEN_MARGIN_PERCENT', 2);
+                const configFloorPercent = this.getNumberConfig('RUNNER_BREAKEVEN_FLOOR_PERCENT', 8);
+                const floorPercent = Math.max(feeDragPercent + marginPercent, configFloorPercent);
+                const breakEvenPlus = trade.entryPrice * (1 + floorPercent / 100);
                 newTrailingStop = Math.max(newTrailingStop, breakEvenPlus);
             }
 
@@ -965,78 +973,9 @@ export class PriceMonitorService {
             await this.tradeService.executeSell(trade.id, currentPrice, reason);
             return;
         }
-        // 5. EXIT CONDITION: Patience Protocol (5-Minute SL with 10-Minute Hard Cap)
-        if (profitPercent <= -effectiveStopLossPercent) {
-            const disablePatience =
-                this.configService.get<string>('DISABLE_SL_PATIENCE', 'false') === 'true';
-            const patienceThresholdMinutes = Number.isFinite(
-                this.newTokenPatienceThresholdMinutes,
-            )
-                ? this.newTokenPatienceThresholdMinutes
-                : 30;
-            const tradeAgeInMinutes =
-                (Date.now() - new Date(trade.createdAt).getTime()) / (1000 * 60);
-            const isNewToken = tradeAgeInMinutes < patienceThresholdMinutes;
-
-            // Bypass patience protocol if disabled globally or token is still fresh.
-            if (disablePatience || isNewToken) {
-                if (disablePatience) {
-                    this.logger.error(
-                        `[Slot ${trade.slotNumber}] 💀 STOP LOSS TRIGGERED (${profitPercent.toFixed(2)}%). DISABLE_SL_PATIENCE=true, executing IMMEDIATE STOP LOSS.`,
-                    );
-                } else {
-                    this.logger.warn(
-                        `[Slot ${trade.slotNumber}] ⚠️ New token bypass activated for stop loss. Age=${tradeAgeInMinutes.toFixed(1)}m < ${patienceThresholdMinutes.toFixed(0)}m. Executing IMMEDIATE STOP LOSS.`,
-                    );
-                }
-                await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
-                return;
-            }
-
-            if (!trade.slTriggeredAt) {
-                this.logger.warn(
-                    `[Slot ${trade.slotNumber}] 🛑 Stop Loss zone. Starting 5-minute patience timer (Hard Cap 10-min). Trade age=${tradeAgeInMinutes.toFixed(1)}m.`,
-                );
-                await this.prismaService.trade.update({
-                    where: { id: trade.id },
-                    data: { slTriggeredAt: new Date() },
-                });
-                return; // Tunggu di iterasi ini
-            }
-
-            const elapsedMin = (Date.now() - new Date(trade.slTriggeredAt).getTime()) / (1000 * 60);
-
-            if (elapsedMin >= 5) {
-                // Check buy pressure untuk melonggarkan waktu jual (Diamond Hands)
-                const hasBuyPressure = await this.checkBuyPressure(trade.tokenMint);
-                if (hasBuyPressure && elapsedMin < 10) {
-                    this.logger.log(
-                        `[Slot ${trade.slotNumber}] 🟢 Buy pressure detected in SL zone! DIAMOND HANDS — Delaying exit... (${(10 - elapsedMin).toFixed(1)} min left to Hard Cap)`,
-                    );
-                    return;
-                }
-
-                this.logger.warn(
-                    `[Slot ${trade.slotNumber}] 🕒 ${elapsedMin >= 10 ? '10 minutes Hard Cap reached' : '5 minutes passed with no buy pressure'}. Executing FINAL STOP LOSS.`,
-                );
-                await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
-            } else {
-                this.logger.log(
-                    `[Slot ${trade.slotNumber}] 🕒 In SL zone. Waiting... (${(5 - elapsedMin).toFixed(1)} min left of initial timer)`,
-                );
-            }
-        } else {
-            // ✅ RECOVERY: Reset SL timer if price recovers
-            if (trade.slTriggeredAt) {
-                this.logger.log(
-                    `[Slot ${trade.slotNumber}] ✨ Price recovered! Resetting SL timer.`,
-                );
-                await this.prismaService.trade.update({
-                    where: { id: trade.id },
-                    data: { slTriggeredAt: null },
-                });
-            }
-        }
+        // NOTE: the former "Patience Protocol" SL-hold block lived here. It was unreachable
+        // dead code — the hard-floor STOP_LOSS check above (profitPercent <= -effectiveStopLossPercent)
+        // always handles and returns for that condition first — so it was removed.
     }
 
     private async checkBuyPressure(tokenMint: string): Promise<boolean> {

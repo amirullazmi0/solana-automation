@@ -16,6 +16,7 @@ import axios from 'axios';
 import bs58 from 'bs58';
 import * as https from 'https';
 import { DexLimiter } from '../common/dex-limiter';
+import { computeNetProfitUsd } from '../common/fee-utils';
 import { TokenMetadata, TradeExecutionPayload } from '../dto/analyzer.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuyExecutionOptions, BuyRiskConfig, BuyRiskMetrics, TradeAuditFields } from '../dto/trade.dto';
@@ -81,15 +82,23 @@ export function calculateCleanSwapSolAmount(
     jitoTipLamports: number,
     side: 'BUY' | 'SELL' = 'BUY',
 ): { cleanSolAmount: number | null; totalFeesSol: number } {
-    const totalFeeLamports = networkFeeLamports + jitoTipLamports;
+    // rawSolDeltaLamports comes from tx1 (the swap) only. The Jito tip is paid in a
+    // SEPARATE transaction (tx2) and is therefore NOT present in rawSolDeltaLamports,
+    // so it must NOT be applied to the price math here. ATA rent IS in tx1's delta,
+    // so it is still removed to isolate the true swap SOL amount.
     const cleanLamports =
         side === 'SELL'
-            ? rawSolDeltaLamports + totalFeeLamports - rentDeltaLamports
-            : rawSolDeltaLamports - totalFeeLamports - rentDeltaLamports;
+            ? rawSolDeltaLamports + networkFeeLamports - rentDeltaLamports
+            : rawSolDeltaLamports - networkFeeLamports - rentDeltaLamports;
+
+    // Fee accounting: network fee + Jito tip are real costs. ATA rent is a recoverable
+    // deposit (refunded when the ATA closes on sell), so it nets to ~zero over a round
+    // trip and is NOT counted as a fee on either leg.
+    const totalFeesSol = (networkFeeLamports + jitoTipLamports) / 1_000_000_000;
 
     return {
         cleanSolAmount: cleanLamports > 0 ? cleanLamports / 1_000_000_000 : null,
-        totalFeesSol: (totalFeeLamports + Math.max(rentDeltaLamports, 0)) / 1_000_000_000,
+        totalFeesSol,
     };
 }
 
@@ -540,33 +549,37 @@ export class TradeService implements OnModuleInit {
             : { status: 'CLOSED' as const, mode: 'LIVE' as const };
         const routeWhere = route ? { route } : {};
 
-        const [dailyAgg, totalAgg, recentClosed] = await Promise.all([
-            this.prismaService.trade.aggregate({
+        const feeSelect = { profitUsd: true, totalFeesSol: true, solPriceAtEntry: true } as const;
+        const [dailyRows, totalRows, recentClosed] = await Promise.all([
+            this.prismaService.trade.findMany({
                 where: { status: 'CLOSED', mode: 'LIVE', updatedAt: { gte: effectiveDailyStart } },
-                _sum: { profitUsd: true },
+                select: feeSelect,
             }),
-            this.prismaService.trade.aggregate({
-                where: baseWhere,
-                _sum: { profitUsd: true },
-            }),
+            this.prismaService.trade.findMany({ where: baseWhere, select: feeSelect }),
             maxConsecutiveLosses > 0
                 ? this.prismaService.trade.findMany({
                       where: { ...consecutiveWhere, ...routeWhere },
                       orderBy: { updatedAt: 'desc' },
                       take: Math.min(maxConsecutiveLosses, 50),
-                      select: { profitUsd: true },
+                      select: feeSelect,
                   })
-                : Promise.resolve([] as Array<{ profitUsd: number | null }>),
+                : Promise.resolve(
+                      [] as Array<{
+                          profitUsd: number | null;
+                          totalFeesSol: number | null;
+                          solPriceAtEntry: number | null;
+                      }>,
+                  ),
         ]);
 
-        const dailyRealizedPnlUsd = dailyAgg._sum.profitUsd ?? 0;
-        const totalRealizedPnlUsd = totalAgg._sum.profitUsd ?? 0;
+        // Net-of-fees: a gross win that is a net loss must count as a loss for the breakers.
+        const dailyRealizedPnlUsd = dailyRows.reduce((s, t) => s + computeNetProfitUsd(t), 0);
+        const totalRealizedPnlUsd = totalRows.reduce((s, t) => s + computeNetProfitUsd(t), 0);
 
         let consecutiveLosses = 0;
         if (maxConsecutiveLosses > 0) {
             for (const t of recentClosed) {
-                const p = t.profitUsd ?? 0;
-                if (p < 0) consecutiveLosses++;
+                if (computeNetProfitUsd(t) < 0) consecutiveLosses++;
                 else break;
             }
         }
@@ -1243,7 +1256,7 @@ export class TradeService implements OnModuleInit {
                 'So11111111111111111111111111111111111111112',
                 amountInLamports,
                 'SELL',
-                undefined,
+                trade.entryValueUsd ?? undefined, // notional for Jito-size gate (NOT used for SELL pricing)
                 0,
                 sellSlippage,
                 sellPriorityFee,
@@ -1288,9 +1301,13 @@ export class TradeService implements OnModuleInit {
                         exitReason === 'PARTIAL_TAKE_PROFIT'
                             ? new Date()
                             : trade.partialTakeProfitAt;
+                    const runnerFloorPercent = Number.parseFloat(
+                        this.configService.get<string>('RUNNER_BREAKEVEN_FLOOR_PERCENT') || '8',
+                    );
                     const runnerStopPrice =
                         exitReason === 'PARTIAL_TAKE_PROFIT'
-                            ? trade.entryPrice * 1.02
+                            ? trade.entryPrice *
+                              (1 + (Number.isFinite(runnerFloorPercent) ? runnerFloorPercent : 8) / 100)
                             : trade.trailingStopPrice;
 
                     await this.prismaService.trade.update({
@@ -1641,7 +1658,19 @@ export class TradeService implements OnModuleInit {
 
             // ⛽ DYNAMIC FEES: Naikin gas tiap kali gagal (Auto-Multiplier + Retry Bonus)
             const useJitoConfigured = this.configService.get<string>('USE_JITO') === 'true';
-            const useJito = useJitoConfigured && retryCount === 0;
+            const jitoMinPositionUsd = Number.parseFloat(
+                this.configService.get<string>('JITO_MIN_POSITION_USD') || '3',
+            );
+            const swapNotionalUsd = buyAmountUSD ?? this.positionSizeUSD;
+            const jitoAllowedForSize =
+                !Number.isFinite(jitoMinPositionUsd) || swapNotionalUsd >= jitoMinPositionUsd;
+            const useJito = useJitoConfigured && retryCount === 0 && jitoAllowedForSize;
+            if (useJitoConfigured && !jitoAllowedForSize) {
+                this.logger.log(
+                    `[Jupiter] Skipping Jito for small ${side} notional ` +
+                        `$${swapNotionalUsd.toFixed(2)} < $${jitoMinPositionUsd} (avoids fixed tip drag).`,
+                );
+            }
             const jitoBlockEngineUrl =
                 this.configService.get<string>('JITO_BLOCK_ENGINE_URL') ||
                 'https://mainnet.block-engine.jito.wtf/api/v1/bundles';
@@ -2553,10 +2582,10 @@ export class TradeService implements OnModuleInit {
 
         const trades = await this.prismaService.trade.findMany({
             where: { telegramChatId: chatRecord.id, status: 'CLOSED', mode: 'LIVE' },
-            select: { profitUsd: true },
+            select: { profitUsd: true, totalFeesSol: true, solPriceAtEntry: true },
         });
         const total = trades.length;
-        const wins = trades.filter((trade) => (trade.profitUsd || 0) > 0).length;
+        const wins = trades.filter((trade) => computeNetProfitUsd(trade) > 0).length;
         const losses = total - wins;
         const winRate = total > 0 ? (wins / total) * 100 : 0;
 

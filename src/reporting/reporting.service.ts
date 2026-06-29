@@ -7,6 +7,7 @@ import axios from 'axios';
 import * as https from 'https';
 import * as TelegramBot from 'node-telegram-bot-api';
 import { DexLimiter } from '../common/dex-limiter';
+import { computeNetProfitUsd } from '../common/fee-utils';
 import { TokenMetadata } from '../dto/analyzer.dto';
 import {
     TradeFailureAlertParams,
@@ -1579,20 +1580,19 @@ export class ReportingService implements OnModuleInit {
                 return;
             }
 
-            const totalPnl = trades.reduce((sum, t) => sum + (t.profitUsd || 0), 0);
-            const wins = trades.filter((t) => (t.profitUsd || 0) > 0).length;
-            const losses = trades.filter((t) => (t.profitUsd || 0) <= 0).length;
+            const net = (t: {
+                profitUsd?: number | null;
+                totalFeesSol?: number | null;
+                solPriceAtEntry?: number | null;
+            }) => computeNetProfitUsd(t);
+            const totalPnl = trades.reduce((sum, t) => sum + net(t), 0);
+            const wins = trades.filter((t) => net(t) > 0).length;
+            const losses = trades.filter((t) => net(t) <= 0).length;
             const winRate = trades.length > 0 ? ((wins / trades.length) * 100).toFixed(1) : '0';
             const avgPnl = trades.length > 0 ? totalPnl / trades.length : 0;
 
-            const bestTrade = trades.reduce(
-                (best, t) => ((t.profitUsd || 0) > (best.profitUsd || 0) ? t : best),
-                trades[0],
-            );
-            const worstTrade = trades.reduce(
-                (worst, t) => ((t.profitUsd || 0) < (worst.profitUsd || 0) ? t : worst),
-                trades[0],
-            );
+            const bestTrade = trades.reduce((best, t) => (net(t) > net(best) ? t : best), trades[0]);
+            const worstTrade = trades.reduce((worst, t) => (net(t) < net(worst) ? t : worst), trades[0]);
 
             const pnlEmoji = totalPnl >= 0 ? '💰' : '🔻';
             const message =
@@ -1603,8 +1603,8 @@ export class ReportingService implements OnModuleInit {
                 `🎯 *Win Rate:* \`${winRate}%\`\n` +
                 `📉 *Avg P&L:* \`${avgPnl >= 0 ? '+' : ''}$${avgPnl.toFixed(2)}\`\n` +
                 `━━━━━━━━━━━━━━━━━━\n` +
-                `🏆 *Best:* ${bestTrade.symbol || 'N/A'} (\`+$${(bestTrade.profitUsd || 0).toFixed(2)}\`)\n` +
-                `💀 *Worst:* ${worstTrade.symbol || 'N/A'} (\`$${(worstTrade.profitUsd || 0).toFixed(2)}\`)\n` +
+                `🏆 *Best:* ${bestTrade.symbol || 'N/A'} (\`+$${net(bestTrade).toFixed(2)}\`)\n` +
+                `💀 *Worst:* ${worstTrade.symbol || 'N/A'} (\`$${net(worstTrade).toFixed(2)}\`)\n` +
                 `━━━━━━━━━━━━━━━━━━\n` +
                 this.getExitReasonBreakdown(trades);
 

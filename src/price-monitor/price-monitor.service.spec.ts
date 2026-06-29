@@ -69,15 +69,21 @@ describe('PriceMonitorService conservative exit guard', () => {
         expect(service.shouldRunEarlyExitHealthCheck('STOP_LOSS')).toBe(false);
         expect(service.shouldRunEarlyExitHealthCheck('TRAILING_STOP')).toBe(true);
     });
-    it('estimates net profit after buy and sell fee drag', () => {
-        const service = createService({ USE_JITO: true, JITO_TIP_SOL: 0.001 });
+    it('estimates net profit after buy and sell fee drag (incl. DEX/slippage)', () => {
+        const service = createService({
+            USE_JITO: true,
+            JITO_TIP_SOL: 0.001,
+            DEX_FEE_ROUNDTRIP_PERCENT: 1.0,
+        });
 
         const netProfit = service.estimateNetProfitPercent(
             { entryValueUsd: 3, solPriceAtEntry: 75, totalFeesSol: 0.001 },
             8,
         );
 
-        expect(netProfit).toBeCloseTo(2.98, 1);
+        // gross 8% - tip/network drag ((0.001 + 0.001 + 0.00001) * 75 / 3 * 100 = 5.025)
+        //          - DEX/slippage allowance (1.0) = 1.975
+        expect(netProfit).toBeCloseTo(1.975, 2);
     });
 
     it('holds a small trailing exit when AI health is healthy', async () => {

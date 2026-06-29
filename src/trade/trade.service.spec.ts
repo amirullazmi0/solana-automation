@@ -8,6 +8,7 @@ import {
     PriceAnomalyError,
     validateSellPrice,
 } from './trade.service';
+import { computeNetProfitUsd } from '../common/fee-utils';
 
 describe('TradeService calculation helpers', () => {
     describe('normalizePriceImpactPct', () => {
@@ -53,11 +54,16 @@ describe('TradeService calculation helpers', () => {
     });
 
     describe('calculateCleanSwapSolAmount', () => {
-        it('removes network fee, rent, and Jito tip from raw SOL delta', () => {
-            const rawSolDeltaLamports = 1_003_039_280;
+        // The Jito tip is paid in a SEPARATE transaction (tx2). rawSolDeltaLamports is read
+        // from the swap tx (tx1) only, so the tip is NEVER present in it and must NOT be
+        // applied to the clean price math. ATA rent IS in tx1 (removed for price isolation)
+        // but is a recoverable deposit, so it is NOT counted as a fee.
+        it('BUY: excludes the tip from the clean amount (tip is not in tx1 raw delta)', () => {
+            // tx1 delta = swap(1.0 SOL) + networkFee + rent  (no tip)
             const networkFeeLamports = 5_000;
             const rentDeltaLamports = 2_034_280;
             const jitoTipLamports = 1_000_000;
+            const rawSolDeltaLamports = 1_000_000_000 + networkFeeLamports + rentDeltaLamports;
 
             const result = calculateCleanSwapSolAmount(
                 rawSolDeltaLamports,
@@ -66,11 +72,30 @@ describe('TradeService calculation helpers', () => {
                 jitoTipLamports,
             );
 
-            expect(result.cleanSolAmount).toBe(1);
-            expect(result.totalFeesSol).toBe(0.00303928);
+            expect(result.cleanSolAmount).toBe(1); // true SOL spent on tokens (tip excluded)
+            expect(result.totalFeesSol).toBe((networkFeeLamports + jitoTipLamports) / 1e9); // 0.001005, rent excluded
         });
 
-        it('adds network fee back to sell proceeds before subtracting rent', () => {
+        it('SELL: excludes the tip and the rent refund from proceeds/fees', () => {
+            // tx1 delta = received(1.0 SOL) - networkFee + rentRefund  (no tip)
+            const networkFeeLamports = 5_000;
+            const rentDeltaLamports = 2_039_280;
+            const jitoTipLamports = 1_000_000;
+            const rawSolDeltaLamports = 1_000_000_000 - networkFeeLamports + rentDeltaLamports;
+
+            const result = calculateCleanSwapSolAmount(
+                rawSolDeltaLamports,
+                networkFeeLamports,
+                rentDeltaLamports,
+                jitoTipLamports,
+                'SELL',
+            );
+
+            expect(result.cleanSolAmount).toBe(1); // true SOL received (tip + rent refund excluded)
+            expect(result.totalFeesSol).toBe((networkFeeLamports + jitoTipLamports) / 1e9); // 0.001005
+        });
+
+        it('SELL: adds network fee back to proceeds before subtracting rent (no Jito)', () => {
             const rawSolDeltaLamports = 999_495_000;
             const networkFeeLamports = 505_000;
             const rentDeltaLamports = 0;
@@ -87,9 +112,45 @@ describe('TradeService calculation helpers', () => {
             expect(result.cleanSolAmount).toBe(1);
             expect(result.totalFeesSol).toBe(0.000505);
         });
+
+        it('BUY no-Jito (tip=0): clean amount unchanged, fees exclude rent', () => {
+            const networkFeeLamports = 5_000;
+            const rentDeltaLamports = 2_034_280;
+            const rawSolDeltaLamports = 1_000_000_000 + networkFeeLamports + rentDeltaLamports;
+
+            const result = calculateCleanSwapSolAmount(
+                rawSolDeltaLamports,
+                networkFeeLamports,
+                rentDeltaLamports,
+                0,
+            );
+
+            expect(result.cleanSolAmount).toBe(1);
+            expect(result.totalFeesSol).toBe(networkFeeLamports / 1e9); // 0.000005
+        });
+
         it('returns null when fees exceed the raw SOL delta', () => {
             const result = calculateCleanSwapSolAmount(100, 50, 50, 1);
             expect(result.cleanSolAmount).toBeNull();
+        });
+    });
+
+    describe('computeNetProfitUsd', () => {
+        it('subtracts fees in USD using solPriceAtEntry', () => {
+            // gross +$0.05, fees 0.002 SOL @ $150 = $0.30 -> net -$0.25
+            expect(
+                computeNetProfitUsd({ profitUsd: 0.05, totalFeesSol: 0.002, solPriceAtEntry: 150 }),
+            ).toBeCloseTo(-0.25, 6);
+        });
+        it('falls back to gross when solPriceAtEntry is missing', () => {
+            expect(
+                computeNetProfitUsd({ profitUsd: 1.0, totalFeesSol: 0.002, solPriceAtEntry: 0 }),
+            ).toBeCloseTo(1.0, 6);
+        });
+        it('a gross win that is a net loss becomes negative', () => {
+            expect(
+                computeNetProfitUsd({ profitUsd: 0.01, totalFeesSol: 0.002, solPriceAtEntry: 150 }),
+            ).toBeLessThan(0);
         });
     });
 
