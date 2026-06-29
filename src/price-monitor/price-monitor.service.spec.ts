@@ -86,6 +86,24 @@ describe('PriceMonitorService conservative exit guard', () => {
         expect(netProfit).toBeCloseTo(1.975, 2);
     });
 
+    it('excludes the sell Jito tip from fee drag for sub-threshold (<$3) positions', () => {
+        const service = createService({
+            USE_JITO: true,
+            JITO_TIP_SOL: 0.001,
+            JITO_MIN_POSITION_USD: 3,
+            DEX_FEE_ROUNDTRIP_PERCENT: 1.0,
+        });
+
+        // entryValueUsd = 2 (< $3): the sell skips Jito at execution, so no sell tip in drag.
+        const netProfit = service.estimateNetProfitPercent(
+            { entryValueUsd: 2, solPriceAtEntry: 75, totalFeesSol: 0.001 },
+            8,
+        );
+
+        // gross 8 - ((0.001 + 0.00001) * 75 / 2 * 100 = 3.7875) - DEX 1.0 = 3.2125
+        expect(netProfit).toBeCloseTo(3.2125, 2);
+    });
+
     it('holds a small trailing exit when AI health is healthy', async () => {
         const executeSell = jest.fn();
         const service = new PriceMonitorService(

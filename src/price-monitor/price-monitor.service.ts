@@ -47,7 +47,6 @@ export class PriceMonitorService {
     private trailingDistancePercent: number;
     private jupiterApiKey: string;
     private stopLossPercent: number;
-    private readonly newTokenPatienceThresholdMinutes: number;
     private readonly conservativeExitGuardEnabled: boolean;
     private readonly minNonCriticalHoldMs: number;
     private readonly healthCheckBeforeEarlySl: boolean;
@@ -75,9 +74,6 @@ export class PriceMonitorService {
         );
         this.stopLossPercent = parseFloat(
             this.configService.get<string>('STOP_LOSS_PERCENT', '25.0'),
-        );
-        this.newTokenPatienceThresholdMinutes = parseFloat(
-            this.configService.get<string>('SL_PATIENCE_NEW_TOKEN_MINUTES', '30'),
         );
         this.conservativeExitGuardEnabled = this.getBooleanConfig(
             'ENABLE_CONSERVATIVE_EXIT_GUARD',
@@ -508,9 +504,13 @@ export class PriceMonitorService {
         const buyFeesSol = Number.isFinite(Number(trade.totalFeesSol))
             ? Math.max(0, Number(trade.totalFeesSol))
             : 0;
-        const sellTipSol = this.getBooleanConfig('USE_JITO', false)
-            ? Math.max(0, this.getNumberConfig('JITO_TIP_SOL', 0))
-            : 0;
+        // Mirror the execution-side Jito gate: the sell tip is only paid when the sell
+        // notional clears JITO_MIN_POSITION_USD. Counting it on sub-threshold positions
+        // would inflate fee drag and over-hold small winners.
+        const sellUsesJito =
+            this.getBooleanConfig('USE_JITO', false) &&
+            entryValueUsd >= this.getNumberConfig('JITO_MIN_POSITION_USD', 3);
+        const sellTipSol = sellUsesJito ? Math.max(0, this.getNumberConfig('JITO_TIP_SOL', 0)) : 0;
         const estimatedSellNetworkFeeSol = Math.max(
             0,
             this.getNumberConfig('ESTIMATED_SELL_NETWORK_FEE_SOL', 0.00001),

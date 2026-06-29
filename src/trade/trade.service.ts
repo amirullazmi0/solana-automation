@@ -1256,7 +1256,10 @@ export class TradeService implements OnModuleInit {
                 'So11111111111111111111111111111111111111112',
                 amountInLamports,
                 'SELL',
-                trade.entryValueUsd ?? undefined, // notional for Jito-size gate (NOT used for SELL pricing)
+                // Jito-size gate notional (NOT used for SELL pricing). Prorate the entry COST
+                // BASIS by the fraction being sold so a partial sell gates on the real leg size
+                // (an un-prorated $3 basis on a 50% sell would wrongly keep Jito on a ~$1.5 leg).
+                trade.entryValueUsd != null ? trade.entryValueUsd * percentage : undefined,
                 0,
                 sellSlippage,
                 sellPriorityFee,
@@ -1304,10 +1307,15 @@ export class TradeService implements OnModuleInit {
                     const runnerFloorPercent = Number.parseFloat(
                         this.configService.get<string>('RUNNER_BREAKEVEN_FLOOR_PERCENT') || '8',
                     );
+                    const runnerFloorPrice =
+                        trade.entryPrice *
+                        (1 + (Number.isFinite(runnerFloorPercent) ? runnerFloorPercent : 8) / 100);
                     const runnerStopPrice =
                         exitReason === 'PARTIAL_TAKE_PROFIT'
-                            ? trade.entryPrice *
-                              (1 + (Number.isFinite(runnerFloorPercent) ? runnerFloorPercent : 8) / 100)
+                            ? // Never let the break-even floor sit at/above the current price, or the
+                              // runner would be liquidated on the next tick (guards a misconfigured
+                              // floor set above the take-profit trigger). exitPrice = partial-TP price.
+                              Math.min(runnerFloorPrice, exitPrice * 0.999)
                             : trade.trailingStopPrice;
 
                     await this.prismaService.trade.update({
