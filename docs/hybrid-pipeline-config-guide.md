@@ -124,8 +124,8 @@ Invariant yang harus dianggap source of truth:
   "TAKE_PROFIT_PERCENT": 15,
   "STOP_LOSS_PERCENT": 12,
   "TRAILING_DISTANCE_PERCENT": 1.5,
-  "MICIN_TRAILING_ACTIVATION_PERCENT": 8,
-  "WHALE_TRAILING_ACTIVATION_PERCENT": 7,
+  "MICIN_TRAILING_ACTIVATION_PERCENT": 12,
+  "WHALE_TRAILING_ACTIVATION_PERCENT": 8,
   "MICIN_TRAILING_DISTANCE_PERCENT": 6,
   "WHALE_TRAILING_DISTANCE_PERCENT": 3.5,
   "MICIN_TAKE_PROFIT_PERCENT": 25,
@@ -134,10 +134,12 @@ Invariant yang harus dianggap source of truth:
   "WHALE_STOP_LOSS_PERCENT": 9,
   "DISABLE_SL_PATIENCE": true,
   "ENABLE_CONSERVATIVE_EXIT_GUARD": true,
-  "MIN_NON_CRITICAL_HOLD_SECONDS": 60,
+  "MIN_NON_CRITICAL_HOLD_SECONDS": 90,
   "HEALTH_CHECK_BEFORE_EARLY_SL": true,
   "HEALTH_CHECK_BEFORE_EARLY_TRAILING": true,
   "RUNNER_TRAILING_DISTANCE_MULTIPLIER": 2,
+  "MIN_NET_EXIT_PROFIT_PERCENT": 3,
+  "MIN_TRAILING_DISTANCE_BEFORE_PARTIAL_PERCENT": 3,
   "MIN_MCAP": 5000,
   "MAX_MCAP": 3000000,
   "MIN_AGE_HOURS": 0.02,
@@ -576,15 +578,17 @@ Catatan `uniqueBuyers`:
 | `WHALE_STOP_LOSS_PERCENT` | SL whale | Whale lebih rapat | `8 - 12` |
 | `MICIN_TAKE_PROFIT_PERCENT` | TP micin | Target upside micin | `18 - 30` |
 | `WHALE_TAKE_PROFIT_PERCENT` | TP whale | Target upside whale | `12 - 20` |
-| `MICIN_TRAILING_ACTIVATION_PERCENT` | trailing start micin | Cegah exit terlalu cepat | config aktif `8`, umum `8 - 15` |
-| `WHALE_TRAILING_ACTIVATION_PERCENT` | trailing start whale | Whale lebih cepat lock | config aktif `7`, umum `7 - 12` |
+| `MICIN_TRAILING_ACTIVATION_PERCENT` | trailing start micin | Cegah exit terlalu cepat | config aktif `12`, umum `10 - 15` |
+| `WHALE_TRAILING_ACTIVATION_PERCENT` | trailing start whale | Whale lebih cepat lock | config aktif `8`, umum `7 - 12` |
 | `MICIN_TRAILING_DISTANCE_PERCENT` | trailing distance micin | Harus lebih lebar | config aktif `6`, umum `4 - 8` |
 | `WHALE_TRAILING_DISTANCE_PERCENT` | trailing distance whale | Lebih ketat | config aktif `3.5`, umum `2.5 - 5` |
 | `ENABLE_CONSERVATIVE_EXIT_GUARD` | tahan exit non-critical awal | Cegah SL/trailing whipsaw setelah buy | `true` |
-| `MIN_NON_CRITICAL_HOLD_SECONDS` | minimum hold SL/trailing | Memberi waktu price action stabil | `60` |
+| `MIN_NON_CRITICAL_HOLD_SECONDS` | minimum hold SL/trailing | Memberi waktu price action stabil | `90` |
 | `HEALTH_CHECK_BEFORE_EARLY_SL` | AI check sebelum early SL | Critical tetap sell, healthy hold | `true` |
 | `HEALTH_CHECK_BEFORE_EARLY_TRAILING` | AI check sebelum early trailing | Critical tetap sell, healthy hold | `true` |
 | `RUNNER_TRAILING_DISTANCE_MULTIPLIER` | trailing sisa posisi setelah partial TP | Biar runner tidak cepat kesell | `2` |
+| `MIN_NET_EXIT_PROFIT_PERCENT` | minimum estimasi net PnL sebelum trailing sell kecil | Hindari profit kecil habis fee/Jito/slippage | `3` |
+| `MIN_TRAILING_DISTANCE_BEFORE_PARTIAL_PERCENT` | floor trailing sebelum partial TP | Cegah AI tightening terlalu sempit sebelum profit diamankan | `3` |
 
 ### 7.9 Scanner timing
 
@@ -722,3 +726,4 @@ Urutan faktor paling besar ke performa:
 - Execution gate: slot, reserve, capital, balance, slippage, price impact.
 - Monitoring: trailing, stop loss, partial TP, dev dump, rugpull exit.
 - Telegram: bedakan jelas candidate, waiting, rejected, blocked, signal valid, dan execution failed.
+

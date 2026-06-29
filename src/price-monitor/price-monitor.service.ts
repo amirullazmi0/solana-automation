@@ -52,6 +52,8 @@ export class PriceMonitorService {
     private readonly minNonCriticalHoldMs: number;
     private readonly healthCheckBeforeEarlySl: boolean;
     private readonly healthCheckBeforeEarlyTrailing: boolean;
+    private readonly minNetExitProfitPercent: number;
+    private readonly minTrailingDistanceBeforePartialPercent: number;
     private readonly lastAlertTime = new Map<string, number>(); // Cooldown alert: tokenMint -> timestamp
     private readonly lastRiskAdjustmentAlertTime = new Map<string, number>();
     private readonly healthCheckCache = new Map<number, { checkedAt: number; result: AIHealthCheckResult }>();
@@ -92,6 +94,14 @@ export class PriceMonitorService {
         this.healthCheckBeforeEarlyTrailing = this.getBooleanConfig(
             'HEALTH_CHECK_BEFORE_EARLY_TRAILING',
             true,
+        );
+        this.minNetExitProfitPercent = Math.max(
+            0,
+            this.getNumberConfig('MIN_NET_EXIT_PROFIT_PERCENT', 3),
+        );
+        this.minTrailingDistanceBeforePartialPercent = Math.max(
+            0,
+            this.getNumberConfig('MIN_TRAILING_DISTANCE_BEFORE_PARTIAL_PERCENT', 3),
         );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
     }
@@ -481,6 +491,103 @@ export class PriceMonitorService {
         );
         return true;
     }
+    private estimateFeeDragPercent(
+        trade: Pick<Trade, 'entryValueUsd' | 'solPriceAtEntry' | 'totalFeesSol'>,
+    ): number {
+        const entryValueUsd = Number(trade.entryValueUsd);
+        const solPriceAtEntry = Number(trade.solPriceAtEntry);
+        if (
+            !Number.isFinite(entryValueUsd) ||
+            entryValueUsd <= 0 ||
+            !Number.isFinite(solPriceAtEntry) ||
+            solPriceAtEntry <= 0
+        ) {
+            return 0;
+        }
+
+        const buyFeesSol = Number.isFinite(Number(trade.totalFeesSol))
+            ? Math.max(0, Number(trade.totalFeesSol))
+            : 0;
+        const sellTipSol = this.getBooleanConfig('USE_JITO', false)
+            ? Math.max(0, this.getNumberConfig('JITO_TIP_SOL', 0))
+            : 0;
+        const estimatedSellNetworkFeeSol = Math.max(
+            0,
+            this.getNumberConfig('ESTIMATED_SELL_NETWORK_FEE_SOL', 0.00001),
+        );
+        const totalEstimatedFeesUsd =
+            (buyFeesSol + sellTipSol + estimatedSellNetworkFeeSol) * solPriceAtEntry;
+
+        return (totalEstimatedFeesUsd / entryValueUsd) * 100;
+    }
+
+    private estimateNetProfitPercent(
+        trade: Pick<Trade, 'entryValueUsd' | 'solPriceAtEntry' | 'totalFeesSol'>,
+        grossProfitPercent: number,
+    ): number {
+        if (!Number.isFinite(grossProfitPercent)) return grossProfitPercent;
+        return grossProfitPercent - this.estimateFeeDragPercent(trade);
+    }
+
+    private hasSupportiveFlow(signals: TradeFreshMarketSignals): boolean {
+        const buys = Math.max(0, signals.buys5mCount);
+        const sells = Math.max(0, signals.sells5mCount);
+        const buyPressurePositive = buys >= Math.max(2, sells);
+        const volumeStillAlive =
+            signals.volumeSurge >= 1 ||
+            signals.volScore >= 0.2 ||
+            signals.volume5mUsd >= Math.max(100, signals.volume1hUsd * 0.03);
+        const trendNotBroken = signals.priceChange1h >= -10;
+
+        return buyPressurePositive && volumeStillAlive && trendNotBroken;
+    }
+
+    private async handleTrailingExitHealthGuard(
+        trade: TradeWithTelegramChat,
+        currentPrice: number,
+        profitPercent: number,
+        effectiveStopLossPercent: number,
+        signals: TradeFreshMarketSignals,
+    ): Promise<boolean> {
+        if (trade.partialTakeProfitAt) return false;
+
+        const estimatedNetProfitPercent = this.estimateNetProfitPercent(trade, profitPercent);
+        const netProfitTooSmall = estimatedNetProfitPercent < this.minNetExitProfitPercent;
+        const supportiveFlow = this.hasSupportiveFlow(signals);
+
+        if (!netProfitTooSmall && !supportiveFlow) return false;
+
+        if (this.healthCheckBeforeEarlyTrailing) {
+            const healthCheck = await this.shouldHoldOrCut(
+                trade,
+                profitPercent,
+                effectiveStopLossPercent,
+                signals,
+            );
+
+            if (healthCheck.status === 'CRITICAL') {
+                this.logger.warn(
+                    `[Slot ${trade.slotNumber}] Trailing override: AI Health CRITICAL. gross=${profitPercent.toFixed(2)}% netEst=${estimatedNetProfitPercent.toFixed(2)}% reason=${healthCheck.reasoning}`,
+                );
+                await this.tradeService.executeSell(trade.id, currentPrice, 'AI_HEALTH_CRITICAL');
+                return true;
+            }
+
+            this.logger.log(
+                `[Slot ${trade.slotNumber}] Trailing HOLD by health/flow. gross=${profitPercent.toFixed(2)}% netEst=${estimatedNetProfitPercent.toFixed(2)}% minNet=${this.minNetExitProfitPercent}% flow=${supportiveFlow}. reason=${healthCheck.reasoning}`,
+            );
+            return true;
+        }
+
+        if (netProfitTooSmall && supportiveFlow) {
+            this.logger.log(
+                `[Slot ${trade.slotNumber}] Trailing HOLD by fee-aware flow guard. gross=${profitPercent.toFixed(2)}% netEst=${estimatedNetProfitPercent.toFixed(2)}% minNet=${this.minNetExitProfitPercent}%.`,
+            );
+            return true;
+        }
+
+        return false;
+    }
 
     private async getWatchlistHealthContext(tokenMint: string) {
         return this.prismaService.watchlist.findUnique({
@@ -596,7 +703,7 @@ export class PriceMonitorService {
             'TRAILING_ACTIVATION_PERCENT',
             8,
         );
-        const noiseAdjustedTrailingDistance =
+        const rawNoiseAdjustedTrailingDistance =
             noisePressure.severity >= 85
                 ? Math.min(baseTrailingDistancePercent, aiRecommendedTrailingDistance, 1.25)
                 : noisePressure.severity >= 70
@@ -604,6 +711,12 @@ export class PriceMonitorService {
                   : noisePressure.severity >= 50
                     ? Math.min(baseTrailingDistancePercent, aiRecommendedTrailingDistance, 3.0)
                     : Math.min(baseTrailingDistancePercent, aiRecommendedTrailingDistance);
+        const noiseAdjustedTrailingDistance = trade.partialTakeProfitAt
+            ? rawNoiseAdjustedTrailingDistance
+            : Math.max(
+                  rawNoiseAdjustedTrailingDistance,
+                  Math.min(baseTrailingDistancePercent, this.minTrailingDistanceBeforePartialPercent),
+              );
         const runnerTrailingMultiplier = trade.partialTakeProfitAt
             ? Math.max(1, this.getNumberConfig('RUNNER_TRAILING_DISTANCE_MULTIPLIER', 2))
             : 1;
@@ -818,7 +931,7 @@ export class PriceMonitorService {
             return;
         }
 
-        // 🛡️ Trailing Stop Trigger
+        // Trailing Stop Trigger
         if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice) {
             const reason = 'TRAILING_STOP';
             if (
@@ -834,13 +947,24 @@ export class PriceMonitorService {
                 return;
             }
 
+            if (
+                await this.handleTrailingExitHealthGuard(
+                    trade,
+                    currentPrice,
+                    profitPercent,
+                    effectiveStopLossPercent,
+                    normalizedFreshMarketSignals,
+                )
+            ) {
+                return;
+            }
+
             this.logger.log(
-                `[Slot ${trade.slotNumber}] 💸 ${reason} at $${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`,
+                `[Slot ${trade.slotNumber}] ${reason} at $${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`,
             );
             await this.tradeService.executeSell(trade.id, currentPrice, reason);
             return;
         }
-
         // 5. EXIT CONDITION: Patience Protocol (5-Minute SL with 10-Minute Hard Cap)
         if (profitPercent <= -effectiveStopLossPercent) {
             const disablePatience =
@@ -986,3 +1110,9 @@ export class PriceMonitorService {
         }
     }
 }
+
+
+
+
+
+
