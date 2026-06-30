@@ -1,4 +1,38 @@
-import { PriceMonitorService } from './price-monitor.service';
+import { PriceMonitorService, resolveMonitorSolPriceBasis } from './price-monitor.service';
+
+
+describe('resolveMonitorSolPriceBasis', () => {
+    it('keeps SOL-denominated trade prices as SOL basis', () => {
+        const basis = resolveMonitorSolPriceBasis({
+            currentPriceUsd: 0.00015,
+            currentSolUsd: 75,
+            entryPrice: 0.0000015,
+            highestPrice: 0.000002,
+            trailingStopPrice: 0.0000018,
+            solPriceAtEntry: 70,
+        });
+
+        expect(basis?.basis).toBe('sol');
+        expect(basis?.currentPriceSol).toBeCloseTo(0.000002, 10);
+        expect(basis?.entryPriceSol).toBeCloseTo(0.0000015, 10);
+    });
+
+    it('converts legacy USD-denominated trade prices to SOL basis', () => {
+        const basis = resolveMonitorSolPriceBasis({
+            currentPriceUsd: 0.00015,
+            currentSolUsd: 75,
+            entryPrice: 0.000105,
+            highestPrice: 0.00014,
+            trailingStopPrice: 0.000126,
+            solPriceAtEntry: 70,
+        });
+
+        expect(basis?.basis).toBe('legacy_usd_converted');
+        expect(basis?.entryPriceSol).toBeCloseTo(0.0000015, 10);
+        expect(basis?.highestPriceSol).toBeCloseTo(0.000002, 10);
+        expect(basis?.trailingStopPriceSol).toBeCloseTo(0.0000018, 10);
+    });
+});
 
 describe('PriceMonitorService conservative exit guard', () => {
     function createService(config: Record<string, unknown> = {}) {

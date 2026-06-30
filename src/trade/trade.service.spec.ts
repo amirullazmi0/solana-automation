@@ -1,9 +1,11 @@
 import {
     calculateCleanSwapSolAmount,
     calculateFinalBuySizeUsd,
+    calculateRealizedSellPnl,
     capSlippageBps,
     evaluateBuyRisk,
     normalizePriceImpactPct,
+    resolveSafeSellSolPrice,
     resolveRiskLookbackStart,
     PriceAnomalyError,
     validateSellPrice,
@@ -154,6 +156,34 @@ describe('TradeService calculation helpers', () => {
         });
     });
 
+    describe('calculateRealizedSellPnl', () => {
+        it('treats actual SOL loss as a loss even when token USD price would look profitable', () => {
+            const pnl = calculateRealizedSellPnl({
+                solSpent: 0.0315,
+                solReceived: 0.03,
+                entrySolPrice: 75.56,
+                sellSolPrice: 75.56,
+            });
+
+            expect(pnl.solProfitPercent).toBeCloseTo(-4.7619, 4);
+            expect(pnl.usdProfitPercent).toBeCloseTo(-4.7619, 4);
+            expect(pnl.usdReceived).toBeLessThan(pnl.usdSpent);
+        });
+
+        it('uses entry SOL price as conservative fallback when live SOL price is unavailable', () => {
+            const safePrice = resolveSafeSellSolPrice(0, 75.56);
+            const pnl = calculateRealizedSellPnl({
+                solSpent: 0.0315,
+                solReceived: 0.03,
+                entrySolPrice: 75.56,
+                sellSolPrice: safePrice.solPrice,
+            });
+
+            expect(safePrice.source).toBe('entry_fallback');
+            expect(pnl.usdReceived).toBeCloseTo(0.03 * 75.56, 6);
+            expect(pnl.usdProfitPercent).toBeLessThan(0);
+        });
+    });
     describe('calculateFinalBuySizeUsd', () => {
         it('applies route and AI multipliers', () => {
             expect(calculateFinalBuySizeUsd(3, 0.7, 0.5)).toBeCloseTo(1.05);
@@ -262,3 +292,4 @@ describe('TradeService calculation helpers', () => {
         });
     });
 });
+

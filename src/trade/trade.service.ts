@@ -102,6 +102,50 @@ export function calculateCleanSwapSolAmount(
     };
 }
 
+export function resolveSafeSellSolPrice(
+    liveSolPrice: number,
+    entrySolPrice: number | null | undefined,
+): { solPrice: number; source: 'live' | 'entry_fallback' | 'unavailable' } {
+    if (Number.isFinite(liveSolPrice) && liveSolPrice > 0) {
+        return { solPrice: liveSolPrice, source: 'live' };
+    }
+    const entry = Number(entrySolPrice ?? 0);
+    if (Number.isFinite(entry) && entry > 0) {
+        return { solPrice: entry, source: 'entry_fallback' };
+    }
+    return { solPrice: 0, source: 'unavailable' };
+}
+
+export function calculateRealizedSellPnl(params: {
+    solSpent: number;
+    solReceived: number;
+    entrySolPrice?: number | null;
+    sellSolPrice?: number | null;
+}): {
+    solProfitPercent: number;
+    usdSpent: number;
+    usdReceived: number;
+    usdProfit: number;
+    usdProfitPercent: number;
+} {
+    const solSpent = Number(params.solSpent);
+    const solReceived = Number(params.solReceived);
+    const entrySolPrice = Number(params.entrySolPrice ?? 0);
+    const sellSolPrice = Number(params.sellSolPrice ?? 0);
+    const solProfitPercent = solSpent > 0 ? ((solReceived - solSpent) / solSpent) * 100 : 0;
+    const usdSpent = solSpent * (Number.isFinite(entrySolPrice) && entrySolPrice > 0 ? entrySolPrice : sellSolPrice);
+    const usdReceived = solReceived * (Number.isFinite(sellSolPrice) && sellSolPrice > 0 ? sellSolPrice : entrySolPrice);
+    const usdProfit = usdReceived - usdSpent;
+    const usdProfitPercent = usdSpent > 0 ? (usdProfit / usdSpent) * 100 : solProfitPercent;
+
+    return {
+        solProfitPercent,
+        usdSpent,
+        usdReceived,
+        usdProfit,
+        usdProfitPercent,
+    };
+}
 export function sanitizeBuySizeMultiplier(value: number | undefined, fallback = 1): number {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return fallback;
@@ -1013,6 +1057,8 @@ export class TradeService implements OnModuleInit {
         if (success && entryPrice > 0) {
             const finalAmountInSol = actualSol || amountInSol;
             const entryValueUsd = finalAmountInSol * solPrice;
+            const entryPriceSol =
+                actualTokens && actualTokens > 0 ? finalAmountInSol / actualTokens : entryPrice / solPrice;
             const symbol = await this.fetchTokenSymbol(tokenMint);
             if (effectiveDryRun) {
                 this.logger.log(
@@ -1041,8 +1087,8 @@ export class TradeService implements OnModuleInit {
                     tokenMint,
                     symbol,
                     slotNumber: slotToUse,
-                    entryPrice,
-                    highestPrice: entryPrice,
+                    entryPrice: entryPriceSol,
+                    highestPrice: entryPriceSol,
                     trailingStopPrice: 0, // PriceMonitor activates it once the position is in profit.
                     status: 'OPEN',
                     mode: 'LIVE',
@@ -1268,20 +1314,42 @@ export class TradeService implements OnModuleInit {
             );
 
             if (success) {
-                const exitPrice = exitPriceResult || 0;
-                const profit = ((exitPrice - trade.entryPrice) / trade.entryPrice) * 100;
-                const solPrice = await this.getSolPrice();
+                const quotedExitPrice = exitPriceResult || 0;
+                const liveSellSolPrice = await this.getSolPriceOrNull();
+                const safeSellSolPrice = resolveSafeSellSolPrice(
+                    liveSellSolPrice ?? 0,
+                    trade.solPriceAtEntry,
+                );
 
-                const finalSolReceived = actualSol || (sellAmount * exitPrice) / solPrice;
+                const fallbackSolPrice = safeSellSolPrice.solPrice || trade.solPriceAtEntry || 0;
+                const finalSolReceived = actualSol || (fallbackSolPrice > 0 ? (sellAmount * quotedExitPrice) / fallbackSolPrice : 0);
                 const finalTokensSold = actualTokens || sellAmount;
                 const entrySolValue = trade.amountInSol * percentage;
-                const solProfitPercent = ((finalSolReceived - entrySolValue) / entrySolValue) * 100;
+                const realizedPnl = calculateRealizedSellPnl({
+                    solSpent: entrySolValue,
+                    solReceived: finalSolReceived,
+                    entrySolPrice: trade.solPriceAtEntry,
+                    sellSolPrice: safeSellSolPrice.solPrice,
+                });
+                const exitPrice =
+                    finalTokensSold > 0 && safeSellSolPrice.solPrice > 0
+                        ? (finalSolReceived * safeSellSolPrice.solPrice) / finalTokensSold
+                        : quotedExitPrice;
+                const profit = realizedPnl.usdProfitPercent;
+                const estimatedProfitUsd = realizedPnl.usdProfit;
+                const exitValueUsd = realizedPnl.usdReceived;
+                const totalUsdSpent = realizedPnl.usdSpent;
+                const totalUsdReceived = realizedPnl.usdReceived;
+                const solProfitPercent = realizedPnl.solProfitPercent;
 
-                const entryValueUsd = this.getEntryValueUsdForSell(trade, percentage, solPrice);
-                const exitValueUsd = sellAmount * exitPrice;
-                const estimatedProfitUsd = exitValueUsd - entryValueUsd;
-                const totalUsdSpent = finalTokensSold * trade.entryPrice;
-                const totalUsdReceived = finalTokensSold * exitPrice;
+                this.logger.log(
+                    `[PNL] source=actual_sol token=${trade.tokenMint} solPnl=${solProfitPercent.toFixed(2)}% usdPnl=${profit.toFixed(2)}% solPriceSource=${safeSellSolPrice.source}`,
+                );
+                if (safeSellSolPrice.source !== 'live') {
+                    this.logger.warn(
+                        `[PNL] Live SOL price unavailable for ${trade.tokenMint}. USD sell report uses ${safeSellSolPrice.source}.`,
+                    );
+                }
 
                 // ✅ DATABASE UPDATE: Hanya dilakukan jika transaksi Solana SUKSES
                 if (percentage >= 1.0) {
@@ -1307,6 +1375,8 @@ export class TradeService implements OnModuleInit {
                     const runnerFloorPercent = Number.parseFloat(
                         this.configService.get<string>('RUNNER_BREAKEVEN_FLOOR_PERCENT') || '8',
                     );
+                    const exitPriceSolForRunner =
+                        finalTokensSold > 0 ? finalSolReceived / finalTokensSold : 0;
                     const runnerFloorPrice =
                         trade.entryPrice *
                         (1 + (Number.isFinite(runnerFloorPercent) ? runnerFloorPercent : 8) / 100);
@@ -1315,7 +1385,7 @@ export class TradeService implements OnModuleInit {
                             ? // Never let the break-even floor sit at/above the current price, or the
                               // runner would be liquidated on the next tick (guards a misconfigured
                               // floor set above the take-profit trigger). exitPrice = partial-TP price.
-                              Math.min(runnerFloorPrice, exitPrice * 0.999)
+                              Math.min(runnerFloorPrice, exitPriceSolForRunner * 0.999)
                             : trade.trailingStopPrice;
 
                     await this.prismaService.trade.update({
@@ -1375,6 +1445,11 @@ export class TradeService implements OnModuleInit {
                     }
                 }
 
+                const entryPriceUsdForReport =
+                    finalTokensSold > 0 && trade.solPriceAtEntry
+                        ? (entrySolValue / finalTokensSold) * trade.solPriceAtEntry
+                        : trade.entryPrice;
+
                 await this.reportingService.sendSellAlert(
                     trade.tokenMint,
                     exitPrice,
@@ -1382,7 +1457,7 @@ export class TradeService implements OnModuleInit {
                     exitReason,
                     trade.symbol || undefined,
                     {
-                        entryPriceUsd: trade.entryPrice,
+                        entryPriceUsd: entryPriceUsdForReport,
                         exitPriceUsd: exitPrice,
                         entryPriceSol: entrySolValue / finalTokensSold,
                         exitPriceSol: finalSolReceived / finalTokensSold,
@@ -1643,13 +1718,16 @@ export class TradeService implements OnModuleInit {
                 const usdValue = buyAmountUSD || this.positionSizeUSD;
                 price = usdValue / (quoteData.outAmount / Math.pow(10, decimals));
             } else {
-                // SELL: Price = (outAmount_sol * solPrice) / inAmount_token
-                const solPrice = await this.getSolPrice();
+                // SELL: Price = (outAmount_sol * solPrice) / inAmount_token.
+                // Do not use the legacy $150 SOL fallback here; it can create fake USD profit.
+                const solPrice = await this.getSolPriceOrNull();
                 const outAmountSol = quoteData.outAmount / 1_000_000_000;
                 const inAmountToken = amount / Math.pow(10, decimals);
-                const calculatedPrice = (outAmountSol * solPrice) / inAmountToken;
+                const calculatedPrice = solPrice && inAmountToken > 0 ? (outAmountSol * solPrice) / inAmountToken : 0;
                 const fallbackPrice = await this.getSellPriceFallback(inputMint);
-                price = validateSellPrice(calculatedPrice, fallbackPrice, inputMint, this.logger);
+                price = calculatedPrice > 0 || fallbackPrice
+                    ? validateSellPrice(calculatedPrice, fallbackPrice, inputMint, this.logger)
+                    : 0.00000001;
             }
 
             // 🤖 DRY RUN MODE: Skip actual swap execution, just return simulated success with quote price
@@ -1831,22 +1909,26 @@ export class TradeService implements OnModuleInit {
                     side,
                 );
                 if (actualSwap) {
-                    const solPrice = await this.getSolPrice();
+                    const solPrice = side === 'SELL' ? await this.getSolPriceOrNull() : await this.getSolPrice();
                     totalFeesSol = actualSwap.totalFeesSol;
                     actualSol = actualSwap.cleanSolAmount ?? Math.abs(actualSwap.solChange);
                     actualTokens = Math.abs(actualSwap.tokenChange);
                     if (side === 'BUY') {
-                        if (actualTokens > 0) {
+                        if (actualTokens > 0 && solPrice) {
                             finalPrice = (actualSol * solPrice) / actualTokens;
                             this.logger.log(
                                 `[Jupiter] Actual BUY price calculated from on-chain balances: $${finalPrice.toFixed(8)} (Quote: $${price.toFixed(8)})`,
                             );
                         }
                     } else {
-                        if (actualTokens > 0) {
+                        if (actualTokens > 0 && solPrice) {
                             finalPrice = (actualSol * solPrice) / actualTokens;
                             this.logger.log(
                                 `[Jupiter] Actual SELL price calculated from on-chain balances: $${finalPrice.toFixed(8)} (Quote: $${price.toFixed(8)})`,
+                            );
+                        } else {
+                            this.logger.warn(
+                                `[Jupiter] Actual SELL SOL amount found but live SOL price unavailable. Keeping quote/fallback USD price.`,
                             );
                         }
                     }
@@ -2130,6 +2212,10 @@ export class TradeService implements OnModuleInit {
     }
 
     async getSolPrice(): Promise<number> {
+        return (await this.getSolPriceOrNull()) ?? 150;
+    }
+
+    private async getSolPriceOrNull(): Promise<number | null> {
         try {
             const response = await axios.get(
                 `https://api.jup.ag/price/v3?ids=${WRAPPED_SOL_MINT}`,
@@ -2140,9 +2226,10 @@ export class TradeService implements OnModuleInit {
                 },
             );
             const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
-            return data?.[WRAPPED_SOL_MINT]?.usdPrice || 150;
+            const price = Number(data?.[WRAPPED_SOL_MINT]?.usdPrice ?? 0);
+            return Number.isFinite(price) && price > 0 ? price : null;
         } catch {
-            return 150; // Fallback jika API Jupiter down
+            return null;
         }
     }
 
@@ -2600,3 +2687,5 @@ export class TradeService implements OnModuleInit {
         return { total, wins, losses, winRate };
     }
 }
+
+

@@ -41,6 +41,56 @@ type TradeWithTelegramChat = Trade & {
     } | null;
 };
 
+export interface MonitorSolPriceBasis {
+    currentPriceSol: number;
+    entryPriceSol: number;
+    highestPriceSol: number;
+    trailingStopPriceSol: number;
+    currentSolUsd: number;
+    basis: 'sol' | 'legacy_usd_converted';
+}
+
+export function resolveMonitorSolPriceBasis(params: {
+    currentPriceUsd: number;
+    currentSolUsd: number;
+    entryPrice: number;
+    highestPrice: number;
+    trailingStopPrice: number;
+    solPriceAtEntry?: number | null;
+}): MonitorSolPriceBasis | null {
+    const currentPriceUsd = Number(params.currentPriceUsd);
+    const currentSolUsd = Number(params.currentSolUsd);
+    const solPriceAtEntry = Number(params.solPriceAtEntry ?? 0);
+    if (!Number.isFinite(currentPriceUsd) || currentPriceUsd <= 0) return null;
+    if (!Number.isFinite(currentSolUsd) || currentSolUsd <= 0) return null;
+
+    const currentPriceSol = currentPriceUsd / currentSolUsd;
+    const fallbackSolUsd = Number.isFinite(solPriceAtEntry) && solPriceAtEntry > 0 ? solPriceAtEntry : currentSolUsd;
+    const toSolBasis = (value: number): { value: number; legacy: boolean } => {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric) || numeric <= 0) return { value: 0, legacy: false };
+        const looksLikeUsd = numeric > currentPriceSol * 10;
+        return looksLikeUsd
+            ? { value: numeric / fallbackSolUsd, legacy: true }
+            : { value: numeric, legacy: false };
+    };
+
+    const entry = toSolBasis(params.entryPrice);
+    const highest = toSolBasis(params.highestPrice);
+    const trailing = toSolBasis(params.trailingStopPrice);
+    const entryPriceSol = entry.value > 0 ? entry.value : currentPriceSol;
+
+    return {
+        currentPriceSol,
+        entryPriceSol,
+        highestPriceSol: highest.value > 0 ? highest.value : entryPriceSol,
+        trailingStopPriceSol: trailing.value,
+        currentSolUsd,
+        basis: entry.legacy || highest.legacy || trailing.legacy ? 'legacy_usd_converted' : 'sol',
+    };
+}
+
+
 @Injectable()
 export class PriceMonitorService {
     private readonly logger = new Logger(PriceMonitorService.name);
@@ -661,7 +711,26 @@ export class PriceMonitorService {
         currentPrice: number,
         freshMarketSignals?: TradeFreshMarketSignals,
     ) {
-        const profitPercent = ((currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
+        const currentSolUsd = await this.tradeService.getSolPrice();
+        const priceBasis = resolveMonitorSolPriceBasis({
+            currentPriceUsd: currentPrice,
+            currentSolUsd,
+            entryPrice: trade.entryPrice,
+            highestPrice: trade.highestPrice,
+            trailingStopPrice: trade.trailingStopPrice,
+            solPriceAtEntry: trade.solPriceAtEntry,
+        });
+        if (!priceBasis) {
+            this.logger.warn(
+                `[Slot ${trade.slotNumber}] Unable to resolve SOL price basis for ${trade.tokenMint}. Skipping exit evaluation.`,
+            );
+            return;
+        }
+        const currentPriceSol = priceBasis.currentPriceSol;
+        const entryPriceSol = priceBasis.entryPriceSol;
+        const highestPriceSol = priceBasis.highestPriceSol;
+        const trailingStopPriceSol = priceBasis.trailingStopPriceSol;
+        const profitPercent = ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100;
 
         const effectiveStopLossPercent =
             trade.targetStopLoss ??
@@ -726,7 +795,7 @@ export class PriceMonitorService {
         const effectiveTrailingDistancePercent = noiseAdjustedTrailingDistance * runnerTrailingMultiplier;
 
         this.logger.debug(
-            `[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)}, Profit: ${profitPercent.toFixed(2)}%, SL: -${effectiveStopLossPercent}%, TSL: $${trade.trailingStopPrice.toFixed(8)}`,
+            `[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)} / ${currentPriceSol.toFixed(10)} SOL, Profit: ${profitPercent.toFixed(2)}%, SL: -${effectiveStopLossPercent}%, TSL: ${trailingStopPriceSol.toFixed(10)} SOL, basis=${priceBasis.basis}`,
         );
 
         if (effectiveTrailingDistancePercent < baseTrailingDistancePercent) {
@@ -739,7 +808,7 @@ export class PriceMonitorService {
                 normalizedFreshMarketSignals,
                 baseTrailingDistancePercent,
                 effectiveTrailingDistancePercent,
-                trade.trailingStopPrice,
+                trailingStopPriceSol * currentSolUsd,
                 trade.telegramChat?.chatId,
             );
         }
@@ -843,8 +912,8 @@ export class PriceMonitorService {
         }
         // 3. TRAILING STOP LOGIC (Update Peak & TSL)
         // 🚀 Hanya update peak kalau harga sudah naik minimal 5% (Safe Zone)
-        if (currentPrice > trade.highestPrice && profitPercent >= trailingActivationPercent) {
-            const calculatedStop = currentPrice * (1 - effectiveTrailingDistancePercent / 100);
+        if (currentPriceSol > highestPriceSol && profitPercent >= trailingActivationPercent) {
+            const calculatedStop = currentPriceSol * (1 - effectiveTrailingDistancePercent / 100);
 
             // Jarak trailing stop murni dari peak tanpa floor buatan di awal
             let newTrailingStop = calculatedStop;
@@ -856,16 +925,16 @@ export class PriceMonitorService {
                 const marginPercent = this.getNumberConfig('BREAKEVEN_MARGIN_PERCENT', 2);
                 const configFloorPercent = this.getNumberConfig('RUNNER_BREAKEVEN_FLOOR_PERCENT', 8);
                 const floorPercent = Math.max(feeDragPercent + marginPercent, configFloorPercent);
-                const breakEvenPlus = trade.entryPrice * (1 + floorPercent / 100);
+                const breakEvenPlus = entryPriceSol * (1 + floorPercent / 100);
                 newTrailingStop = Math.max(newTrailingStop, breakEvenPlus);
             }
 
             await this.prismaService.trade.update({
                 where: { id: trade.id },
-                data: { highestPrice: currentPrice, trailingStopPrice: newTrailingStop },
+                data: { highestPrice: currentPriceSol, trailingStopPrice: newTrailingStop },
             });
             this.logger.debug(
-                `[Slot ${trade.slotNumber}] 📈 New Peak: $${currentPrice.toFixed(8)}. TSL Locked at: $${newTrailingStop.toFixed(8)}`,
+                `[Slot ${trade.slotNumber}] New Peak SOL: ${currentPriceSol.toFixed(10)}. TSL Locked at: ${newTrailingStop.toFixed(10)} SOL`,
             );
 
             // Anti-Spam Trailing Alert
@@ -874,7 +943,7 @@ export class PriceMonitorService {
             if (profitPercent >= trailingActivationPercent && now - lastAlert > 5 * 60 * 1000) {
                 await this.reportingService.sendTrailingAlert(
                     trade.tokenMint,
-                    newTrailingStop,
+                    newTrailingStop * currentSolUsd,
                     currentPrice,
                     trade.symbol || undefined,
                 );
@@ -882,27 +951,27 @@ export class PriceMonitorService {
             }
         } else if (
             effectiveTrailingDistancePercent < baseTrailingDistancePercent &&
-            trade.trailingStopPrice > 0
+            trailingStopPriceSol > 0
         ) {
-            const referencePrice = Math.max(trade.highestPrice, currentPrice);
+            const referencePrice = Math.max(highestPriceSol, currentPriceSol);
             const tightenedTrailingStop =
                 referencePrice * (1 - effectiveTrailingDistancePercent / 100);
 
-            if (tightenedTrailingStop > trade.trailingStopPrice) {
+            if (tightenedTrailingStop > trailingStopPriceSol) {
                 await this.prismaService.trade.update({
                     where: { id: trade.id },
                     data: { trailingStopPrice: tightenedTrailingStop },
                 });
                 this.logger.warn(
-                    `[AI Brain] Tightening trailing stop realtime for ${trade.tokenMint}. Reference=$${referencePrice.toFixed(8)} NewTSL=$${tightenedTrailingStop.toFixed(8)}.`,
+                    `[AI Brain] Tightening trailing stop realtime for ${trade.tokenMint}. Reference=${referencePrice.toFixed(10)} SOL NewTSL=${tightenedTrailingStop.toFixed(10)} SOL.`,
                 );
                 await this.sendRiskAdjustmentAlertIfNeeded(
                     trade,
-                    referencePrice,
+                    referencePrice * currentSolUsd,
                     normalizedFreshMarketSignals,
                     baseTrailingDistancePercent,
                     effectiveTrailingDistancePercent,
-                    tightenedTrailingStop,
+                    tightenedTrailingStop * currentSolUsd,
                     trade.telegramChat?.chatId,
                 );
             }
@@ -922,8 +991,8 @@ export class PriceMonitorService {
         // Kita butuh volumeSurge dari database (Watchlist) kalau ada, atau kita asumsikan dari momentum
         // Untuk sekarang kita pake multiplier kalau highestPrice naik kenceng
         let dynamicTP = baseTP;
-        const effectiveHighestPrice = Math.max(trade.highestPrice, currentPrice);
-        if (profitPercent >= baseTP && effectiveHighestPrice > trade.entryPrice * 1.35) {
+        const effectiveHighestPrice = Math.max(highestPriceSol, currentPriceSol);
+        if (profitPercent >= baseTP && effectiveHighestPrice > entryPriceSol * 1.35) {
             this.logger.log(
                 `[Slot ${trade.slotNumber}] 🔥 HIGH MOMENTUM DETECTED! Increasing TP target to 50%...`,
             );
@@ -940,7 +1009,7 @@ export class PriceMonitorService {
         }
 
         // Trailing Stop Trigger
-        if (trade.trailingStopPrice > 0 && currentPrice <= trade.trailingStopPrice) {
+        if (trailingStopPriceSol > 0 && currentPriceSol <= trailingStopPriceSol) {
             const reason = 'TRAILING_STOP';
             if (
                 await this.handleEarlyNonCriticalExitGuard(
@@ -968,7 +1037,7 @@ export class PriceMonitorService {
             }
 
             this.logger.log(
-                `[Slot ${trade.slotNumber}] ${reason} at $${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`,
+                `[Slot ${trade.slotNumber}] ${reason} at ${currentPriceSol.toFixed(10)} SOL / $${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`,
             );
             await this.tradeService.executeSell(trade.id, currentPrice, reason);
             return;
@@ -1049,9 +1118,4 @@ export class PriceMonitorService {
         }
     }
 }
-
-
-
-
-
 
