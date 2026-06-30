@@ -21,6 +21,11 @@ import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service
 import { ScannerService } from '../scanner/scanner.service';
 import { TradeService } from '../trade/trade.service';
 
+
+export function isWithdrawChatAllowed(chatId: string, allowedChatIds: string[]): boolean {
+    return allowedChatIds.includes(chatId.trim());
+}
+
 @Injectable()
 export class ReportingService implements OnModuleInit {
     private readonly logger = new Logger(ReportingService.name);
@@ -638,6 +643,10 @@ export class ReportingService implements OnModuleInit {
     }
 
     private async handleWithdrawStart(targetChatId: string) {
+        if (!(await this.ensureWithdrawAllowed(targetChatId))) {
+            return;
+        }
+
         this.pendingWithdrawAddress.set(targetChatId, '');
         await this.sendMessage(
             '💸 *Send Solana to Address*\n\nSend the destination Solana address in the next message.',
@@ -655,6 +664,11 @@ export class ReportingService implements OnModuleInit {
     ): Promise<boolean> {
         if (!this.pendingWithdrawAddress.has(targetChatId)) {
             return false;
+        }
+
+        if (!(await this.ensureWithdrawAllowed(targetChatId))) {
+            this.pendingWithdrawAddress.delete(targetChatId);
+            return true;
         }
 
         const textCommand = (command || text.split(/\s+/)[0].split('@')[0].toLowerCase()).trim();
@@ -692,6 +706,11 @@ export class ReportingService implements OnModuleInit {
     }
 
     private async sendWithdrawMenu(destinationAddress: string, targetChatId: string) {
+        if (!(await this.ensureWithdrawAllowed(targetChatId))) {
+            this.pendingWithdrawAddress.delete(targetChatId);
+            return;
+        }
+
         const tradeService = this.moduleRef.get(TradeService, { strict: false });
         const balance = await tradeService.getWalletBalanceForChat(targetChatId);
         const spendableUsd = Math.max(balance.balanceUsd - 0.75, 0);
@@ -745,6 +764,11 @@ export class ReportingService implements OnModuleInit {
             return;
         }
 
+        if (!(await this.ensureWithdrawAllowed(targetChatId))) {
+            this.pendingWithdrawAddress.delete(targetChatId);
+            return;
+        }
+
         const destinationAddress = this.pendingWithdrawAddress.get(targetChatId);
         if (!destinationAddress) {
             await this.sendMessage(
@@ -772,6 +796,29 @@ export class ReportingService implements OnModuleInit {
         } else {
             await this.sendMessage(`❌ *Failed:* ${result.message}`, {}, 0, targetChatId);
         }
+    }
+
+    private getWithdrawAllowedChatIds(): string[] {
+        return this.telegramWorkspace.getAllowedChatIds();
+    }
+
+    private async ensureWithdrawAllowed(targetChatId: string): Promise<boolean> {
+        const allowedChatIds = this.getWithdrawAllowedChatIds();
+        const allowed = isWithdrawChatAllowed(targetChatId, allowedChatIds);
+        if (allowed) {
+            return true;
+        }
+
+        this.logger.warn(
+            `[WithdrawGuard] Blocked withdraw attempt from chat ${targetChatId}. Configure TELEGRAM_CHAT_IDS to allow it.`,
+        );
+        await this.sendMessage(
+            '[DENIED] *Withdraw denied.* Chat ini tidak diizinkan untuk withdraw.',
+            {},
+            0,
+            targetChatId,
+        );
+        return false;
     }
 
     private async executeManualBuy(mint: string, amount: number, targetChatId?: string) {
