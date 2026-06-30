@@ -14,8 +14,6 @@ RUN yarn install
 # Copy all files
 COPY . .
 
-RUN npx prisma db push
-
 RUN npx prisma generate
 
 # Sinkronkan DB dan nyalakan bot
