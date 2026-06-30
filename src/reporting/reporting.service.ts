@@ -1571,6 +1571,9 @@ export class ReportingService implements OnModuleInit {
                     mode: 'LIVE',
                     updatedAt: { gte: dayAgo },
                 },
+                include: {
+                    telegramChat: { select: { chatId: true } },
+                },
             });
 
             if (trades.length === 0) {
@@ -1579,6 +1582,18 @@ export class ReportingService implements OnModuleInit {
                 );
                 return;
             }
+
+            const tradesByChat = new Map<string | undefined, typeof trades>();
+            for (const trade of trades) {
+                const targetChatId = trade.telegramChat?.chatId;
+                const scopedTrades = tradesByChat.get(targetChatId) || [];
+                scopedTrades.push(trade);
+                tradesByChat.set(targetChatId, scopedTrades);
+            }
+
+            for (const scopedTrades of tradesByChat.values()) {
+                const targetChatId = scopedTrades[0]?.telegramChat?.chatId;
+                const trades = scopedTrades;
 
             const net = (t: {
                 profitUsd?: number | null;
@@ -1608,7 +1623,8 @@ export class ReportingService implements OnModuleInit {
                 `━━━━━━━━━━━━━━━━━━\n` +
                 this.getExitReasonBreakdown(trades);
 
-            await this.sendMessage(message);
+            await this.sendMessage(message, {}, 0, targetChatId);
+            }
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`Failed to send daily P&L summary: ${msg}`);

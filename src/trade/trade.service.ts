@@ -575,28 +575,30 @@ export class TradeService implements OnModuleInit {
         route?: TradeRoute,
         riskPnlStartAt?: Date | null,
         consecutiveLookbackHours = 3,
+        telegramChatDbId?: number,
     ): Promise<BuyRiskMetrics> {
         const dayStart = this.getStartOfDayUtc();
         const effectiveDailyStart =
             riskPnlStartAt && riskPnlStartAt.getTime() > dayStart.getTime()
                 ? riskPnlStartAt
                 : dayStart;
+        const chatWhere = telegramChatDbId ? { telegramChatId: telegramChatDbId } : {};
         const baseWhere = riskPnlStartAt
-            ? { status: 'CLOSED' as const, mode: 'LIVE' as const, updatedAt: { gte: riskPnlStartAt } }
-            : { status: 'CLOSED' as const, mode: 'LIVE' as const };
+            ? { status: 'CLOSED' as const, mode: 'LIVE' as const, updatedAt: { gte: riskPnlStartAt }, ...chatWhere }
+            : { status: 'CLOSED' as const, mode: 'LIVE' as const, ...chatWhere };
         const consecutiveStartAt = resolveRiskLookbackStart(
             riskPnlStartAt,
             consecutiveLookbackHours,
         );
         const consecutiveWhere = consecutiveStartAt
-            ? { status: 'CLOSED' as const, mode: 'LIVE' as const, updatedAt: { gte: consecutiveStartAt } }
-            : { status: 'CLOSED' as const, mode: 'LIVE' as const };
+            ? { status: 'CLOSED' as const, mode: 'LIVE' as const, updatedAt: { gte: consecutiveStartAt }, ...chatWhere }
+            : { status: 'CLOSED' as const, mode: 'LIVE' as const, ...chatWhere };
         const routeWhere = route ? { route } : {};
 
         const feeSelect = { profitUsd: true, totalFeesSol: true, solPriceAtEntry: true } as const;
         const [dailyRows, totalRows, recentClosed] = await Promise.all([
             this.prismaService.trade.findMany({
-                where: { status: 'CLOSED', mode: 'LIVE', updatedAt: { gte: effectiveDailyStart } },
+                where: { status: 'CLOSED', mode: 'LIVE', updatedAt: { gte: effectiveDailyStart }, ...chatWhere },
                 select: feeSelect,
             }),
             this.prismaService.trade.findMany({ where: baseWhere, select: feeSelect }),
@@ -901,6 +903,7 @@ export class TradeService implements OnModuleInit {
                 route,
                 riskPnlStartAt,
                 effectiveConsecutiveLookbackHours,
+                tradeChatDbId,
             );
             if (riskPnlStartAt || effectiveConsecutiveLookbackHours > 0) {
                 const baselineText = riskPnlStartAt
@@ -927,6 +930,7 @@ export class TradeService implements OnModuleInit {
                 const msg =
                     `Risk breaker blocked buy (${decision.reason}). ` +
                     `route=${route ?? 'GLOBAL'}, ` +
+                    `chat=${telegramChatId}, ` +
                     `dailyPnL=$${metrics.dailyRealizedPnlUsd.toFixed(2)}, ` +
                     `consecutiveLosses=${metrics.consecutiveLosses}, ` +
                     `totalPnL=$${metrics.totalRealizedPnlUsd.toFixed(2)}.`;
