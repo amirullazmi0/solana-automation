@@ -17,6 +17,12 @@ import bs58 from 'bs58';
 import * as https from 'https';
 import { DexLimiter } from '../common/dex-limiter';
 import { computeNetProfitUsd } from '../common/fee-utils';
+import {
+    isWithdrawalsEnabled,
+    parseChatIdList,
+    validateWithdrawAccess,
+    WithdrawGuardReason,
+} from '../common/withdraw-guard';
 import { TokenMetadata, TradeExecutionPayload } from '../dto/analyzer.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuyExecutionOptions, BuyRiskConfig, BuyRiskMetrics, TradeAuditFields } from '../dto/trade.dto';
@@ -533,6 +539,27 @@ export class TradeService implements OnModuleInit {
     private getNumberConfig(key: string, fallback: number): number {
         const value = Number.parseFloat(this.configService.get<string>(key, String(fallback)));
         return Number.isFinite(value) ? value : fallback;
+    }
+
+    private isWithdrawEnabled(): boolean {
+        return isWithdrawalsEnabled(this.configService.get<string>('WITHDRAWALS_ENABLED'));
+    }
+
+    private getWithdrawAllowedChatIds(): string[] {
+        return parseChatIdList(this.configService.get<string>('WITHDRAW_ALLOWED_CHAT_IDS') || '');
+    }
+
+    private denyWithdraw(chatId: string, reason: WithdrawGuardReason): { success: false; message: string } {
+        this.logger.warn(`[WithdrawGuard] Blocked withdraw attempt chat=${chatId} reason=${reason}`);
+        const message =
+            reason === 'withdrawals_disabled'
+                ? 'Withdrawals are disabled.'
+                : reason === 'chat_not_allowed'
+                  ? 'This Telegram chat is not allowed to withdraw.'
+                  : reason === 'wallet_not_connected'
+                    ? 'Wallet is not connected for this Telegram chat.'
+                    : 'Wallet ownership validation failed for this Telegram chat.';
+        return { success: false, message };
     }
 
     private calculateDynamicReserveUsd(balanceUsd: number): number {
@@ -2328,6 +2355,17 @@ export class TradeService implements OnModuleInit {
             return { success: false, message: 'Telegram chat not registered. Send /start first.' };
         }
 
+        const allowedChatIds = this.getWithdrawAllowedChatIds();
+        const preflightGuard = validateWithdrawAccess({
+            chatId,
+            withdrawalsEnabled: this.isWithdrawEnabled(),
+            allowedChatIds,
+            walletPublicKey: chatRecord.walletVault?.publicKey,
+        });
+        if (!preflightGuard.allowed) {
+            return this.denyWithdraw(chatId, preflightGuard.reason);
+        }
+
         if (!destinationAddress || !this.isValidSolanaAddress(destinationAddress)) {
             return { success: false, message: 'Invalid destination Solana address.' };
         }
@@ -2337,10 +2375,21 @@ export class TradeService implements OnModuleInit {
         }
 
         const wallet = await this.getWallet(chatId);
+        const signerGuard = validateWithdrawAccess({
+            chatId,
+            withdrawalsEnabled: true,
+            allowedChatIds,
+            walletPublicKey: chatRecord.walletVault?.publicKey,
+            signerPublicKey: wallet.publicKey.toBase58(),
+        });
+        if (!signerGuard.allowed) {
+            return this.denyWithdraw(chatId, signerGuard.reason);
+        }
+
         const recipient = new PublicKey(destinationAddress);
         const balanceLamports = await this.connection.getBalance(wallet.publicKey);
         const balanceSol = balanceLamports / 1_000_000_000;
-        const reserveSol = 0.005;
+        const reserveSol = this.getNumberConfig('WITHDRAWAL_RESERVE_SOL', 0.005);
         const spendableSol = Math.max(balanceSol - reserveSol, 0);
         const solPrice = amountMode === 'usd' ? await this.getSolPrice() : null;
         const transferSol =

@@ -1,4 +1,5 @@
 import {
+    TradeService,
     calculateCleanSwapSolAmount,
     calculateFinalBuySizeUsd,
     calculateRealizedSellPnl,
@@ -293,3 +294,87 @@ describe('TradeService calculation helpers', () => {
     });
 });
 
+describe('TradeService withdraw guard', () => {
+    function createWithdrawGuardService(options: {
+        withdrawalsEnabled?: string;
+        allowedChatIds?: string;
+        walletPublicKey?: string | null;
+        signerPublicKey?: string;
+    }) {
+        const service = Object.create(TradeService.prototype) as any;
+        service.logger = { warn: jest.fn(), error: jest.fn(), log: jest.fn(), debug: jest.fn() };
+        service.configService = {
+            get: jest.fn((key: string) => {
+                if (key === 'WITHDRAWALS_ENABLED') return options.withdrawalsEnabled ?? 'false';
+                if (key === 'WITHDRAW_ALLOWED_CHAT_IDS') return options.allowedChatIds ?? '';
+                if (key === 'WITHDRAWAL_RESERVE_SOL') return '0.005';
+                return undefined;
+            }),
+        };
+        service.telegramWorkspace = {
+            getChatById: jest.fn().mockResolvedValue({
+                id: 1,
+                chatId: '123',
+                walletVault: options.walletPublicKey
+                    ? { publicKey: options.walletPublicKey }
+                    : null,
+            }),
+            getWalletKeypair: jest.fn().mockResolvedValue({
+                publicKey: { toBase58: () => options.signerPublicKey ?? 'signer-wallet' },
+            }),
+        };
+        service.prismaService = { telegramWithdrawal: { create: jest.fn() } };
+        return service;
+    }
+
+    it('blocks before creating a withdrawal when withdrawals are disabled', async () => {
+        const service = createWithdrawGuardService({
+            withdrawalsEnabled: 'false',
+            allowedChatIds: '123',
+            walletPublicKey: 'wallet-a',
+        });
+
+        const result = await service.sendSolanaToAddress('123', '', 'usd', 1);
+
+        expect(result).toEqual({ success: false, message: 'Withdrawals are disabled.' });
+        expect(service.prismaService.telegramWithdrawal.create).not.toHaveBeenCalled();
+    });
+
+    it('blocks before creating a withdrawal when chat has no connected wallet', async () => {
+        const service = createWithdrawGuardService({
+            withdrawalsEnabled: 'true',
+            allowedChatIds: '123',
+            walletPublicKey: null,
+        });
+
+        const result = await service.sendSolanaToAddress('123', '', 'usd', 1);
+
+        expect(result).toEqual({
+            success: false,
+            message: 'Wallet is not connected for this Telegram chat.',
+        });
+        expect(service.prismaService.telegramWithdrawal.create).not.toHaveBeenCalled();
+    });
+
+    it('blocks before creating a withdrawal when signer wallet does not match chat wallet', async () => {
+        const service = createWithdrawGuardService({
+            withdrawalsEnabled: 'true',
+            allowedChatIds: '123',
+            walletPublicKey: 'wallet-a',
+            signerPublicKey: 'wallet-b',
+        });
+
+        const result = await service.sendSolanaToAddress(
+            '123',
+            '11111111111111111111111111111111',
+            'usd',
+            1,
+        );
+
+        expect(result).toEqual({
+            success: false,
+            message: 'Wallet ownership validation failed for this Telegram chat.',
+        });
+        expect(service.prismaService.telegramWithdrawal.create).not.toHaveBeenCalled();
+    });
+});

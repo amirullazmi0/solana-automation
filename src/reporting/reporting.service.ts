@@ -8,6 +8,11 @@ import * as https from 'https';
 import * as TelegramBot from 'node-telegram-bot-api';
 import { DexLimiter } from '../common/dex-limiter';
 import { computeNetProfitUsd } from '../common/fee-utils';
+import {
+    isWithdrawalsEnabled,
+    isWithdrawChatAllowed,
+    parseChatIdList,
+} from '../common/withdraw-guard';
 import { TokenMetadata } from '../dto/analyzer.dto';
 import {
     TradeFailureAlertParams,
@@ -22,9 +27,7 @@ import { ScannerService } from '../scanner/scanner.service';
 import { TradeService } from '../trade/trade.service';
 
 
-export function isWithdrawChatAllowed(chatId: string, allowedChatIds: string[]): boolean {
-    return allowedChatIds.includes(chatId.trim());
-}
+export { isWithdrawChatAllowed } from '../common/withdraw-guard';
 
 @Injectable()
 export class ReportingService implements OnModuleInit {
@@ -799,10 +802,27 @@ export class ReportingService implements OnModuleInit {
     }
 
     private getWithdrawAllowedChatIds(): string[] {
-        return this.telegramWorkspace.getAllowedChatIds();
+        return parseChatIdList(this.configService.get<string>('WITHDRAW_ALLOWED_CHAT_IDS') || '');
+    }
+
+    private isWithdrawEnabled(): boolean {
+        return isWithdrawalsEnabled(this.configService.get<string>('WITHDRAWALS_ENABLED'));
     }
 
     private async ensureWithdrawAllowed(targetChatId: string): Promise<boolean> {
+        if (!this.isWithdrawEnabled()) {
+            this.logger.warn(
+                `[WithdrawGuard] Blocked withdraw attempt from chat ${targetChatId}. reason=withdrawals_disabled.`,
+            );
+            await this.sendMessage(
+                '[DENIED] *Withdraw denied.* Withdrawals are currently disabled.',
+                {},
+                0,
+                targetChatId,
+            );
+            return false;
+        }
+
         const allowedChatIds = this.getWithdrawAllowedChatIds();
         const allowed = isWithdrawChatAllowed(targetChatId, allowedChatIds);
         if (allowed) {
@@ -810,10 +830,10 @@ export class ReportingService implements OnModuleInit {
         }
 
         this.logger.warn(
-            `[WithdrawGuard] Blocked withdraw attempt from chat ${targetChatId}. Configure TELEGRAM_CHAT_IDS to allow it.`,
+            `[WithdrawGuard] Blocked withdraw attempt from chat ${targetChatId}. reason=chat_not_allowed. Configure WITHDRAW_ALLOWED_CHAT_IDS to allow it.`,
         );
         await this.sendMessage(
-            '[DENIED] *Withdraw denied.* Chat ini tidak diizinkan untuk withdraw.',
+            '[DENIED] *Withdraw denied.* This Telegram chat is not allowed to withdraw.',
             {},
             0,
             targetChatId,
