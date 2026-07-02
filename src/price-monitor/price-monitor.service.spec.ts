@@ -103,28 +103,29 @@ describe('PriceMonitorService conservative exit guard', () => {
         expect(service.shouldRunEarlyExitHealthCheck('STOP_LOSS')).toBe(false);
         expect(service.shouldRunEarlyExitHealthCheck('TRAILING_STOP')).toBe(true);
     });
-    it('estimates net profit after buy and sell fee drag (incl. DEX/slippage)', () => {
+    it('estimates net profit after buy and sell fee drag above the Jito threshold', () => {
         const service = createService({
             USE_JITO: true,
             JITO_TIP_SOL: 0.001,
+            JITO_MIN_POSITION_USD: 7,
             DEX_FEE_ROUNDTRIP_PERCENT: 1.0,
         });
 
         const netProfit = service.estimateNetProfitPercent(
-            { entryValueUsd: 3, solPriceAtEntry: 75, totalFeesSol: 0.001 },
+            { entryValueUsd: 8, solPriceAtEntry: 75, totalFeesSol: 0.001 },
             8,
         );
 
-        // gross 8% - tip/network drag ((0.001 + 0.001 + 0.00001) * 75 / 3 * 100 = 5.025)
-        //          - DEX/slippage allowance (1.0) = 1.975
-        expect(netProfit).toBeCloseTo(1.975, 2);
+        // gross 8% - tip/network drag ((0.001 + 0.001 + 0.00001) * 75 / 8 * 100 = 1.884375)
+        //          - DEX/slippage allowance (1.0) = 5.115625
+        expect(netProfit).toBeCloseTo(5.115625, 2);
     });
 
     it('excludes the sell Jito tip from fee drag for sub-threshold (<$3) positions', () => {
         const service = createService({
             USE_JITO: true,
             JITO_TIP_SOL: 0.001,
-            JITO_MIN_POSITION_USD: 3,
+            JITO_MIN_POSITION_USD: 7,
             DEX_FEE_ROUNDTRIP_PERCENT: 1.0,
         });
 

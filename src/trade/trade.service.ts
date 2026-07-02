@@ -122,6 +122,106 @@ export function resolveSafeSellSolPrice(
     return { solPrice: 0, source: 'unavailable' };
 }
 
+export type TradeScaleInMergeInput = {
+    existingAmountInSol: number;
+    existingEntryPriceSol: number;
+    existingEntryValueUsd?: number | null;
+    existingSolPriceAtEntry?: number | null;
+    existingHighestPriceSol?: number | null;
+    existingTotalFeesSol?: number | null;
+    fillAmountInSol: number;
+    fillEntryPriceSol: number;
+    fillEntryValueUsd: number;
+    fillSolPriceUsd: number;
+    fillActualTokenAmount?: number | null;
+    fillTotalFeesSol?: number | null;
+};
+
+export type TradeScaleInMergeResult = {
+    mergedAmountInSol: number;
+    mergedEntryPriceSol: number;
+    mergedEntryValueUsd: number;
+    mergedSolPriceAtEntry: number;
+    mergedHighestPriceSol: number;
+    mergedTotalFeesSol: number;
+    existingTokenAmount: number;
+    fillTokenAmount: number;
+    totalTokenAmount: number;
+};
+
+export function mergeTradeScaleInPosition(
+    input: TradeScaleInMergeInput,
+): TradeScaleInMergeResult {
+    const existingAmountInSol = Math.max(0, input.existingAmountInSol || 0);
+    const fillAmountInSol = Math.max(0, input.fillAmountInSol || 0);
+    const existingEntryPriceSol = Math.max(0, input.existingEntryPriceSol || 0);
+    const fillEntryPriceSol = Math.max(0, input.fillEntryPriceSol || 0);
+    const existingEntryValueUsd =
+        Number.isFinite(input.existingEntryValueUsd ?? Number.NaN) && (input.existingEntryValueUsd ?? 0) > 0
+            ? Number(input.existingEntryValueUsd)
+            : existingAmountInSol * Math.max(0, input.existingSolPriceAtEntry ?? input.fillSolPriceUsd ?? 0);
+    const fillEntryValueUsd = Math.max(0, input.fillEntryValueUsd || 0);
+    const existingTokenAmount =
+        existingEntryPriceSol > 0 ? existingAmountInSol / existingEntryPriceSol : 0;
+    const fillTokenAmount =
+        Number.isFinite(input.fillActualTokenAmount ?? Number.NaN) &&
+        (input.fillActualTokenAmount ?? 0) > 0
+            ? Number(input.fillActualTokenAmount)
+            : fillEntryPriceSol > 0
+              ? fillAmountInSol / fillEntryPriceSol
+              : 0;
+    const totalTokenAmount = existingTokenAmount + fillTokenAmount;
+    const mergedAmountInSol = existingAmountInSol + fillAmountInSol;
+    const mergedEntryValueUsd = existingEntryValueUsd + fillEntryValueUsd;
+    const mergedEntryPriceSol =
+        totalTokenAmount > 0 ? mergedAmountInSol / totalTokenAmount : fillEntryPriceSol || existingEntryPriceSol;
+    const mergedSolPriceAtEntry =
+        mergedAmountInSol > 0
+            ? mergedEntryValueUsd / mergedAmountInSol
+            : Math.max(0, input.fillSolPriceUsd || 0);
+    const mergedHighestPriceSol = Math.max(
+        existingAmountInSol > 0 ? Math.max(0, input.existingHighestPriceSol ?? existingEntryPriceSol) : 0,
+        fillEntryPriceSol,
+        mergedEntryPriceSol,
+    );
+    const mergedTotalFeesSol =
+        Math.max(0, input.existingTotalFeesSol ?? 0) + Math.max(0, input.fillTotalFeesSol ?? 0);
+
+    return {
+        mergedAmountInSol,
+        mergedEntryPriceSol,
+        mergedEntryValueUsd,
+        mergedSolPriceAtEntry,
+        mergedHighestPriceSol,
+        mergedTotalFeesSol,
+        existingTokenAmount,
+        fillTokenAmount,
+        totalTokenAmount,
+    };
+}
+
+
+export type JitoSwapDecisionInput = {
+    useJitoConfigured: boolean;
+    retryCount: number;
+    swapNotionalUsd: number;
+    jitoMinPositionUsd: number;
+};
+
+export function resolveJitoMinPositionUsd(rawValue?: string | null, fallback = 7): number {
+    const parsed = Number.parseFloat(rawValue ?? '');
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function shouldUseJitoForSwap(input: JitoSwapDecisionInput): boolean {
+    if (!input.useJitoConfigured) return false;
+    if (input.retryCount !== 0) return false;
+    const minPositionUsd = Number.isFinite(input.jitoMinPositionUsd) && input.jitoMinPositionUsd > 0
+        ? input.jitoMinPositionUsd
+        : 7;
+    return input.swapNotionalUsd >= minPositionUsd;
+}
+
 export function calculateRealizedSellPnl(params: {
     solSpent: number;
     solReceived: number;
@@ -803,7 +903,40 @@ export class TradeService implements OnModuleInit {
             }
         };
 
-        // 1. Cek apakah sudah punya koin ini (OPEN) atau sedang dalam cooldown
+        const openTrades = await this.prismaService.trade.findMany({
+            where: {
+                status: 'OPEN',
+                mode: 'LIVE',
+                ...(tradeChatDbId ? { telegramChatId: tradeChatDbId } : {}),
+            },
+            select: {
+                id: true,
+                tokenMint: true,
+                slotNumber: true,
+                entryPrice: true,
+                amountInSol: true,
+                entryValueUsd: true,
+                solPriceAtEntry: true,
+                highestPrice: true,
+                trailingStopPrice: true,
+                totalFeesSol: true,
+                symbol: true,
+                buyTxHash: true,
+                route: true,
+                aiDecisionSnapshotId: true,
+                entryLiquidity: true,
+                entryMarketCap: true,
+                creatorAddress: true,
+                topHolderAddress: true,
+                initialCreatorBalance: true,
+                initialTopHolderBalance: true,
+                targetTakeProfit: true,
+                targetStopLoss: true,
+                targetTrailingDistance: true,
+                telegramChatId: true,
+            },
+        });
+        const existingOpenTrade = openTrades.find((trade) => trade.tokenMint === tokenMint) ?? null;
         const recentTrade = await this.prismaService.trade.findFirst({
             where: {
                 tokenMint,
@@ -813,7 +946,7 @@ export class TradeService implements OnModuleInit {
             orderBy: { createdAt: 'desc' },
         });
 
-        if (recentTrade && !customAmountUSD) {
+        if (recentTrade && !customAmountUSD && !existingOpenTrade) {
             // Jika manual buy (ada customAmount), abaikan cooldown
             if (recentTrade.status === 'OPEN') {
                 this.logger.warn(`[BuyTrace] Blocked by already-open trade token=${tokenMint} chat=${telegramChatId}`);
@@ -847,14 +980,8 @@ export class TradeService implements OnModuleInit {
             }
         }
 
-        const openTradesCount = await this.prismaService.trade.count({
-            where: {
-                status: 'OPEN',
-                mode: 'LIVE',
-                ...(tradeChatDbId ? { telegramChatId: tradeChatDbId } : {}),
-            },
-        });
-        if (openTradesCount >= effectiveTotalSlots) {
+        const openTradesCount = openTrades.length;
+        if (openTradesCount >= effectiveTotalSlots && !existingOpenTrade) {
             this.logger.warn(
                 `[BuyTrace] Blocked by slot limit token=${tokenMint} chat=${telegramChatId} openTrades=${openTradesCount} slots=${effectiveTotalSlots}`,
             );
@@ -865,21 +992,14 @@ export class TradeService implements OnModuleInit {
             return { success: false, message: 'All trading slots are full.' };
         }
 
-        const openTrades = await this.prismaService.trade.findMany({
-            where: {
-                status: 'OPEN',
-                mode: 'LIVE',
-                ...(tradeChatDbId ? { telegramChatId: tradeChatDbId } : {}),
-            },
-            select: { slotNumber: true, entryValueUsd: true },
-        });
-
         const usedSlots = new Set(openTrades.map((t) => t.slotNumber));
-        let slotToUse = 1;
-        for (let i = 1; i <= effectiveTotalSlots; i++) {
-            if (!usedSlots.has(i)) {
-                slotToUse = i;
-                break;
+        let slotToUse = existingOpenTrade?.slotNumber ?? 1;
+        if (!existingOpenTrade) {
+            for (let i = 1; i <= effectiveTotalSlots; i++) {
+                if (!usedSlots.has(i)) {
+                    slotToUse = i;
+                    break;
+                }
             }
         }
 
@@ -1113,40 +1233,112 @@ export class TradeService implements OnModuleInit {
                 initialTopHolderBalance = typeof bal === 'number' ? bal : 0;
             }
 
-            const createdTrade = await this.prismaService.trade.create({
-                data: {
-                    tokenMint,
-                    symbol,
-                    slotNumber: slotToUse,
-                    entryPrice: entryPriceSol,
-                    highestPrice: entryPriceSol,
-                    trailingStopPrice: 0, // PriceMonitor activates it once the position is in profit.
-                    status: 'OPEN',
-                    mode: 'LIVE',
-                    route,
-                    aiDecisionSnapshotId,
-                    amountInSol: finalAmountInSol,
-                    buyTxHash: txHash || null,
-                    entryLiquidity: metadata?.liquidity || 0,
-                    entryMarketCap: metadata?.marketCap || 0,
-                    creatorAddress: metadata?.creator,
-                    topHolderAddress: metadata?.topHolder,
-                    initialCreatorBalance,
-                    initialTopHolderBalance,
-                    targetTakeProfit: options?.targetTakeProfit,
-                    targetStopLoss: options?.targetStopLoss,
-                    targetTrailingDistance: options?.targetTrailingDistance,
-                    telegramChatId: tradeChatDbId || null,
-                },
-            });
-            await this.updateTradeAuditFields(createdTrade.id, {
-                solPriceAtEntry: solPrice,
-                entryValueUsd,
-                totalFeesSol: totalFeesSol || 0,
-            });
-            this.logger.log(`[Slot ${slotToUse}] Successfully bought ${symbol} (${tokenMint})`);
+            const mergedScaleIn = existingOpenTrade
+                ? mergeTradeScaleInPosition({
+                      existingAmountInSol: existingOpenTrade.amountInSol,
+                      existingEntryPriceSol: existingOpenTrade.entryPrice,
+                      existingEntryValueUsd: existingOpenTrade.entryValueUsd,
+                      existingSolPriceAtEntry: existingOpenTrade.solPriceAtEntry,
+                      existingHighestPriceSol: existingOpenTrade.highestPrice,
+                      existingTotalFeesSol: existingOpenTrade.totalFeesSol,
+                      fillAmountInSol: finalAmountInSol,
+                      fillEntryPriceSol: entryPriceSol,
+                      fillEntryValueUsd: entryValueUsd,
+                      fillSolPriceUsd: solPrice,
+                      fillActualTokenAmount: actualTokens ?? null,
+                      fillTotalFeesSol: totalFeesSol || 0,
+                  })
+                : null;
+
+            const savedTrade = existingOpenTrade
+                ? await this.prismaService.trade.update({
+                      where: { id: existingOpenTrade.id },
+                      data: {
+                          tokenMint,
+                          symbol: existingOpenTrade.symbol || symbol,
+                          slotNumber: existingOpenTrade.slotNumber,
+                          entryPrice: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
+                          highestPrice: mergedScaleIn?.mergedHighestPriceSol ?? entryPriceSol,
+                          trailingStopPrice: existingOpenTrade.trailingStopPrice,
+                          status: 'OPEN',
+                          mode: 'LIVE',
+                          route: existingOpenTrade.route ?? route ?? null,
+                          aiDecisionSnapshotId:
+                              existingOpenTrade.aiDecisionSnapshotId ?? aiDecisionSnapshotId ?? null,
+                          amountInSol: mergedScaleIn?.mergedAmountInSol ?? finalAmountInSol,
+                          buyTxHash: txHash || existingOpenTrade.buyTxHash,
+                          entryLiquidity:
+                              (existingOpenTrade.entryLiquidity ?? metadata?.liquidity) ?? 0,
+                          entryMarketCap:
+                              (existingOpenTrade.entryMarketCap ?? metadata?.marketCap) ?? 0,
+                          creatorAddress: existingOpenTrade.creatorAddress ?? metadata?.creator ?? null,
+                          topHolderAddress:
+                              existingOpenTrade.topHolderAddress ?? metadata?.topHolder ?? null,
+                          initialCreatorBalance:
+                              existingOpenTrade.initialCreatorBalance ?? initialCreatorBalance,
+                          initialTopHolderBalance:
+                              existingOpenTrade.initialTopHolderBalance ?? initialTopHolderBalance,
+                          targetTakeProfit:
+                              existingOpenTrade.targetTakeProfit ?? options?.targetTakeProfit,
+                          targetStopLoss:
+                              existingOpenTrade.targetStopLoss ?? options?.targetStopLoss,
+                          targetTrailingDistance:
+                              existingOpenTrade.targetTrailingDistance ?? options?.targetTrailingDistance,
+                          telegramChatId: tradeChatDbId || null,
+                      },
+                  })
+                : await this.prismaService.trade.create({
+                      data: {
+                          tokenMint,
+                          symbol,
+                          slotNumber: slotToUse,
+                          entryPrice: entryPriceSol,
+                          highestPrice: entryPriceSol,
+                          trailingStopPrice: 0, // PriceMonitor activates it once the position is in profit.
+                          status: 'OPEN',
+                          mode: 'LIVE',
+                          route,
+                          aiDecisionSnapshotId,
+                          amountInSol: finalAmountInSol,
+                          buyTxHash: txHash || null,
+                          entryLiquidity: metadata?.liquidity || 0,
+                          entryMarketCap: metadata?.marketCap || 0,
+                          creatorAddress: metadata?.creator,
+                          topHolderAddress: metadata?.topHolder,
+                          initialCreatorBalance,
+                          initialTopHolderBalance,
+                          targetTakeProfit: options?.targetTakeProfit,
+                          targetStopLoss: options?.targetStopLoss,
+                          targetTrailingDistance: options?.targetTrailingDistance,
+                          telegramChatId: tradeChatDbId || null,
+                      },
+                  });
+
+            if (!existingOpenTrade) {
+                await this.updateTradeAuditFields(savedTrade.id, {
+                    solPriceAtEntry: solPrice,
+                    entryValueUsd,
+                    totalFeesSol: totalFeesSol || 0,
+                });
+            } else {
+                await this.prismaService.trade.update({
+                    where: { id: savedTrade.id },
+                    data: {
+                        solPriceAtEntry: mergedScaleIn?.mergedSolPriceAtEntry ?? solPrice,
+                        entryValueUsd: mergedScaleIn?.mergedEntryValueUsd ?? entryValueUsd,
+                        totalFeesSol: mergedScaleIn?.mergedTotalFeesSol ?? (totalFeesSol || 0),
+                    },
+                });
+            }
+
+            if (existingOpenTrade) {
+                this.logger.log(
+                    `[Slot ${savedTrade.slotNumber}] Scale-in merged for ${symbol} (${tokenMint}) existingTradeId=${existingOpenTrade.id} newTradeId=${savedTrade.id} totalSol=${(mergedScaleIn?.mergedAmountInSol ?? finalAmountInSol).toFixed(6)} totalTokens=${(mergedScaleIn?.totalTokenAmount ?? 0).toFixed(6)} avgEntry=${(mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol).toFixed(10)}`,
+                );
+            }
+            this.logger.log(`[Slot ${savedTrade.slotNumber}] Successfully bought ${symbol} (${tokenMint})`);
             this.logger.log(
-                `[BuyTrace] Success token=${tokenMint} chat=${telegramChatId} slot=${slotToUse} tx=${txHash || 'n/a'}`,
+                `[BuyTrace] Success token=${tokenMint} chat=${telegramChatId} slot=${savedTrade.slotNumber} tx=${txHash || 'n/a'}`,
             );
             const strategyName = options?.targetTakeProfit
                 ? 'Established Rebound & CTO (TP 18%, TSL 2.5%, Hard SL 20%)'
@@ -1154,7 +1346,7 @@ export class TradeService implements OnModuleInit {
             await this.reportingService.sendBuyAlert(
                 tokenMint,
                 entryPrice,
-                slotToUse,
+                savedTrade.slotNumber,
                 symbol,
                 metadata?.socials,
                 strategyName,
@@ -1165,6 +1357,7 @@ export class TradeService implements OnModuleInit {
                 },
                 effectiveDryRun,
                 targetChatId,
+                existingOpenTrade ? 'SCALE-IN BUY' : 'BUY EXECUTION',
             );
 
             if (!isManualBuy) {
@@ -1182,7 +1375,7 @@ export class TradeService implements OnModuleInit {
             }
 
             // PriceMonitorService otomatis akan mendeteksi trade baru dari DB
-            return { success: true, message: `Successfully bought ${symbol} at slot ${slotToUse}` };
+            return { success: true, message: `Successfully bought ${symbol} at slot ${savedTrade.slotNumber}` };
         }
 
         this.logger.warn(`[BuyTrace] Swap failed token=${tokenMint} chat=${telegramChatId}: ${error || 'Unknown error'}`);

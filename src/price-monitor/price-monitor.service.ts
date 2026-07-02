@@ -559,7 +559,7 @@ export class PriceMonitorService {
         // would inflate fee drag and over-hold small winners.
         const sellUsesJito =
             this.getBooleanConfig('USE_JITO', false) &&
-            entryValueUsd >= this.getNumberConfig('JITO_MIN_POSITION_USD', 3);
+            entryValueUsd >= this.getNumberConfig('JITO_MIN_POSITION_USD', 7);
         const sellTipSol = sellUsesJito ? Math.max(0, this.getNumberConfig('JITO_TIP_SOL', 0)) : 0;
         const estimatedSellNetworkFeeSol = Math.max(
             0,

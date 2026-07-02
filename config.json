@@ -71,7 +71,7 @@
     "WHALE_MAX_PRICE_IMPACT_PCT":  1.25,
     "USE_JITO":  true,
     "JITO_TIP_SOL":  0.0005,
-    "JITO_MIN_POSITION_USD":  4,
+    "JITO_MIN_POSITION_USD":  7,
     "JITO_BLOCK_ENGINE_URL":  "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
     "TRADE_DUST_THRESHOLD":  0.000001,
     "TRADE_FEE_CUSHION_SOL":  0.005,

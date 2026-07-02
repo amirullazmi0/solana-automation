@@ -6,8 +6,11 @@ import {
     capSlippageBps,
     evaluateBuyRisk,
     normalizePriceImpactPct,
+    resolveJitoMinPositionUsd,
+    mergeTradeScaleInPosition,
     resolveSafeSellSolPrice,
     resolveRiskLookbackStart,
+    shouldUseJitoForSwap,
     PriceAnomalyError,
     validateSellPrice,
 } from './trade.service';
@@ -183,6 +186,68 @@ describe('TradeService calculation helpers', () => {
             expect(safePrice.source).toBe('entry_fallback');
             expect(pnl.usdReceived).toBeCloseTo(0.03 * 75.56, 6);
             expect(pnl.usdProfitPercent).toBeLessThan(0);
+        });
+    });
+    describe('mergeTradeScaleInPosition', () => {
+        it('merges scale-in buys into a weighted average cost basis', () => {
+            const merged = mergeTradeScaleInPosition({
+                existingAmountInSol: 0.02,
+                existingEntryPriceSol: 0.0004,
+                existingEntryValueUsd: 1.5,
+                existingSolPriceAtEntry: 75,
+                existingHighestPriceSol: 0.0005,
+                existingTotalFeesSol: 0.001,
+                fillAmountInSol: 0.03,
+                fillEntryPriceSol: 0.0006,
+                fillEntryValueUsd: 2.25,
+                fillSolPriceUsd: 75,
+                fillActualTokenAmount: 50,
+                fillTotalFeesSol: 0.002,
+            });
+
+            expect(merged.mergedAmountInSol).toBeCloseTo(0.05, 10);
+            expect(merged.mergedEntryValueUsd).toBeCloseTo(3.75, 10);
+            expect(merged.mergedSolPriceAtEntry).toBeCloseTo(75, 10);
+            expect(merged.mergedTotalFeesSol).toBeCloseTo(0.003, 10);
+            expect(merged.totalTokenAmount).toBeCloseTo(100, 10);
+            expect(merged.mergedEntryPriceSol).toBeCloseTo(0.0005, 10);
+            expect(merged.mergedHighestPriceSol).toBeCloseTo(0.0006, 10);
+        });
+    });
+
+    describe('Jito size gate', () => {
+        it('skips Jito below the configured minimum notional', () => {
+            expect(
+                shouldUseJitoForSwap({
+                    useJitoConfigured: true,
+                    retryCount: 0,
+                    swapNotionalUsd: 6.99,
+                    jitoMinPositionUsd: 7,
+                }),
+            ).toBe(false);
+        });
+
+        it('allows Jito at or above the configured minimum notional on first attempt only', () => {
+            expect(
+                shouldUseJitoForSwap({
+                    useJitoConfigured: true,
+                    retryCount: 0,
+                    swapNotionalUsd: 7,
+                    jitoMinPositionUsd: 7,
+                }),
+            ).toBe(true);
+            expect(
+                shouldUseJitoForSwap({
+                    useJitoConfigured: true,
+                    retryCount: 1,
+                    swapNotionalUsd: 10,
+                    jitoMinPositionUsd: 7,
+                }),
+            ).toBe(false);
+        });
+
+        it('falls back to the safe $7 threshold when config is invalid', () => {
+            expect(resolveJitoMinPositionUsd('bad')).toBe(7);
         });
     });
     describe('calculateFinalBuySizeUsd', () => {

@@ -26,7 +26,6 @@ import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service
 import { ScannerService } from '../scanner/scanner.service';
 import { TradeService } from '../trade/trade.service';
 
-
 export { isWithdrawChatAllowed } from '../common/withdraw-guard';
 
 @Injectable()
@@ -1007,6 +1006,7 @@ export class ReportingService implements OnModuleInit {
         },
         isDryRun = true,
         targetChatId?: string,
+        executionLabel: string = 'BUY EXECUTION',
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
         const prefix = isDryRun ? '🤖 [SIMULASI] ' : '🚀 ';
@@ -1029,7 +1029,7 @@ export class ReportingService implements OnModuleInit {
             solDetails +
             `🧱 *Slot:* #${slotUsed}\n` +
             `━━━━━━━ 📊 ━━━━━━━\n` +
-            `📈 *Action:* BUY EXECUTION${strategyDisplay}`;
+            `📈 *Action:* ${executionLabel}${strategyDisplay}`;
 
         const row1: TelegramBot.InlineKeyboardButton[] = [];
         if (socials?.twitter) row1.push({ text: '🐦 Twitter', url: socials.twitter });
@@ -1662,35 +1662,41 @@ export class ReportingService implements OnModuleInit {
                 const targetChatId = scopedTrades[0]?.telegramChat?.chatId;
                 const trades = scopedTrades;
 
-            const net = (t: {
-                profitUsd?: number | null;
-                totalFeesSol?: number | null;
-                solPriceAtEntry?: number | null;
-            }) => computeNetProfitUsd(t);
-            const totalPnl = trades.reduce((sum, t) => sum + net(t), 0);
-            const wins = trades.filter((t) => net(t) > 0).length;
-            const losses = trades.filter((t) => net(t) <= 0).length;
-            const winRate = trades.length > 0 ? ((wins / trades.length) * 100).toFixed(1) : '0';
-            const avgPnl = trades.length > 0 ? totalPnl / trades.length : 0;
+                const net = (t: {
+                    profitUsd?: number | null;
+                    totalFeesSol?: number | null;
+                    solPriceAtEntry?: number | null;
+                }) => computeNetProfitUsd(t);
+                const totalPnl = trades.reduce((sum, t) => sum + net(t), 0);
+                const wins = trades.filter((t) => net(t) > 0).length;
+                const losses = trades.filter((t) => net(t) <= 0).length;
+                const winRate = trades.length > 0 ? ((wins / trades.length) * 100).toFixed(1) : '0';
+                const avgPnl = trades.length > 0 ? totalPnl / trades.length : 0;
 
-            const bestTrade = trades.reduce((best, t) => (net(t) > net(best) ? t : best), trades[0]);
-            const worstTrade = trades.reduce((worst, t) => (net(t) < net(worst) ? t : worst), trades[0]);
+                const bestTrade = trades.reduce(
+                    (best, t) => (net(t) > net(best) ? t : best),
+                    trades[0],
+                );
+                const worstTrade = trades.reduce(
+                    (worst, t) => (net(t) < net(worst) ? t : worst),
+                    trades[0],
+                );
 
-            const pnlEmoji = totalPnl >= 0 ? '💰' : '🔻';
-            const message =
-                `📊 *DAILY P&L SUMMARY* 📊\n` +
-                `━━━━━━━━━━━━━━━━━━\n` +
-                `${pnlEmoji} *Total P&L:* \`${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}\`\n` +
-                `📈 *Trades:* \`${trades.length}\` (✅ ${wins} wins | ❌ ${losses} losses)\n` +
-                `🎯 *Win Rate:* \`${winRate}%\`\n` +
-                `📉 *Avg P&L:* \`${avgPnl >= 0 ? '+' : ''}$${avgPnl.toFixed(2)}\`\n` +
-                `━━━━━━━━━━━━━━━━━━\n` +
-                `🏆 *Best:* ${bestTrade.symbol || 'N/A'} (\`+$${net(bestTrade).toFixed(2)}\`)\n` +
-                `💀 *Worst:* ${worstTrade.symbol || 'N/A'} (\`$${net(worstTrade).toFixed(2)}\`)\n` +
-                `━━━━━━━━━━━━━━━━━━\n` +
-                this.getExitReasonBreakdown(trades);
+                const pnlEmoji = totalPnl >= 0 ? '💰' : '🔻';
+                const message =
+                    `📊 *DAILY P&L SUMMARY* 📊\n` +
+                    `━━━━━━━━━━━━━━━━━━\n` +
+                    `${pnlEmoji} *Total P&L:* \`${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}\`\n` +
+                    `📈 *Trades:* \`${trades.length}\` (✅ ${wins} wins | ❌ ${losses} losses)\n` +
+                    `🎯 *Win Rate:* \`${winRate}%\`\n` +
+                    `📉 *Avg P&L:* \`${avgPnl >= 0 ? '+' : ''}$${avgPnl.toFixed(2)}\`\n` +
+                    `━━━━━━━━━━━━━━━━━━\n` +
+                    `🏆 *Best:* ${bestTrade.symbol || 'N/A'} (\`+$${net(bestTrade).toFixed(2)}\`)\n` +
+                    `💀 *Worst:* ${worstTrade.symbol || 'N/A'} (\`$${net(worstTrade).toFixed(2)}\`)\n` +
+                    `━━━━━━━━━━━━━━━━━━\n` +
+                    this.getExitReasonBreakdown(trades);
 
-            await this.sendMessage(message, {}, 0, targetChatId);
+                await this.sendMessage(message, {}, 0, targetChatId);
             }
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
