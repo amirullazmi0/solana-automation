@@ -8,6 +8,7 @@ import {
     normalizePriceImpactPct,
     resolveJitoMinPositionUsd,
     mergeTradeScaleInPosition,
+    resolveScaleInTrailingStopPrice,
     resolveSafeSellSolPrice,
     resolveRiskLookbackStart,
     shouldUseJitoForSwap,
@@ -212,6 +213,35 @@ describe('TradeService calculation helpers', () => {
             expect(merged.totalTokenAmount).toBeCloseTo(100, 10);
             expect(merged.mergedEntryPriceSol).toBeCloseTo(0.0005, 10);
             expect(merged.mergedHighestPriceSol).toBeCloseTo(0.0006, 10);
+        });
+        it('resets stale trailing stop when scale-in makes the merged position not profitable', () => {
+            expect(
+                resolveScaleInTrailingStopPrice({
+                    existingTrailingStopPrice: 0.00045,
+                    mergedEntryPriceSol: 0.0005,
+                    fillEntryPriceSol: 0.00049,
+                }),
+            ).toBe(0);
+        });
+
+        it('moves stale trailing stop to breakeven when scale-in remains above blended entry', () => {
+            expect(
+                resolveScaleInTrailingStopPrice({
+                    existingTrailingStopPrice: 0.00045,
+                    mergedEntryPriceSol: 0.0005,
+                    fillEntryPriceSol: 0.0006,
+                }),
+            ).toBeCloseTo(0.0005, 10);
+        });
+
+        it('caps a too-tight scale-in trailing stop below the latest fill price', () => {
+            expect(
+                resolveScaleInTrailingStopPrice({
+                    existingTrailingStopPrice: 0.00062,
+                    mergedEntryPriceSol: 0.0005,
+                    fillEntryPriceSol: 0.0006,
+                }),
+            ).toBeCloseTo(0.0005994, 10);
         });
     });
 

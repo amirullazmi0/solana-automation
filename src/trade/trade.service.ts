@@ -149,6 +149,12 @@ export type TradeScaleInMergeResult = {
     totalTokenAmount: number;
 };
 
+export type ScaleInTrailingStopInput = {
+    existingTrailingStopPrice: number;
+    mergedEntryPriceSol: number;
+    fillEntryPriceSol: number;
+};
+
 export function mergeTradeScaleInPosition(
     input: TradeScaleInMergeInput,
 ): TradeScaleInMergeResult {
@@ -200,6 +206,36 @@ export function mergeTradeScaleInPosition(
     };
 }
 
+export function resolveScaleInTrailingStopPrice(input: ScaleInTrailingStopInput): number {
+    const existingStop = Math.max(0, input.existingTrailingStopPrice || 0);
+    if (existingStop <= 0) return 0;
+
+    const mergedEntryPriceSol = Math.max(0, input.mergedEntryPriceSol || 0);
+    const fillEntryPriceSol = Math.max(0, input.fillEntryPriceSol || 0);
+    if (mergedEntryPriceSol <= 0 || fillEntryPriceSol <= 0) return existingStop;
+
+    // A scale-in changes the position cost basis. Do not keep a stale trailing stop
+    // below the new blended entry because it can turn a previously protected winner
+    // into an immediate net-loss exit. If the latest fill is already above the new
+    // blended entry, move the stop to breakeven while keeping it below the live fill
+    // price to avoid instant liquidation on the next monitor tick. Otherwise reset
+    // trailing activation so PriceMonitor can re-arm once the merged position is
+    // profitable again.
+    if (existingStop < mergedEntryPriceSol) {
+        return fillEntryPriceSol > mergedEntryPriceSol
+            ? Math.min(mergedEntryPriceSol, fillEntryPriceSol * 0.999)
+            : 0;
+    }
+
+    // If the prior stop is at/above the latest fill price, cap it just below the
+    // current execution price. This avoids an immediate sell caused by a stale stop
+    // after increasing position size.
+    if (existingStop >= fillEntryPriceSol) {
+        return fillEntryPriceSol * 0.999;
+    }
+
+    return existingStop;
+}
 
 export type JitoSwapDecisionInput = {
     useJitoConfigured: boolean;
@@ -1250,6 +1286,14 @@ export class TradeService implements OnModuleInit {
                   })
                 : null;
 
+            const scaleInTrailingStopPrice = mergedScaleIn
+                ? resolveScaleInTrailingStopPrice({
+                      existingTrailingStopPrice: existingOpenTrade?.trailingStopPrice ?? 0,
+                      mergedEntryPriceSol: mergedScaleIn.mergedEntryPriceSol,
+                      fillEntryPriceSol: entryPriceSol,
+                  })
+                : 0;
+
             const savedTrade = existingOpenTrade
                 ? await this.prismaService.trade.update({
                       where: { id: existingOpenTrade.id },
@@ -1259,14 +1303,14 @@ export class TradeService implements OnModuleInit {
                           slotNumber: existingOpenTrade.slotNumber,
                           entryPrice: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
                           highestPrice: mergedScaleIn?.mergedHighestPriceSol ?? entryPriceSol,
-                          trailingStopPrice: existingOpenTrade.trailingStopPrice,
+                          trailingStopPrice: scaleInTrailingStopPrice,
                           status: 'OPEN',
                           mode: 'LIVE',
                           route: existingOpenTrade.route ?? route ?? null,
                           aiDecisionSnapshotId:
                               existingOpenTrade.aiDecisionSnapshotId ?? aiDecisionSnapshotId ?? null,
                           amountInSol: mergedScaleIn?.mergedAmountInSol ?? finalAmountInSol,
-                          buyTxHash: txHash || existingOpenTrade.buyTxHash,
+                          buyTxHash: existingOpenTrade.buyTxHash || txHash || null,
                           entryLiquidity:
                               (existingOpenTrade.entryLiquidity ?? metadata?.liquidity) ?? 0,
                           entryMarketCap:
@@ -1333,7 +1377,7 @@ export class TradeService implements OnModuleInit {
 
             if (existingOpenTrade) {
                 this.logger.log(
-                    `[Slot ${savedTrade.slotNumber}] Scale-in merged for ${symbol} (${tokenMint}) existingTradeId=${existingOpenTrade.id} newTradeId=${savedTrade.id} totalSol=${(mergedScaleIn?.mergedAmountInSol ?? finalAmountInSol).toFixed(6)} totalTokens=${(mergedScaleIn?.totalTokenAmount ?? 0).toFixed(6)} avgEntry=${(mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol).toFixed(10)}`,
+                    `[Slot ${savedTrade.slotNumber}] Scale-in merged for ${symbol} (${tokenMint}) existingTradeId=${existingOpenTrade.id} tx=${txHash || 'n/a'} totalSol=${(mergedScaleIn?.mergedAmountInSol ?? finalAmountInSol).toFixed(6)} totalTokens=${(mergedScaleIn?.totalTokenAmount ?? 0).toFixed(6)} avgEntry=${(mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol).toFixed(10)} trailingStop=${scaleInTrailingStopPrice.toFixed(10)}`,
                 );
             }
             this.logger.log(`[Slot ${savedTrade.slotNumber}] Successfully bought ${symbol} (${tokenMint})`);
@@ -2933,5 +2977,3 @@ export class TradeService implements OnModuleInit {
         return { total, wins, losses, winRate };
     }
 }
-
-
