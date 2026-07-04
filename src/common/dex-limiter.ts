@@ -1,4 +1,5 @@
 import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
+import { getRuntimeNumber } from '../config/runtime-config';
 
 interface QueueItem<T extends object = object> {
     url: string;
@@ -50,7 +51,9 @@ export class DexLimiter {
         if (url.includes('token-boosts') || url.includes('token-profiles')) {
             return 15000; // 15 detik untuk discovery polling
         }
-        return 5000; // 5 detik untuk detail token (harga, likuiditas)
+        // FIX B1: tightened from a flat 5000ms so a position near/past its stop-loss is not
+        // evaluated against a price that is several seconds stale. Configurable via config.json.
+        return getRuntimeNumber('DETAIL_PRICE_CACHE_TTL_MS', 2500);
     }
 
     private static cleanExpiredCache(): void {

@@ -6,6 +6,7 @@ import axios from 'axios';
 import * as https from 'https';
 import { PrismaService } from '../prisma/prisma.service';
 import { DexLimiter } from '../common/dex-limiter';
+import { JupiterLimiter } from '../common/jupiter-limiter';
 import { CreatorProfileService } from './creator-profile.service';
 import { AIService } from '../ai/ai.service';
 import {
@@ -612,13 +613,18 @@ export class AnalyzerService {
 
     private async getJupiterPrice(tokenMint: string): Promise<number | null> {
         try {
-            const response = await axios.get(`https://api.jup.ag/price/v3?ids=${tokenMint}`, {
+            // Routed through JupiterLimiter (not raw axios) so this shares the throttled
+            // Jupiter API budget/queue with every other Jupiter call instead of bypassing it.
+            // 'BUY' priority: informational-only call site, not part of a protective SELL's
+            // own critical path (see jupiter-limiter.ts's class doc).
+            const response = await JupiterLimiter.get<
+                Record<string, { usdPrice?: number } | undefined>
+            >(`https://api.jup.ag/price/v3?ids=${tokenMint}`, 'BUY', {
                 timeout: 3000,
                 headers: { 'x-api-key': this.jupiterApiKey },
                 httpsAgent: this.getHttpsAgent(),
             });
-            const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
-            return data?.[tokenMint]?.usdPrice || null;
+            return response.data?.[tokenMint]?.usdPrice || null;
         } catch {
             return null;
         }
