@@ -711,6 +711,17 @@ export class TradeService implements OnModuleInit {
         `;
     }
 
+    // profitUsd is Float? with no @default and no migration to backfill one, so a Prisma
+    // atomic `increment` (NULL + x = NULL in SQL) permanently leaves it NULL for every
+    // trade's first sell. Mirrors the incrementTradeFees COALESCE pattern above.
+    private async incrementTradeProfit(tradeId: number, profitUsd: number): Promise<void> {
+        await this.prismaService.$executeRaw`
+            UPDATE "Trade"
+            SET "profitUsd" = COALESCE("profitUsd", 0) + ${profitUsd}
+            WHERE "id" = ${tradeId}
+        `;
+    }
+
     private async getTradeAuditFields(tradeId: number): Promise<TradeAuditFields> {
         const rows = await this.prismaService.$queryRaw<TradeAuditFields[]>`
             SELECT "solPriceAtEntry", "entryValueUsd", "totalFeesSol"
@@ -1298,8 +1309,16 @@ export class TradeService implements OnModuleInit {
             `[Slot ${slotToUse}] Attempting to buy ${tokenMint} route=${route ?? 'GLOBAL'} with $${buyAmountUSD.toFixed(2)} (${amountInSol.toFixed(4)} SOL)`,
         );
 
-        let { success, entryPrice, error, txHash, actualSol, actualTokens, totalFeesSol } =
-            await this.executeJupiterSwap(
+        let {
+            success,
+            entryPrice,
+            error,
+            txHash,
+            actualSol,
+            actualTokens,
+            totalFeesSol,
+            jitoTipLamports,
+        } = await this.executeJupiterSwap(
                 WRAPPED_SOL_MINT,
                 tokenMint,
                 amountInLamports,
@@ -1343,7 +1362,10 @@ export class TradeService implements OnModuleInit {
                 txHash,
                 wallet.publicKey.toBase58(),
                 tokenMint,
-                0,
+                // Real Jito tip paid for THIS broadcast attempt (0 if Jito wasn't used),
+                // returned by executeJupiterSwap above. Hardcoding 0 here would permanently
+                // undercount totalFeesSol for any BUY that had to go through this recovery path.
+                jitoTipLamports ?? 0,
                 'BUY',
             );
             if (reconciled && Math.abs(reconciled.tokenChange) > 0) {
@@ -1448,69 +1470,142 @@ export class TradeService implements OnModuleInit {
                   })
                 : 0;
 
-            const savedTrade = existingOpenTrade
-                ? await this.prismaService.trade.update({
-                      where: { id: existingOpenTrade.id },
-                      data: {
-                          tokenMint,
-                          symbol: existingOpenTrade.symbol || symbol,
-                          slotNumber: existingOpenTrade.slotNumber,
-                          entryPrice: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
-                          highestPrice: mergedScaleIn?.mergedHighestPriceSol ?? entryPriceSol,
-                          trailingStopPrice: scaleInTrailingStopPrice,
-                          status: 'OPEN',
-                          mode: 'LIVE',
-                          route: existingOpenTrade.route ?? route ?? null,
-                          aiDecisionSnapshotId:
-                              existingOpenTrade.aiDecisionSnapshotId ?? aiDecisionSnapshotId ?? null,
-                          amountInSol: mergedScaleIn?.mergedAmountInSol ?? finalAmountInSol,
-                          buyTxHash: existingOpenTrade.buyTxHash || txHash || null,
-                          entryLiquidity:
-                              (existingOpenTrade.entryLiquidity ?? metadata?.liquidity) ?? 0,
-                          entryMarketCap:
-                              (existingOpenTrade.entryMarketCap ?? metadata?.marketCap) ?? 0,
-                          creatorAddress: existingOpenTrade.creatorAddress ?? metadata?.creator ?? null,
-                          topHolderAddress:
-                              existingOpenTrade.topHolderAddress ?? metadata?.topHolder ?? null,
-                          initialCreatorBalance:
-                              existingOpenTrade.initialCreatorBalance ?? initialCreatorBalance,
-                          initialTopHolderBalance:
-                              existingOpenTrade.initialTopHolderBalance ?? initialTopHolderBalance,
-                          targetTakeProfit:
-                              existingOpenTrade.targetTakeProfit ?? options?.targetTakeProfit,
-                          targetStopLoss:
-                              existingOpenTrade.targetStopLoss ?? options?.targetStopLoss,
-                          targetTrailingDistance:
-                              existingOpenTrade.targetTrailingDistance ?? options?.targetTrailingDistance,
-                          telegramChatId: tradeChatDbId || null,
-                      },
-                  })
-                : await this.prismaService.trade.create({
-                      data: {
-                          tokenMint,
-                          symbol,
-                          slotNumber: slotToUse,
-                          entryPrice: entryPriceSol,
-                          highestPrice: entryPriceSol,
-                          trailingStopPrice: 0, // PriceMonitor activates it once the position is in profit.
-                          status: 'OPEN',
-                          mode: 'LIVE',
-                          route,
-                          aiDecisionSnapshotId,
-                          amountInSol: finalAmountInSol,
-                          buyTxHash: txHash || null,
-                          entryLiquidity: metadata?.liquidity || 0,
-                          entryMarketCap: metadata?.marketCap || 0,
-                          creatorAddress: metadata?.creator,
-                          topHolderAddress: metadata?.topHolder,
-                          initialCreatorBalance,
-                          initialTopHolderBalance,
-                          targetTakeProfit: options?.targetTakeProfit,
-                          targetStopLoss: options?.targetStopLoss,
-                          targetTrailingDistance: options?.targetTrailingDistance,
-                          telegramChatId: tradeChatDbId || null,
-                      },
-                  });
+            let savedTrade: { id: number; slotNumber: number };
+            if (existingOpenTrade) {
+                // GUARDED WRITE (finding: scale-in-vs-close race). The on-chain reconciliation
+                // above this block can take up to ~10s (polling retries), so a concurrent
+                // executeSell can CLOSE this exact trade in that window. The previous
+                // unconditional `where: { id }` update would then silently resurrect the
+                // CLOSED trade back to OPEN using this stale pre-swap scale-in data. Guard the
+                // write with `status: 'OPEN'` and use updateMany (not update) so we can check
+                // the affected row count instead of relying on a thrown P2025.
+                //
+                // ADDITIONAL FIX (finding: scale-in-vs-partial-sell clobber): amountInSol /
+                // entryValueUsd / totalFeesSol below are written via Prisma's atomic
+                // `increment` with this FILL's own delta (finalAmountInSol / entryValueUsd /
+                // totalFeesSol), not `mergedScaleIn`'s absolute pre-confirmation sum. A
+                // concurrent partial-sell's atomic `multiply` (see recordExecutedSell) can
+                // land on these same columns between the `existingOpenTrade` read above and
+                // this write; incrementing by the fill's own delta -- instead of overwriting
+                // with a sum computed from the stale snapshot -- applies on top of whatever
+                // value is currently in the row, so it can never clobber that concurrent write
+                // regardless of ordering. entryPrice/highestPrice/solPriceAtEntry remain
+                // weighted-average values that cannot be expressed as a Prisma atomic
+                // operator; they keep using `mergedScaleIn`'s stale-snapshot computation (a
+                // separate, narrower, already-flagged gap -- see MINOR note on the sell side).
+                const scaleInUpdate = await this.prismaService.trade.updateMany({
+                    where: { id: existingOpenTrade.id, status: 'OPEN' },
+                    data: {
+                        tokenMint,
+                        symbol: existingOpenTrade.symbol || symbol,
+                        slotNumber: existingOpenTrade.slotNumber,
+                        entryPrice: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
+                        highestPrice: mergedScaleIn?.mergedHighestPriceSol ?? entryPriceSol,
+                        trailingStopPrice: scaleInTrailingStopPrice,
+                        status: 'OPEN',
+                        mode: 'LIVE',
+                        route: existingOpenTrade.route ?? route ?? null,
+                        aiDecisionSnapshotId:
+                            existingOpenTrade.aiDecisionSnapshotId ?? aiDecisionSnapshotId ?? null,
+                        amountInSol: { increment: finalAmountInSol },
+                        buyTxHash: existingOpenTrade.buyTxHash || txHash || null,
+                        entryLiquidity:
+                            (existingOpenTrade.entryLiquidity ?? metadata?.liquidity) ?? 0,
+                        entryMarketCap:
+                            (existingOpenTrade.entryMarketCap ?? metadata?.marketCap) ?? 0,
+                        creatorAddress: existingOpenTrade.creatorAddress ?? metadata?.creator ?? null,
+                        topHolderAddress:
+                            existingOpenTrade.topHolderAddress ?? metadata?.topHolder ?? null,
+                        initialCreatorBalance:
+                            existingOpenTrade.initialCreatorBalance ?? initialCreatorBalance,
+                        initialTopHolderBalance:
+                            existingOpenTrade.initialTopHolderBalance ?? initialTopHolderBalance,
+                        targetTakeProfit:
+                            existingOpenTrade.targetTakeProfit ?? options?.targetTakeProfit,
+                        targetStopLoss:
+                            existingOpenTrade.targetStopLoss ?? options?.targetStopLoss,
+                        targetTrailingDistance:
+                            existingOpenTrade.targetTrailingDistance ?? options?.targetTrailingDistance,
+                        telegramChatId: tradeChatDbId || null,
+                        // Folded into this SAME guarded updateMany (rather than a separate
+                        // unguarded `where: { id }` write afterward) so there is no second
+                        // write-gap for a concurrent SELL's CLOSE update to land in and get
+                        // silently overwritten with stale pre-close scale-in data.
+                        solPriceAtEntry: mergedScaleIn?.mergedSolPriceAtEntry ?? solPrice,
+                        entryValueUsd: { increment: entryValueUsd },
+                        totalFeesSol: { increment: totalFeesSol || 0 },
+                    },
+                });
+                if (scaleInUpdate.count === 0) {
+                    // Trade was already CLOSED by a concurrent sell by the time this scale-in
+                    // buy reconciled. Do NOT resurrect it. The buy DID land on-chain -- those
+                    // extra tokens/SOL are real and now unaccounted for on the (closed) trade
+                    // row -- so surface it loudly for manual reconciliation instead of silently
+                    // reopening a trade the sell path already closed.
+                    this.logger.error(
+                        `[BuyTrace] SCALE-IN RACE: buy for ${tokenMint} chat=${telegramChatId} ` +
+                            `tx=${txHash || 'n/a'} landed on-chain (solSpent=${finalAmountInSol}, ` +
+                            `tokens=${actualTokens ?? 'unknown'}) but existing trade ` +
+                            `id=${existingOpenTrade.id} was already CLOSED (concurrent sell) by the ` +
+                            `time of reconciliation. Skipped DB resurrection. ACTIONABLE: manually ` +
+                            `reconcile the extra tokens/SOL against trade id=${existingOpenTrade.id}.`,
+                    );
+                    try {
+                        // NOT sendTradeFailureAlert: that template hardcodes "EXECUTION FAILED" /
+                        // "No live trade was opened", both false here -- the buy DID land on-chain.
+                        await this.reportingService.sendTradeReconciliationAlert({
+                            side: 'BUY',
+                            tokenMint,
+                            symbol: existingOpenTrade.symbol || undefined,
+                            reason: `scale_in_race_closed: ${existingOpenTrade.id}`,
+                            targetChatId,
+                            details:
+                                `Scale-in BUY tx ${txHash || 'n/a'} landed on-chain (solSpent=` +
+                                `${finalAmountInSol}, tokens=${actualTokens ?? 'unknown'}) but trade ` +
+                                `id=${existingOpenTrade.id} was already CLOSED by a concurrent sell. ` +
+                                `DB was NOT updated. ACTIONABLE: manually reconcile the extra ` +
+                                `tokens/SOL against trade id=${existingOpenTrade.id}.`,
+                        });
+                    } catch (alertErr) {
+                        const m = alertErr instanceof Error ? alertErr.message : String(alertErr);
+                        this.logger.error(`[BuyTrace] Failed to send scale-in-race alert: ${m}`);
+                    }
+                    return {
+                        success: true,
+                        message:
+                            `Scale-in buy for ${tokenMint} landed on-chain but the trade was already ` +
+                            `closed by a concurrent sell; skipped DB update. Manual reconciliation required.`,
+                    };
+                }
+                savedTrade = { id: existingOpenTrade.id, slotNumber: existingOpenTrade.slotNumber };
+            } else {
+                savedTrade = await this.prismaService.trade.create({
+                    data: {
+                        tokenMint,
+                        symbol,
+                        slotNumber: slotToUse,
+                        entryPrice: entryPriceSol,
+                        highestPrice: entryPriceSol,
+                        trailingStopPrice: 0, // PriceMonitor activates it once the position is in profit.
+                        status: 'OPEN',
+                        mode: 'LIVE',
+                        route,
+                        aiDecisionSnapshotId,
+                        amountInSol: finalAmountInSol,
+                        buyTxHash: txHash || null,
+                        entryLiquidity: metadata?.liquidity || 0,
+                        entryMarketCap: metadata?.marketCap || 0,
+                        creatorAddress: metadata?.creator,
+                        topHolderAddress: metadata?.topHolder,
+                        initialCreatorBalance,
+                        initialTopHolderBalance,
+                        targetTakeProfit: options?.targetTakeProfit,
+                        targetStopLoss: options?.targetStopLoss,
+                        targetTrailingDistance: options?.targetTrailingDistance,
+                        telegramChatId: tradeChatDbId || null,
+                    },
+                });
+            }
 
             if (!existingOpenTrade) {
                 await this.updateTradeAuditFields(savedTrade.id, {
@@ -1518,16 +1613,9 @@ export class TradeService implements OnModuleInit {
                     entryValueUsd,
                     totalFeesSol: totalFeesSol || 0,
                 });
-            } else {
-                await this.prismaService.trade.update({
-                    where: { id: savedTrade.id },
-                    data: {
-                        solPriceAtEntry: mergedScaleIn?.mergedSolPriceAtEntry ?? solPrice,
-                        entryValueUsd: mergedScaleIn?.mergedEntryValueUsd ?? entryValueUsd,
-                        totalFeesSol: mergedScaleIn?.mergedTotalFeesSol ?? (totalFeesSol || 0),
-                    },
-                });
             }
+            // else: scale-in already wrote solPriceAtEntry/entryValueUsd/totalFeesSol as part
+            // of the guarded updateMany above -- no separate write needed (see comment there).
 
             if (existingOpenTrade) {
                 this.logger.log(
@@ -1676,7 +1764,11 @@ export class TradeService implements OnModuleInit {
                             pending.signature,
                             recWallet.publicKey.toBase58(),
                             trade.tokenMint,
-                            0,
+                            // Real Jito tip paid on the ORIGINAL broadcast, persisted in
+                            // PendingSellStore at the time of that broadcast. Hardcoding 0
+                            // here would permanently undercount totalFeesSol for any SELL
+                            // that had to go through this cross-tick recovery path.
+                            pending.jitoTipLamports ?? 0,
                             'SELL',
                         );
                         if (recDetails && Math.abs(recDetails.tokenChange) > 0) {
@@ -1715,11 +1807,13 @@ export class TradeService implements OnModuleInit {
                                 `reconciliation required. Trade left OPEN.`,
                         );
                         try {
-                            await this.reportingService.sendTradeFailureAlert({
+                            // NOT sendTradeFailureAlert: that template hardcodes "EXECUTION FAILED" /
+                            // "No live trade was opened", both false here -- the sell DID land on-chain
+                            // and the trade is still OPEN.
+                            await this.reportingService.sendTradeReconciliationAlert({
                                 side: 'SELL',
                                 tokenMint: trade.tokenMint,
                                 symbol: trade.symbol || undefined,
-                                stage: 'CONFIRMATION',
                                 reason: `sell_landed_unrecovered: ${pending.signature}`,
                                 targetChatId,
                                 details:
@@ -1778,10 +1872,18 @@ export class TradeService implements OnModuleInit {
                     `[Slot ${trade.slotNumber}] ⚠️ Zero balance for ${trade.tokenMint}. Closing trade.`,
                 );
                 if (percentage >= 1.0) {
-                    await this.prismaService.trade.update({
-                        where: { id: tradeId },
+                    // Guarded like the full-close/partial-sell writes below: a concurrent
+                    // writer may have already closed this trade, so only flip status when
+                    // it is still OPEN rather than unconditionally overwriting it.
+                    const zeroBalanceUpdate = await this.prismaService.trade.updateMany({
+                        where: { id: tradeId, status: 'OPEN' },
                         data: { status: 'CLOSED', exitPrice: 0, profitUsd: 0, exitReason },
                     });
+                    if (zeroBalanceUpdate.count === 0) {
+                        this.logger.warn(
+                            `[Slot ${trade.slotNumber}] Zero-balance close for trade ${tradeId} skipped: already closed by a concurrent writer.`,
+                        );
+                    }
                 }
                 return false;
             }
@@ -1822,6 +1924,7 @@ export class TradeService implements OnModuleInit {
                 actualSol,
                 actualTokens,
                 totalFeesSol,
+                jitoTipLamports,
             } = await this.executeJupiterSwap(
                 trade.tokenMint,
                 'So11111111111111111111111111111111111111112',
@@ -1875,6 +1978,11 @@ export class TradeService implements OnModuleInit {
                     // reduces the runner — instead of guessing from the current tick.
                     percentage,
                     exitReason,
+                    // Persist the REAL tip paid on this broadcast so a later LANDED_OK
+                    // reconciliation (which happens on a subsequent tick, after this call's
+                    // local jitoTipLamports has gone out of scope) can pass it to
+                    // getActualSwapDetails instead of hardcoding 0 and undercounting fees.
+                    jitoTipLamports: jitoTipLamports ?? 0,
                 });
                 this.logger.warn(
                     `[Trade ${tradeId}] SELL broadcast but UNCONFIRMED (sig=${txHash}). ` +
@@ -2039,22 +2147,62 @@ export class TradeService implements OnModuleInit {
         }
 
         // ✅ DATABASE UPDATE: Hanya dilakukan jika transaksi Solana SUKSES
+        // GUARDED WRITE (finding: full-close branch had no status guard while the
+        // partial-sell branch below did, and used a stale-snapshot absolute `profitUsd`
+        // add). Mirror the partial-sell branch: guard with `status: 'OPEN'` via
+        // updateMany. profitUsd itself is intentionally NOT part of this updateMany --
+        // it's Float? with no @default, and Prisma's atomic `increment` is NULL-propagating
+        // (NULL + x = NULL in SQL), which would permanently pin it at NULL. It's applied
+        // afterwards via incrementTradeProfit(), a raw-SQL COALESCE("profitUsd", 0) + x
+        // write, same pattern as incrementTradeFees below. `dbUpdateOk` gates every
+        // downstream side effect below (profit/fee increment, sell alert, swap-result
+        // report, return value) so a race-lost write never reports fabricated success.
+        let dbUpdateOk: boolean;
         if (percentage >= 1.0) {
-            await this.prismaService.trade.update({
-                where: { id: tradeId },
+            const fullCloseUpdate = await this.prismaService.trade.updateMany({
+                where: { id: tradeId, status: 'OPEN' },
                 data: {
                     status: 'CLOSED',
                     exitPrice,
                     exitReason,
                     sellTxHash: txHash || null,
-                    profitUsd: (trade.profitUsd || 0) + estimatedProfitUsd,
                 },
             });
+            dbUpdateOk = fullCloseUpdate.count > 0;
+            if (!dbUpdateOk) {
+                // The sell already landed on-chain but the trade row was no longer OPEN by
+                // the time this write ran (mirrors the partial-sell race below). Do NOT
+                // write -- surface loudly for manual reconciliation instead.
+                this.logger.error(
+                    `[Trade ${tradeId}] FULL SELL tx ${txHash || 'n/a'} landed on-chain ` +
+                        `(sol=${finalSolReceived}, tokens=${finalTokensSold}) but the trade row ` +
+                        `was no longer OPEN at write time. DB was NOT updated. ACTIONABLE: ` +
+                        `manually reconcile the realized proceeds against trade id=${tradeId}.`,
+                );
+                try {
+                    // NOT sendTradeFailureAlert: that template hardcodes "EXECUTION FAILED" /
+                    // "No live trade was opened", both false here -- the sell DID land on-chain.
+                    await this.reportingService.sendTradeReconciliationAlert({
+                        side: 'SELL',
+                        tokenMint: trade.tokenMint,
+                        symbol: trade.symbol || undefined,
+                        reason: `full_sell_race_closed: ${tradeId}`,
+                        targetChatId,
+                        details:
+                            `Full SELL tx ${txHash || 'n/a'} landed on-chain (sol=` +
+                            `${finalSolReceived}, tokens=${finalTokensSold}) but trade ` +
+                            `id=${tradeId} was no longer OPEN when the DB write ran. DB was NOT ` +
+                            `updated. ACTIONABLE: manually reconcile the realized proceeds ` +
+                            `against trade id=${tradeId}.`,
+                    });
+                } catch (alertErr) {
+                    const m = alertErr instanceof Error ? alertErr.message : String(alertErr);
+                    this.logger.error(
+                        `[Trade ${tradeId}] Failed to send full-sell-race alert: ${m}`,
+                    );
+                }
+            }
         } else {
-            const remainingEntryValueUsd =
-                trade.entryValueUsd !== null && trade.entryValueUsd !== undefined
-                    ? trade.entryValueUsd * (1 - percentage)
-                    : undefined;
             const partialTakeProfitAt =
                 exitReason === 'PARTIAL_TAKE_PROFIT'
                     ? new Date()
@@ -2064,29 +2212,101 @@ export class TradeService implements OnModuleInit {
             );
             const exitPriceSolForRunner =
                 finalTokensSold > 0 ? finalSolReceived / finalTokensSold : 0;
-            const runnerFloorPrice =
-                trade.entryPrice *
-                (1 + (Number.isFinite(runnerFloorPercent) ? runnerFloorPercent : 8) / 100);
-            const runnerStopPrice =
-                exitReason === 'PARTIAL_TAKE_PROFIT'
-                    ? // Never let the break-even floor sit at/above the current price, or the
-                      // runner would be liquidated on the next tick (guards a misconfigured
-                      // floor set above the take-profit trigger). exitPrice = partial-TP price.
-                      Math.min(runnerFloorPrice, exitPriceSolForRunner * 0.999)
-                    : trade.trailingStopPrice;
+            // undefined (not trade.trailingStopPrice) when this exit isn't a partial-TP: the
+            // field is intentionally omitted from the write below rather than rewritten with
+            // its own stale snapshot value (see guard comment).
+            let runnerStopPrice: number | undefined;
+            if (exitReason === 'PARTIAL_TAKE_PROFIT') {
+                // Finding (MINOR): the floor used to be computed from `trade.entryPrice`, the
+                // pre-swap snapshot read at the top of executeSell -- a concurrent scale-in
+                // that changes entryPrice during the swap confirmation window (can take
+                // seconds) would still floor the runner off the stale entry price. Re-read
+                // entryPrice immediately before use to shrink that staleness window down to
+                // this single query. Narrow blast radius: only this PARTIAL_TAKE_PROFIT floor
+                // value, not principal/PnL accounting -- those are already race-safe above.
+                const freshEntryPriceRow = await this.prismaService.trade.findUnique({
+                    where: { id: tradeId },
+                    select: { entryPrice: true },
+                });
+                const currentEntryPrice = freshEntryPriceRow?.entryPrice ?? trade.entryPrice;
+                const runnerFloorPrice =
+                    currentEntryPrice *
+                    (1 + (Number.isFinite(runnerFloorPercent) ? runnerFloorPercent : 8) / 100);
+                // Never let the break-even floor sit at/above the current price, or the
+                // runner would be liquidated on the next tick (guards a misconfigured floor
+                // set above the take-profit trigger). exitPrice = partial-TP price.
+                runnerStopPrice = Math.min(runnerFloorPrice, exitPriceSolForRunner * 0.999);
+            }
 
-            await this.prismaService.trade.update({
-                where: { id: tradeId },
+            // GUARDED WRITE (finding: partial-sell vs scale-in race). `trade` here is a
+            // snapshot read at the top of executeSell, before the swap broadcast/confirmation
+            // (which can take seconds) -- a concurrent scale-in buy's guarded updateMany
+            // (above, ~line 1471) can land in that window and update these SAME columns on
+            // this SAME row. The previous unconditional `where: { id }` `update` wrote
+            // absolute values computed from this stale snapshot, silently discarding
+            // whichever side wrote last. amountInSol/entryValueUsd are now written with
+            // Prisma's atomic `multiply` operator -- the DB applies it to whatever value is
+            // currently in the row, so it can never clobber a concurrent write regardless of
+            // ordering. trailingStopPrice is only included when this exit actually intends to
+            // change it (PARTIAL_TAKE_PROFIT), instead of always rewriting the stale
+            // pre-race value back. `status: 'OPEN'` mirrors the scale-in guard so a trade
+            // closed by something else is never silently rewritten.
+            const partialSellUpdate = await this.prismaService.trade.updateMany({
+                where: { id: tradeId, status: 'OPEN' },
                 data: {
-                    amountInSol: trade.amountInSol * (1 - percentage),
-                    entryValueUsd: remainingEntryValueUsd,
+                    amountInSol: { multiply: 1 - percentage },
+                    entryValueUsd: { multiply: 1 - percentage },
                     partialTakeProfitAt,
-                    trailingStopPrice: runnerStopPrice,
-                    profitUsd: (trade.profitUsd || 0) + estimatedProfitUsd,
+                    ...(runnerStopPrice !== undefined ? { trailingStopPrice: runnerStopPrice } : {}),
                 },
             });
+            dbUpdateOk = partialSellUpdate.count > 0;
+            if (partialSellUpdate.count === 0) {
+                // The sell already landed on-chain (tokens sold, SOL received) but the trade
+                // row was no longer OPEN by the time this write ran. Do NOT write -- there is
+                // no safe absolute value to fall back to. Surface loudly for manual
+                // reconciliation instead of silently doing nothing.
+                this.logger.error(
+                    `[Trade ${tradeId}] PARTIAL SELL tx ${txHash || 'n/a'} landed on-chain ` +
+                        `(sol=${finalSolReceived}, tokens=${finalTokensSold}) but the trade row ` +
+                        `was no longer OPEN at write time. DB was NOT updated. ACTIONABLE: ` +
+                        `manually reconcile the realized proceeds against trade id=${tradeId}.`,
+                );
+                try {
+                    // NOT sendTradeFailureAlert: that template hardcodes "EXECUTION FAILED" /
+                    // "No live trade was opened", both false here -- the sell DID land on-chain.
+                    await this.reportingService.sendTradeReconciliationAlert({
+                        side: 'SELL',
+                        tokenMint: trade.tokenMint,
+                        symbol: trade.symbol || undefined,
+                        reason: `partial_sell_race_closed: ${tradeId}`,
+                        targetChatId,
+                        details:
+                            `Partial SELL tx ${txHash || 'n/a'} landed on-chain (sol=` +
+                            `${finalSolReceived}, tokens=${finalTokensSold}) but trade ` +
+                            `id=${tradeId} was no longer OPEN when the DB write ran. DB was NOT ` +
+                            `updated. ACTIONABLE: manually reconcile the realized proceeds ` +
+                            `against trade id=${tradeId}.`,
+                    });
+                } catch (alertErr) {
+                    const m = alertErr instanceof Error ? alertErr.message : String(alertErr);
+                    this.logger.error(
+                        `[Trade ${tradeId}] Failed to send partial-sell-race alert: ${m}`,
+                    );
+                }
+            }
         }
-        if (totalFeesSol) {
+        // Gated on dbUpdateOk: if the trade row write above was skipped (race-lost --
+        // count === 0), the operator was already told "No data was overwritten. Manual
+        // reconciliation required." Silently bumping totalFeesSol/profitUsd here would
+        // contradict that alert on the exact same row.
+        // profitUsd increment is split out of the updateMany above (see incrementTradeProfit)
+        // and always applied -- not gated on truthiness like totalFeesSol -- so a null
+        // profitUsd is coalesced to 0 even on a break-even (0 profit) sell.
+        if (dbUpdateOk) {
+            await this.incrementTradeProfit(tradeId, estimatedProfitUsd);
+        }
+        if (dbUpdateOk && totalFeesSol) {
             await this.incrementTradeFees(tradeId, totalFeesSol);
         }
 
@@ -2132,47 +2352,53 @@ export class TradeService implements OnModuleInit {
             }
         }
 
-        const entryPriceUsdForReport =
-            finalTokensSold > 0 && trade.solPriceAtEntry
-                ? (entrySolValue / finalTokensSold) * trade.solPriceAtEntry
-                : trade.entryPrice;
+        // Gated on dbUpdateOk: a race-lost write (count === 0) already fired the "landed
+        // on-chain but NOT recorded, manual reconciliation required" alert above. Firing a
+        // routine success alert with fabricated profit/exit numbers for the SAME event
+        // right after would directly contradict it.
+        if (dbUpdateOk) {
+            const entryPriceUsdForReport =
+                finalTokensSold > 0 && trade.solPriceAtEntry
+                    ? (entrySolValue / finalTokensSold) * trade.solPriceAtEntry
+                    : trade.entryPrice;
 
-        await this.reportingService.sendSellAlert(
-            trade.tokenMint,
-            exitPrice,
-            profit,
-            exitReason,
-            trade.symbol || undefined,
-            {
-                entryPriceUsd: entryPriceUsdForReport,
-                exitPriceUsd: exitPrice,
-                entryPriceSol: entrySolValue / finalTokensSold,
-                exitPriceSol: finalSolReceived / finalTokensSold,
-                solSpent: entrySolValue,
-                solReceived: finalSolReceived,
-                solProfitPercent,
-                usdSpent: totalUsdSpent,
-                usdReceived: totalUsdReceived,
-            },
-            tradeDryRun,
-            targetChatId,
-        );
-        if (!forceLive) {
-            await this.reportingService.sendSwapResultReport({
-                side: 'SELL',
-                tokenMint: trade.tokenMint,
-                symbol: trade.symbol || undefined,
-                success: true,
-                amountUsd: exitValueUsd,
-                amountSol: finalSolReceived,
-                txHash,
-                dryRun: tradeDryRun,
+            await this.reportingService.sendSellAlert(
+                trade.tokenMint,
+                exitPrice,
+                profit,
+                exitReason,
+                trade.symbol || undefined,
+                {
+                    entryPriceUsd: entryPriceUsdForReport,
+                    exitPriceUsd: exitPrice,
+                    entryPriceSol: entrySolValue / finalTokensSold,
+                    exitPriceSol: finalSolReceived / finalTokensSold,
+                    solSpent: entrySolValue,
+                    solReceived: finalSolReceived,
+                    solProfitPercent,
+                    usdSpent: totalUsdSpent,
+                    usdReceived: totalUsdReceived,
+                },
+                tradeDryRun,
                 targetChatId,
-                details: `Exit reason: ${exitReason.replace(/_/g, ' ')}`,
-            });
+            );
+            if (!forceLive) {
+                await this.reportingService.sendSwapResultReport({
+                    side: 'SELL',
+                    tokenMint: trade.tokenMint,
+                    symbol: trade.symbol || undefined,
+                    success: true,
+                    amountUsd: exitValueUsd,
+                    amountSol: finalSolReceived,
+                    txHash,
+                    dryRun: tradeDryRun,
+                    targetChatId,
+                    details: `Exit reason: ${exitReason.replace(/_/g, ' ')}`,
+                });
+            }
         }
         this.consecutiveSellFailures.delete(tradeId);
-        return true;
+        return dbUpdateOk;
     }
 
     private getEntryValueUsdForSell(
@@ -2330,6 +2556,12 @@ export class TradeService implements OnModuleInit {
         actualSol?: number;
         actualTokens?: number;
         totalFeesSol?: number;
+        // Jito tip actually paid for the broadcast attempt this result reflects (0 if Jito
+        // was not used). Populated on the post-broadcast-unconfirmed failure path so callers'
+        // on-chain recovery/reconciliation can reuse the REAL tip instead of hardcoding 0
+        // (finding: hardcoding 0 there permanently undercounts totalFeesSol for any swap that
+        // had to go through crash/idempotency recovery after actually paying a Jito tip).
+        jitoTipLamports?: number;
     }> {
         const maxRetries = Number.parseInt(
             this.configService.get<string>('TRADE_MAX_RETRIES', '5'),
@@ -2353,6 +2585,10 @@ export class TradeService implements OnModuleInit {
         // reconciled on-chain before any re-sell — even if sendRawTransaction itself
         // timed out before returning a txid.
         let broadcastSignature: string | undefined;
+        // Jito tip for this attempt. Declared outside the try block (unlike the other Jito
+        // locals) so the post-broadcast-unconfirmed catch below can hand the real value back
+        // to the caller instead of that path losing it to block scoping.
+        let jitoTipLamports = 0;
         try {
             // Jurus Pamungkas: Pakai Paid Endpoint & API Key
             const hostname = 'api.jup.ag';
@@ -2550,7 +2786,7 @@ export class TradeService implements OnModuleInit {
             const swapLastValidBlockHeight = Number(swapResponse.data?.lastValidBlockHeight);
             const hasSwapLastValidBlockHeight =
                 Number.isFinite(swapLastValidBlockHeight) && swapLastValidBlockHeight > 0;
-            const jitoTipLamports = useJito ? Math.floor(jitoTipSol * 1_000_000_000) : 0;
+            jitoTipLamports = useJito ? Math.floor(jitoTipSol * 1_000_000_000) : 0;
 
             let txid = '';
 
@@ -2765,6 +3001,7 @@ export class TradeService implements OnModuleInit {
                     entryPrice: 0,
                     error: `post_broadcast_unconfirmed:${message}`,
                     txHash: broadcastSignature,
+                    jitoTipLamports,
                 };
             }
 

@@ -157,4 +157,57 @@ describe('PendingSellStore', () => {
         reloaded.load(2000);
         expect(reloaded.get(5)).toEqual(rec('new', 2000));
     });
+
+    // Regression (finding: recovery path zeroed the tip). jitoTipLamports must
+    // survive a persist -> restart -> load round trip, exactly like
+    // percentage/exitReason above, so a LANDED_OK reconciliation after a crash
+    // still reports the real tip paid instead of undercounting totalFeesSol.
+    describe('jitoTipLamports', () => {
+        it('round-trips through persist and a fresh-store load', () => {
+            const fs = new FakeFs();
+            const now = 3_000_000;
+            const first = new PendingSellStore(FILE, TTL, fs);
+            first.set(9, { signature: 'sig9', recordedAt: now, jitoTipLamports: 12345 });
+            expect(JSON.parse(fs.files.get(FILE) as string)['9'].jitoTipLamports).toBe(12345);
+
+            const second = new PendingSellStore(FILE, TTL, fs);
+            second.load(now);
+            expect(second.get(9)).toEqual({
+                signature: 'sig9',
+                recordedAt: now,
+                jitoTipLamports: 12345,
+            });
+        });
+
+        it('is optional: a record written before the field existed loads without it', () => {
+            const fs = new FakeFs();
+            const now = 3_000_000;
+            fs.files.set(FILE, JSON.stringify({ '1': { signature: 'old-sig', recordedAt: now } }));
+            const store = new PendingSellStore(FILE, TTL, fs);
+            store.load(now);
+            expect(store.get(1)).toEqual({ signature: 'old-sig', recordedAt: now });
+            expect(store.get(1)?.jitoTipLamports).toBeUndefined();
+        });
+
+        it('a non-finite jitoTipLamports on disk is dropped, not propagated', () => {
+            const fs = new FakeFs();
+            const now = 3_000_000;
+            fs.files.set(
+                FILE,
+                JSON.stringify({ '2': { signature: 'sig2', recordedAt: now, jitoTipLamports: 'NaN' } }),
+            );
+            const store = new PendingSellStore(FILE, TTL, fs);
+            store.load(now);
+            expect(store.get(2)).toEqual({ signature: 'sig2', recordedAt: now });
+            expect(store.get(2)?.jitoTipLamports).toBeUndefined();
+        });
+
+        it('0 (Jito not used) is a valid tip and is preserved, not treated as missing', () => {
+            const fs = new FakeFs();
+            const store = new PendingSellStore(FILE, TTL, fs);
+            store.set(3, rec('sig3', 1000));
+            store.set(3, { signature: 'sig3', recordedAt: 1000, jitoTipLamports: 0 });
+            expect(store.get(3)?.jitoTipLamports).toBe(0);
+        });
+    });
 });

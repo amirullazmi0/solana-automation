@@ -44,6 +44,14 @@ export interface PendingSellRecord {
     /** Exit reason of the broadcast sell, preserved so the reconciled finalize
      *  reports/closes with the original reason (STOP_LOSS, PARTIAL_TAKE_PROFIT, …). */
     exitReason?: string;
+    /**
+     * Jito tip (lamports) actually paid on the original broadcast, if any (0 if Jito was not
+     * used). Optional for backward compatibility with records written before this field
+     * existed. When a LANDED_OK reconciliation recovers the fill, this is passed to
+     * getActualSwapDetails so totalFeesSol reflects the tip actually paid instead of being
+     * undercounted by a hardcoded 0 (finding: recovery path zeroed the tip).
+     */
+    jitoTipLamports?: number;
 }
 
 /** Minimal filesystem surface, injectable so unit tests can use an in-memory
@@ -124,6 +132,12 @@ export class PendingSellStore {
                 }
                 if (typeof rec.exitReason === 'string' && rec.exitReason) {
                     restored.exitReason = rec.exitReason;
+                }
+                if (
+                    typeof rec.jitoTipLamports === 'number' &&
+                    Number.isFinite(rec.jitoTipLamports)
+                ) {
+                    restored.jitoTipLamports = rec.jitoTipLamports;
                 }
                 this.map.set(id, restored);
                 loaded++;

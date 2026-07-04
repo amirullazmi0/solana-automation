@@ -1377,6 +1377,39 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(message, { parse_mode: undefined }, 0, params.targetChatId);
     }
 
+    /**
+     * Dedicated template for a BUY/SELL that landed ON-CHAIN but whose trade-row write
+     * was skipped by a concurrency guard (race with another write on the same trade),
+     * so the DB was NOT updated. Deliberately NOT routed through sendTradeFailureAlert:
+     * that template hardcodes "EXECUTION FAILED" / "No live trade was opened", both
+     * false here -- the swap actually succeeded on-chain and a trade may still be open.
+     * Mirrors why sendPriceMissAlert was split out for the same reason (see above).
+     */
+    async sendTradeReconciliationAlert(params: {
+        side: 'BUY' | 'SELL';
+        tokenMint: string;
+        symbol?: string;
+        reason: string;
+        details?: string;
+        targetChatId?: string;
+    }): Promise<void> {
+        const displaySymbol = params.symbol || 'UNKNOWN';
+        const detailsLine = params.details ? `📋 Details: ${params.details}\n` : '';
+
+        const message =
+            `⚠️ ${params.side} LANDED — MANUAL RECONCILIATION NEEDED\n` +
+            `------------------\n` +
+            `💎 Token: ${displaySymbol}\n` +
+            `🆔 Mint: ${params.tokenMint}\n` +
+            `🚫 Reason: ${params.reason}\n` +
+            detailsLine +
+            `------------------\n` +
+            `Status: The swap landed on-chain, but a concurrent write meant the trade row could ` +
+            `not be safely updated. No data was overwritten. Manual reconciliation required.`;
+
+        await this.sendMessage(message, { parse_mode: undefined }, 0, params.targetChatId);
+    }
+
     async sendDepositNotification(params: {
         targetChatId: string;
         walletAddress: string;
