@@ -496,10 +496,15 @@ export class ReportingService implements OnModuleInit {
         );
 
         for (const holding of portfolio) {
-            const valueUsd = holding.valueUsd ?? 0;
-            const pnlUsd = holding.pnlUsd ?? 0;
+            const valueSol = holding.valueSol ?? 0;
+            const pnlSol = holding.pnlSol ?? 0;
             const pnlPercent = holding.pnlPercent ?? 0;
-            const pnlEmoji = pnlUsd >= 0 ? '🟢' : '🔴';
+            const pnlEmoji = pnlSol >= 0 ? '🟢' : '🔴';
+            const entryValueSolText = holding.entryValueSol !== undefined ? holding.entryValueSol.toFixed(4) + ' SOL' : 'N/A';
+            const entryPriceSolText = holding.entryPriceSol !== undefined ? holding.entryPriceSol.toFixed(8) + ' SOL' : 'N/A';
+            const currentPriceSolText = holding.currentPriceSol !== undefined ? holding.currentPriceSol.toFixed(8) + ' SOL' : 'N/A';
+            const solAtEntryText = holding.solPriceAtEntry !== undefined ? '$' + holding.solPriceAtEntry.toFixed(2) : 'N/A';
+            const solNowText = holding.currentSolPriceUsd !== undefined ? '$' + holding.currentSolPriceUsd.toFixed(2) : 'N/A';
             const message =
                 '🪙 *' +
                 (holding.symbol || 'UNKNOWN') +
@@ -510,17 +515,31 @@ export class ReportingService implements OnModuleInit {
                 'Balance: `' +
                 holding.balance.toFixed(4) +
                 '`\n' +
-                'Value: `$' +
-                valueUsd.toFixed(2) +
+                'Entry Value: `' +
+                entryValueSolText +
                 '`\n' +
+                'Current Value: `' +
+                valueSol.toFixed(4) +
+                ' SOL`\n' +
                 'P&L: ' +
                 pnlEmoji +
-                ' `$' +
-                pnlUsd.toFixed(2) +
-                '` (`' +
+                ' `' +
+                pnlSol.toFixed(4) +
+                ' SOL` (`' +
                 pnlPercent.toFixed(2) +
-                '%`)' +
-                '\n' +
+                '%`)\n' +
+                'Entry Price: `' +
+                entryPriceSolText +
+                '`\n' +
+                'Current Price: `' +
+                currentPriceSolText +
+                '`\n' +
+                'SOL Buy Price: `' +
+                solAtEntryText +
+                '`\n' +
+                'SOL Now: `' +
+                solNowText +
+                '`\n' +
                 'Source: `' +
                 holding.source +
                 '`';
@@ -580,16 +599,24 @@ export class ReportingService implements OnModuleInit {
             `Choose a preset below.`;
 
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
+            [{ text: '----- Slots -----', callback_data: 'settings:noop|slots' }],
             [
                 { text: '1 slot', callback_data: 'settings:slots|1' },
                 { text: '2 slots', callback_data: 'settings:slots|2' },
                 { text: '3 slots', callback_data: 'settings:slots|3' },
                 { text: '4 slots', callback_data: 'settings:slots|4' },
             ],
+            [{ text: '----- Position -----', callback_data: 'settings:noop|position' }],
             [
                 { text: '$2 / entry', callback_data: 'settings:position|2' },
                 { text: '$4 / entry', callback_data: 'settings:position|4' },
                 { text: '$5 / entry', callback_data: 'settings:position|5' },
+                { text: '$6 / entry', callback_data: 'settings:position|6' },
+            ],
+            [
+                { text: '$7 / entry', callback_data: 'settings:position|7' },
+                { text: '$8 / entry', callback_data: 'settings:position|8' },
+                { text: '$9 / entry', callback_data: 'settings:position|9' },
                 { text: '$10 / entry', callback_data: 'settings:position|10' },
             ],
             [
@@ -598,12 +625,14 @@ export class ReportingService implements OnModuleInit {
                 { text: '$50 / entry', callback_data: 'settings:position|50' },
                 { text: '$100 / entry', callback_data: 'settings:position|100' },
             ],
+            [{ text: '----- Slippage -----', callback_data: 'settings:noop|slippage' }],
             [
                 { text: '0.50% slippage', callback_data: 'settings:slippage|0.005' },
                 { text: '1.00% slippage', callback_data: 'settings:slippage|0.01' },
                 { text: '2.00% slippage', callback_data: 'settings:slippage|0.02' },
                 { text: '3.00% slippage', callback_data: 'settings:slippage|0.03' },
             ],
+            [{ text: '----- Dry Run -----', callback_data: 'settings:noop|dryrun' }],
             [
                 { text: 'dryRun true', callback_data: 'settings:dryrun|true' },
                 { text: 'dryRun false', callback_data: 'settings:dryrun|false' },
@@ -627,6 +656,10 @@ export class ReportingService implements OnModuleInit {
             dryRun?: boolean;
         } = {};
 
+        if (section === 'noop') {
+            return;
+        }
+
         if (section === 'slots') {
             updates.totalSlots = Number.parseInt(value, 10);
         } else if (section === 'position') {
@@ -642,6 +675,7 @@ export class ReportingService implements OnModuleInit {
         }
 
         await this.telegramWorkspace.updateChatSettings(targetChatId, updates);
+        await this.sendMessage('✅ Settings updated.', {}, 0, targetChatId);
         await this.handleSettingsRequest(targetChatId);
     }
 

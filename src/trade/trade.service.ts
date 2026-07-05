@@ -3696,42 +3696,36 @@ export class TradeService implements OnModuleInit {
             balance: number;
             entryPriceUsd?: number;
             currentPriceUsd?: number;
+            entryPriceSol?: number;
+            currentPriceSol?: number;
+            entryValueUsd?: number;
             valueUsd?: number;
+            entryValueSol?: number;
+            valueSol?: number;
             pnlUsd?: number;
+            pnlSol?: number;
             pnlPercent?: number;
-            source: 'ON_CHAIN' | 'DB';
-        }>
-    > {
+            solPriceAtEntry?: number;
+            currentSolPriceUsd?: number;
+            source: 'ON_CHAIN';
+        }>> {
         const wallet = await this.getWallet(chatId);
         const [onChainHoldings, chatRecord] = await Promise.all([
             this.getWalletHoldings(wallet.publicKey.toBase58()),
             this.telegramWorkspace.getChatById(chatId),
         ]);
 
-        const portfolioByMint = new Map<
+        const currentSolPriceUsd = await this.getSolPrice();
+        const openTradeMetaByMint = new Map<
             string,
             {
-                mint: string;
-                symbol: string;
-                balance: number;
                 entryPriceUsd?: number;
-                currentPriceUsd?: number;
-                valueUsd?: number;
-                pnlUsd?: number;
-                pnlPercent?: number;
-                source: 'ON_CHAIN' | 'DB';
+                entryValueUsd?: number;
+                entryValueSol?: number;
+                solPriceAtEntry?: number;
+                symbol?: string;
             }
         >();
-
-        for (const holding of onChainHoldings) {
-            portfolioByMint.set(holding.mint, {
-                mint: holding.mint,
-                symbol: holding.symbol,
-                balance: holding.balance,
-                source: 'ON_CHAIN',
-            });
-        }
-
         if (chatRecord?.id) {
             const openTrades = await this.prismaService.trade.findMany({
                 where: {
@@ -3743,42 +3737,72 @@ export class TradeService implements OnModuleInit {
             });
 
             for (const trade of openTrades) {
-                const currentPriceUsd = await this.reportingService.fetchCurrentPrice(trade.tokenMint);
-                const balance = portfolioByMint.get(trade.tokenMint)?.balance || 0;
-                const entryPriceUsd = trade.entryPrice || undefined;
-                const valueUsd = currentPriceUsd && balance > 0 ? currentPriceUsd * balance : undefined;
-                const entryValueUsd =
-                    trade.entryValueUsd !== null && trade.entryValueUsd !== undefined
-                        ? trade.entryValueUsd
-                        : undefined;
-                const pnlUsd =
-                    valueUsd !== undefined && entryValueUsd !== undefined
-                        ? valueUsd - entryValueUsd
-                        : undefined;
-                const pnlPercent =
-                    pnlUsd !== undefined && entryValueUsd !== undefined && entryValueUsd > 0
-                        ? (pnlUsd / entryValueUsd) * 100
-                        : undefined;
-
-                portfolioByMint.set(trade.tokenMint, {
-                    mint: trade.tokenMint,
-                    symbol: trade.symbol || 'UNKNOWN',
-                    balance,
-                    entryPriceUsd,
-                    currentPriceUsd: currentPriceUsd || undefined,
-                    valueUsd,
-                    pnlUsd,
-                    pnlPercent,
-                    source: 'DB',
+                if (openTradeMetaByMint.has(trade.tokenMint)) continue;
+                openTradeMetaByMint.set(trade.tokenMint, {
+                    entryPriceUsd: trade.entryPrice || undefined,
+                    entryValueUsd:
+                        trade.entryValueUsd !== null && trade.entryValueUsd !== undefined
+                            ? trade.entryValueUsd
+                            : undefined,
+                    entryValueSol: trade.amountInSol || undefined,
+                    solPriceAtEntry: trade.solPriceAtEntry || undefined,
+                    symbol: trade.symbol || undefined,
                 });
             }
         }
 
-        return Array.from(portfolioByMint.values()).sort((a, b) =>
-            a.symbol.localeCompare(b.symbol),
-        );
-    }
+        const portfolio = await Promise.all(
+            onChainHoldings.map(async (holding) => {
+                const meta = openTradeMetaByMint.get(holding.mint);
+                const currentPriceUsd = await this.reportingService.fetchCurrentPrice(holding.mint);
+                const valueUsd = currentPriceUsd && holding.balance > 0 ? currentPriceUsd * holding.balance : undefined;
+                const valueSol =
+                    valueUsd !== undefined && currentSolPriceUsd > 0
+                        ? valueUsd / currentSolPriceUsd
+                        : undefined;
+                const pnlUsd =
+                    valueUsd !== undefined && meta?.entryValueUsd !== undefined
+                        ? valueUsd - meta.entryValueUsd
+                        : undefined;
+                const pnlSol =
+                    valueSol !== undefined && meta?.entryValueSol !== undefined
+                        ? valueSol - meta.entryValueSol
+                        : undefined;
+                const pnlPercent =
+                    pnlSol !== undefined && meta?.entryValueSol !== undefined && meta.entryValueSol > 0
+                        ? (pnlSol / meta.entryValueSol) * 100
+                        : undefined;
 
+                return {
+                    mint: holding.mint,
+                    symbol: meta?.symbol || holding.symbol,
+                    balance: holding.balance,
+                    entryPriceUsd: meta?.entryPriceUsd,
+                    currentPriceUsd: currentPriceUsd || undefined,
+                    entryPriceSol:
+                        meta?.entryPriceUsd !== undefined && meta?.solPriceAtEntry !== undefined && meta.solPriceAtEntry > 0
+                            ? meta.entryPriceUsd / meta.solPriceAtEntry
+                            : undefined,
+                    currentPriceSol:
+                        currentPriceUsd && currentSolPriceUsd > 0
+                            ? currentPriceUsd / currentSolPriceUsd
+                            : undefined,
+                    entryValueUsd: meta?.entryValueUsd,
+                    valueUsd,
+                    entryValueSol: meta?.entryValueSol,
+                    valueSol,
+                    pnlUsd,
+                    pnlSol,
+                    pnlPercent,
+                    solPriceAtEntry: meta?.solPriceAtEntry,
+                    currentSolPriceUsd,
+                    source: 'ON_CHAIN' as const,
+                };
+            }),
+        );
+
+        return portfolio.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    }
     async getWalletBalanceForChat(
         chatId: string,
     ): Promise<{ publicKey: string; balanceSol: number; balanceUsd: number }> {
@@ -3816,3 +3840,4 @@ export class TradeService implements OnModuleInit {
         return { total, wins, losses, winRate };
     }
 }
+
