@@ -389,6 +389,251 @@ describe('TradeService calculation helpers', () => {
     });
 });
 
+describe('TradeService post-broadcast idempotency (resolveSignatureFate)', () => {
+    // Finding (round 4): the post-broadcast guard discarded the txid and fell back to a
+    // raceable balance snapshot, enabling a double-sell if confirmTransaction threw a
+    // transient error while the tx was still valid and propagating. resolveSignatureFate is
+    // the decision that closes that race: within the validity window an unconfirmable tx is
+    // UNKNOWN (caller must NOT re-sell); past the window the balance is authoritative.
+    const TTL_MS = 90_000;
+
+    function createService(statusImpl: () => Promise<any>, ttl = String(TTL_MS)) {
+        const service = Object.create(TradeService.prototype) as any;
+        service.logger = { warn: jest.fn(), error: jest.fn(), log: jest.fn(), debug: jest.fn() };
+        service.configService = {
+            get: jest.fn((key: string, def?: string) =>
+                key === 'SELL_UNCONFIRMED_TTL_MS' ? ttl : def,
+            ),
+        };
+        service.connection = { getSignatureStatus: jest.fn(statusImpl) };
+        return service;
+    }
+
+    const freshPending = () => ({ signature: 'sig-abc', recordedAt: Date.now() });
+    const stalePending = () => ({ signature: 'sig-abc', recordedAt: Date.now() - (TTL_MS + 5_000) });
+
+    it('LANDED_OK when the tx is confirmed with no error', async () => {
+        const service = createService(async () => ({
+            value: { err: null, confirmationStatus: 'confirmed', confirmations: 5 },
+        }));
+        expect(await service.resolveSignatureFate(freshPending())).toBe('LANDED_OK');
+    });
+
+    it('LANDED_FAILED when the tx landed but reverted', async () => {
+        const service = createService(async () => ({
+            value: { err: { InstructionError: [0, 'Custom'] }, confirmationStatus: 'confirmed' },
+        }));
+        expect(await service.resolveSignatureFate(freshPending())).toBe('LANDED_FAILED');
+    });
+
+    it('UNKNOWN when not found but still inside the validity window (do NOT re-sell)', async () => {
+        const service = createService(async () => ({ value: null }));
+        expect(await service.resolveSignatureFate(freshPending())).toBe('UNKNOWN');
+    });
+
+    it('NOT_FOUND when not found and the validity window has elapsed (safe to re-sell)', async () => {
+        const service = createService(async () => ({ value: null }));
+        expect(await service.resolveSignatureFate(stalePending())).toBe('NOT_FOUND');
+    });
+
+    it('UNKNOWN when the status RPC itself throws inside the window (do NOT re-sell)', async () => {
+        const service = createService(async () => {
+            throw new Error('429 Too Many Requests');
+        });
+        expect(await service.resolveSignatureFate(freshPending())).toBe('UNKNOWN');
+    });
+
+    it('NOT_FOUND when the status RPC throws but the window has elapsed (balance authoritative)', async () => {
+        const service = createService(async () => {
+            throw new Error('429 Too Many Requests');
+        });
+        expect(await service.resolveSignatureFate(stalePending())).toBe('NOT_FOUND');
+    });
+
+    it("treats a 'processed'-only status as UNKNOWN inside the window", async () => {
+        const service = createService(async () => ({
+            value: { err: null, confirmationStatus: 'processed', confirmations: 0 },
+        }));
+        expect(await service.resolveSignatureFate(freshPending())).toBe('UNKNOWN');
+    });
+
+    it('searches transaction history so dropped/old sigs are still checked', async () => {
+        const spy = jest.fn(async () => ({ value: null }));
+        const service = createService(spy);
+        await service.resolveSignatureFate(freshPending());
+        expect(spy).toHaveBeenCalledWith('sig-abc', { searchTransactionHistory: true });
+    });
+});
+
+describe('TradeService LANDED_OK reconciliation records the realized fill', () => {
+    // Finding (round 8, Major): when a broadcast-but-unconfirmed sell later reconciles as
+    // LANDED_OK, the old guard just deleted the pending sig and fell through to a fresh
+    // balance read. For a full exit the balance is ~0, so control hit the zero-balance
+    // branch and closed the trade at exitPrice:0/profitUsd:0 with NO alert — the realized
+    // SOL proceeds were lost. For a partial exit the balance read re-sold the runner
+    // (over-exit). The fix recovers the on-chain fill and finalizes through the SAME
+    // recording path as a normal successful sell (recordExecutedSell), never falling through.
+    const TRADE = {
+        id: 1,
+        status: 'OPEN',
+        telegramChatId: 5,
+        tokenMint: 'MINT',
+        symbol: 'X',
+        slotNumber: 1,
+        amountInSol: 1,
+        entryPrice: 0.001,
+        entryValueUsd: 3,
+        profitUsd: 0,
+        solPriceAtEntry: 100,
+        trailingStopPrice: 0,
+    };
+
+    function createSellService(opts: {
+        fate: 'LANDED_OK' | 'NOT_FOUND';
+        pending: { signature: string; recordedAt: number; percentage?: number; exitReason?: string };
+        swapDetails: {
+            solChange: number;
+            tokenChange: number;
+            cleanSolAmount: number | null;
+            totalFeesSol: number;
+        } | null;
+        fetchedBalance?: number;
+    }) {
+        const service = Object.create(TradeService.prototype) as any;
+        service.logger = { warn: jest.fn(), error: jest.fn(), log: jest.fn(), debug: jest.fn() };
+        service.configService = { get: jest.fn((_k: string, d?: string) => d) };
+        service.sellingTrades = new Set<number>();
+        service.consecutiveSellFailures = new Map<number, number>();
+        service.prismaService = {
+            trade: {
+                findUnique: jest.fn().mockResolvedValue({ ...TRADE }),
+                update: jest.fn().mockResolvedValue({}),
+                updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+            },
+        };
+        service.getTradeAuditFields = jest.fn().mockResolvedValue({
+            solPriceAtEntry: TRADE.solPriceAtEntry,
+            entryValueUsd: TRADE.entryValueUsd,
+        });
+        service.telegramWorkspace = {
+            getChatSettingsByChatDbId: jest.fn().mockResolvedValue({ dryRun: false }),
+            getChatByDbId: jest.fn().mockResolvedValue({ chatId: 'chat-1' }),
+            getWalletKeypairByChatDbId: jest
+                .fn()
+                .mockResolvedValue({ publicKey: { toBase58: () => 'WALLET' } }),
+        };
+        // reportingService is exposed via a getter on the prototype, so assign with
+        // defineProperty (a plain `service.x =` throws "only has a getter").
+        Object.defineProperty(service, 'reportingService', {
+            configurable: true,
+            value: {
+                sendTradeFailureAlert: jest.fn().mockResolvedValue(undefined),
+                sendTradeReconciliationAlert: jest.fn().mockResolvedValue(undefined),
+                sendSwapResultReport: jest.fn().mockResolvedValue(undefined),
+            },
+        });
+        service.pendingSellSignatures = {
+            get: jest.fn().mockReturnValue(opts.pending),
+            delete: jest.fn(),
+            set: jest.fn(),
+        };
+        service.resolveSignatureFate = jest.fn().mockResolvedValue(opts.fate);
+        service.getActualSwapDetails = jest.fn().mockResolvedValue(opts.swapDetails);
+        service.recordExecutedSell = jest.fn().mockResolvedValue(true);
+        service.getTokenBalance = jest.fn().mockResolvedValue(opts.fetchedBalance ?? 0);
+        service.getTokenDecimalsStrict = jest.fn().mockResolvedValue(6);
+        return service;
+    }
+
+    it('full exit: recovers the fill and records it via recordExecutedSell (no balance read)', async () => {
+        const service = createSellService({
+            fate: 'LANDED_OK',
+            pending: { signature: 'sig-x', recordedAt: Date.now(), percentage: 1.0, exitReason: 'STOP_LOSS' },
+            swapDetails: { solChange: -2, tokenChange: -1000, cleanSolAmount: 2, totalFeesSol: 0.01 },
+        });
+
+        // Current tick asks for a full sell; the pending record is the source of truth.
+        const result = await service.executeSell(1, 0.001, 'STOP_LOSS', 1.0, true);
+
+        expect(result).toBe(true);
+        expect(service.recordExecutedSell).toHaveBeenCalledTimes(1);
+        expect(service.recordExecutedSell).toHaveBeenCalledWith(
+            expect.objectContaining({
+                percentage: 1.0,
+                exitReason: 'STOP_LOSS',
+                actualSol: 2,
+                actualTokens: 1000,
+                txHash: 'sig-x',
+                totalFeesSol: 0.01,
+            }),
+        );
+        // The zero-balance close path must NOT run: no balance read, no direct CLOSED update.
+        expect(service.getTokenBalance).not.toHaveBeenCalled();
+        expect(service.prismaService.trade.update).not.toHaveBeenCalled();
+        expect(service.pendingSellSignatures.delete).toHaveBeenCalledWith(1);
+    });
+
+    it('partial exit: finalizes with the STORED percentage (0.5), not the current tick (1.0)', async () => {
+        const service = createSellService({
+            fate: 'LANDED_OK',
+            pending: {
+                signature: 'sig-p',
+                recordedAt: Date.now(),
+                percentage: 0.5,
+                exitReason: 'PARTIAL_TAKE_PROFIT',
+            },
+            swapDetails: { solChange: -1, tokenChange: -500, cleanSolAmount: 1, totalFeesSol: 0.005 },
+        });
+
+        await service.executeSell(1, 0.001, 'STOP_LOSS', 1.0, true);
+
+        expect(service.recordExecutedSell).toHaveBeenCalledWith(
+            expect.objectContaining({ percentage: 0.5, exitReason: 'PARTIAL_TAKE_PROFIT', actualTokens: 500 }),
+        );
+        expect(service.getTokenBalance).not.toHaveBeenCalled();
+    });
+
+    it('NOT_FOUND still falls through to the balance-checked sell (no record of a phantom fill)', async () => {
+        const service = createSellService({
+            fate: 'NOT_FOUND',
+            pending: { signature: 'sig-gone', recordedAt: Date.now(), percentage: 1.0, exitReason: 'STOP_LOSS' },
+            swapDetails: null,
+            fetchedBalance: 0, // never landed → balance authoritative → zero-balance close
+        });
+
+        const result = await service.executeSell(1, 0.001, 'STOP_LOSS', 1.0, true);
+
+        expect(result).toBe(false);
+        expect(service.recordExecutedSell).not.toHaveBeenCalled();
+        expect(service.getTokenBalance).toHaveBeenCalled();
+        expect(service.prismaService.trade.updateMany).toHaveBeenCalledWith(
+            expect.objectContaining({
+                where: expect.objectContaining({ status: 'OPEN' }),
+                data: expect.objectContaining({ status: 'CLOSED' }),
+            }),
+        );
+    });
+
+    it('LANDED_OK but unrecoverable fill: alerts and bails, never falls through to re-sell', async () => {
+        const service = createSellService({
+            fate: 'LANDED_OK',
+            pending: { signature: 'sig-u', recordedAt: Date.now(), percentage: 1.0, exitReason: 'STOP_LOSS' },
+            swapDetails: null, // landed but could not parse the fill
+        });
+
+        const result = await service.executeSell(1, 0.001, 'STOP_LOSS', 1.0, true);
+
+        expect(result).toBe(false);
+        expect(service.recordExecutedSell).not.toHaveBeenCalled();
+        expect(service.getTokenBalance).not.toHaveBeenCalled(); // no double-sell fall-through
+        // NOT sendTradeFailureAlert: that template's "EXECUTION FAILED" / "No live trade was
+        // opened" copy would be false here -- the sell DID land on-chain.
+        expect(service.reportingService.sendTradeReconciliationAlert).toHaveBeenCalledWith(
+            expect.objectContaining({ side: 'SELL', reason: expect.stringContaining('sell_landed_unrecovered') }),
+        );
+    });
+});
+
 describe('TradeService withdraw guard', () => {
     function createWithdrawGuardService(options: {
         withdrawalsEnabled?: string;
@@ -471,5 +716,143 @@ describe('TradeService withdraw guard', () => {
             message: 'Wallet ownership validation failed for this Telegram chat.',
         });
         expect(service.prismaService.telegramWithdrawal.create).not.toHaveBeenCalled();
+    });
+});
+
+describe('TradeService scale-in resurrection guard (attemptBuy, concurrent-close race)', () => {
+    // Finding: the on-chain reconciliation before this write can take up to ~10s, so a
+    // concurrent executeSell can CLOSE the trade in that window. The guard uses a
+    // status:'OPEN'-scoped updateMany instead of an unconditional update so a count of 0
+    // means "already closed by a concurrent sell -- do NOT resurrect it".
+    const EXISTING_TRADE = {
+        id: 42,
+        tokenMint: 'MINT_X',
+        slotNumber: 2,
+        entryPrice: 0.001,
+        amountInSol: 1,
+        entryValueUsd: 100,
+        solPriceAtEntry: 100,
+        highestPrice: 0.0015,
+        trailingStopPrice: 0.0012,
+        totalFeesSol: 0.02,
+        symbol: 'SYM',
+        buyTxHash: 'oldTx',
+        route: null,
+        aiDecisionSnapshotId: null,
+        entryLiquidity: 1000,
+        entryMarketCap: 5000,
+        creatorAddress: null,
+        topHolderAddress: null,
+        initialCreatorBalance: 0,
+        initialTopHolderBalance: 0,
+        targetTakeProfit: null,
+        targetStopLoss: null,
+        targetTrailingDistance: null,
+        telegramChatId: 99,
+    };
+
+    function createScaleInBuyService(updateManyResult: { count: number }) {
+        const service = Object.create(TradeService.prototype) as any;
+        service.logger = { warn: jest.fn(), error: jest.fn(), log: jest.fn(), debug: jest.fn() };
+        service.configService = { get: jest.fn((_k: string, d?: string) => d) };
+        service.totalSlots = 5;
+        service.positionSizeUSD = 10;
+        service.slippageBps = 100;
+        service.totalCapital = 1000;
+        service.micinPositionSizeMultiplier = 1;
+        service.whalePositionSizeMultiplier = 1;
+        service.connection = { getBalance: jest.fn().mockResolvedValue(100_000_000_000) };
+        service.telegramWorkspace = {
+            getChatById: jest.fn().mockResolvedValue({ id: 99, chatId: 'chat-1' }),
+            getChatSettings: jest.fn().mockResolvedValue(null),
+            getWalletKeypair: jest
+                .fn()
+                .mockResolvedValue({ publicKey: { toBase58: () => 'WALLET' } }),
+        };
+        service.prismaService = {
+            trade: {
+                findMany: jest.fn().mockResolvedValue([{ ...EXISTING_TRADE }]),
+                findFirst: jest.fn().mockResolvedValue(null),
+                updateMany: jest.fn().mockResolvedValue(updateManyResult),
+                update: jest.fn().mockResolvedValue({}),
+                create: jest.fn(),
+            },
+        };
+        Object.defineProperty(service, 'reportingService', {
+            configurable: true,
+            value: {
+                sendTradeFailureAlert: jest.fn().mockResolvedValue(undefined),
+                sendTradeReconciliationAlert: jest.fn().mockResolvedValue(undefined),
+                sendBuyAlert: jest.fn().mockResolvedValue(undefined),
+                sendSwapResultReport: jest.fn().mockResolvedValue(undefined),
+            },
+        });
+        service.getSolPrice = jest.fn().mockResolvedValue(100);
+        service.executeJupiterSwap = jest.fn().mockResolvedValue({
+            success: true,
+            entryPrice: 0.002,
+            error: undefined,
+            txHash: 'newTx',
+            actualSol: 1,
+            actualTokens: 500,
+            totalFeesSol: 0.01,
+            jitoTipLamports: 0,
+        });
+        service.fetchTokenSymbol = jest.fn().mockResolvedValue('SYM');
+        service.getTokenBalance = jest.fn();
+        service.updateTradeAuditFields = jest.fn().mockResolvedValue(undefined);
+        return service;
+    }
+
+    it('count===0: alerts the operator and skips DB resurrection instead of silently reopening a CLOSED trade', async () => {
+        const service = createScaleInBuyService({ count: 0 });
+
+        const result = await service.attemptBuy('MINT_X', undefined, 5, undefined, 'tg-chat-1');
+
+        expect(result).toEqual({
+            success: true,
+            message: expect.stringContaining('Manual reconciliation required.'),
+        });
+        // The guarded write was attempted, scoped to the OPEN trade.
+        expect(service.prismaService.trade.updateMany).toHaveBeenCalledWith(
+            expect.objectContaining({ where: { id: 42, status: 'OPEN' } }),
+        );
+        // Regression: the failure branch must alert, not just log (mirrors the SELL-side
+        // 'landed but unreconciled' pattern elsewhere in this file). NOT
+        // sendTradeFailureAlert: that template's "EXECUTION FAILED" / "No live trade was
+        // opened" copy would be false here -- the buy DID land on-chain.
+        expect(service.reportingService.sendTradeReconciliationAlert).toHaveBeenCalledWith(
+            expect.objectContaining({
+                side: 'BUY',
+                reason: expect.stringContaining('scale_in_race_closed'),
+                targetChatId: 'chat-1',
+            }),
+        );
+        // No resurrection: neither a new row nor a second unguarded write on the closed trade.
+        expect(service.prismaService.trade.create).not.toHaveBeenCalled();
+        expect(service.prismaService.trade.update).not.toHaveBeenCalled();
+    });
+
+    it('count===1: folds audit fields into the SAME guarded updateMany, with no second unguarded write', async () => {
+        const service = createScaleInBuyService({ count: 1 });
+
+        const result = await service.attemptBuy('MINT_X', undefined, 5, undefined, 'tg-chat-1');
+
+        expect(result.success).toBe(true);
+        expect(service.prismaService.trade.updateMany).toHaveBeenCalledTimes(1);
+        const call = service.prismaService.trade.updateMany.mock.calls[0][0];
+        expect(call.where).toEqual({ id: 42, status: 'OPEN' });
+        // Regression: solPriceAtEntry/entryValueUsd/totalFeesSol must be written as part of
+        // the guarded call, not via a later `where: { id }` write with no status filter --
+        // that second write is the reopened race the guard was supposed to close.
+        expect(typeof call.data.solPriceAtEntry).toBe('number');
+        // entryValueUsd/amountInSol/totalFeesSol are atomic `increment`s of this fill's own
+        // delta (not an absolute merged sum) so a concurrent partial-sell's atomic
+        // `multiply` on the same columns can never be clobbered regardless of ordering.
+        expect(call.data.amountInSol).toEqual({ increment: 1 });
+        expect(call.data.entryValueUsd).toEqual({ increment: 100 });
+        expect(call.data.totalFeesSol).toEqual({ increment: 0.01 });
+        expect(service.prismaService.trade.update).not.toHaveBeenCalled();
+        expect(service.reportingService.sendTradeFailureAlert).not.toHaveBeenCalled();
     });
 });

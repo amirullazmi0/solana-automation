@@ -15,8 +15,20 @@ import {
 import axios from 'axios';
 import bs58 from 'bs58';
 import * as https from 'https';
+import * as path from 'path';
 import { DexLimiter } from '../common/dex-limiter';
+import { JupiterLimiter, JupiterPriority } from '../common/jupiter-limiter';
+import { PendingSellStore } from '../common/pending-sell-store';
 import { computeNetProfitUsd } from '../common/fee-utils';
+import {
+    RpcEndpointPool,
+    RpcErrorClass,
+    classifyRpcError,
+    computeBackoffDelay,
+    isAmbiguousSendFailure,
+    isRetryableRpcError,
+    parseRpcEndpoints,
+} from '../common/rpc-retry';
 import {
     isWithdrawalsEnabled,
     parseChatIdList,
@@ -414,6 +426,27 @@ export class TradeService implements OnModuleInit {
     private readonly decimalsCache = new Map<string, number>();
     private readonly sellRetryCounts = new Map<number, number>();
     private readonly priceAnomalyCounts = new Map<number, number>();
+    // Consecutive SELL failures per trade, used to escalate a stop-loss that is
+    // repeatedly failing while the position is still OPEN (proposal solana-stoploss-retry).
+    private readonly consecutiveSellFailures = new Map<number, number>();
+    // Post-broadcast UNCONFIRMED sell tx signatures per trade. When a sell tx was
+    // broadcast but its confirmation was AMBIGUOUS (e.g. confirmTransaction threw a
+    // transient 429/timeout while the tx blockhash was still valid and propagating),
+    // the deterministic tx signature is recorded here so the NEXT executeSell
+    // reconciles that exact tx on-chain BEFORE re-selling. This closes the double-sell
+    // race that a raceable balance snapshot alone cannot: within the tx validity window
+    // the balance still shows the un-sold tokens, so a blind re-sell would double-execute
+    // (proposal solana-stoploss-retry, requirement 3).
+    //
+    // DISK-BACKED (finding: idempotency state was process-local): the in-memory Map
+    // alone was lost on restart, so a crash/restart within the tx validity window
+    // dropped the pending record and let startMonitoringAllTrades re-sell a still-
+    // in-flight tx (oversell on partial exits). PendingSellStore persists each
+    // set/delete to a JSON file (atomic write) and rehydrates on load(), so the
+    // reconciliation gate survives a restart. Same get/set/delete surface as the Map
+    // it replaced; fail-soft (a persistence I/O error never blocks a sell).
+    private readonly pendingSellSignatures: PendingSellStore;
+    private rpcPool!: RpcEndpointPool;
     private jitoTipAccounts: string[] = [];
 
     private readonly totalCapital: number;
@@ -443,8 +476,36 @@ export class TradeService implements OnModuleInit {
         private readonly moduleRef: ModuleRef,
         private readonly telegramWorkspace: TelegramWorkspaceService,
     ) {
-        this.connection = new Connection(this.getSolanaRpcUrl(), 'confirmed');
+        this.rpcPool = new RpcEndpointPool(
+            parseRpcEndpoints(
+                this.configService.get<string>('SOLANA_RPC_URL'),
+                this.configService.get<string>('RPC_ENDPOINT'),
+                this.configService.get<string>('SOLANA_RPC_FALLBACKS'),
+            ),
+        );
+        this.connection = new Connection(this.rpcPool.current, 'confirmed');
+        this.logger.log(
+            `[RPC] Endpoint pool initialized with ${this.rpcPool.size} endpoint(s); primary active.`,
+        );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
+
+        // Disk-backed idempotency store for post-broadcast unconfirmed sells.
+        // Prune window matches the reconciliation TTL used by resolveSignatureFate
+        // (SELL_UNCONFIRMED_TTL_MS, default 90s): past that window a re-sell is safe
+        // regardless, so a persisted entry older than it carries no idempotency value.
+        const idempotencyTtl = Number.parseInt(
+            this.configService.get<string>('SELL_UNCONFIRMED_TTL_MS', '90000'),
+            10,
+        );
+        const storePath =
+            this.configService.get<string>('SELL_IDEMPOTENCY_STORE_PATH') ||
+            path.join(process.cwd(), '.data', 'pending-sell-signatures.json');
+        this.pendingSellSignatures = new PendingSellStore(
+            storePath,
+            Number.isFinite(idempotencyTtl) && idempotencyTtl > 0 ? idempotencyTtl : 90_000,
+            undefined, // real fs
+            (msg) => this.logger.warn(msg),
+        );
 
         // CONFIG BUDGET (Updated by Amirull)
         this.totalCapital = Number.parseFloat(
@@ -494,18 +555,23 @@ export class TradeService implements OnModuleInit {
         });
     }
 
-    private getSolanaRpcUrl(): string {
-        const heliusRpcUrl = this.configService.get<string>('SOLANA_RPC_URL');
-        if (heliusRpcUrl && heliusRpcUrl.trim()) {
-            return heliusRpcUrl.trim();
+    /**
+     * Rotate to the next configured RPC endpoint and rebuild the shared
+     * Connection. Called when the active endpoint returns a rate-limit (429) so
+     * the critical sell/stop-loss path fails over instead of hammering one
+     * provider (proposal solana-stoploss-retry, requirement 2).
+     */
+    private rotateRpcConnection(): void {
+        if (this.rpcPool.size <= 1) {
+            this.logger.warn(
+                '[RPC] Rate-limited but only one endpoint is configured; cannot fail over. ' +
+                    'Set SOLANA_RPC_FALLBACKS to add backup providers.',
+            );
+            return;
         }
-
-        const fallbackRpcUrl = this.configService.get<string>('RPC_ENDPOINT');
-        if (fallbackRpcUrl && fallbackRpcUrl.trim()) {
-            return fallbackRpcUrl.trim();
-        }
-
-        return 'https://api.mainnet-beta.solana.com';
+        const next = this.rpcPool.rotate();
+        this.connection = new Connection(next, 'confirmed');
+        this.logger.warn(`[RPC] Rate-limited — failed over to next endpoint (index rotated).`);
     }
 
     private get reportingService(): ReportingService {
@@ -535,6 +601,12 @@ export class TradeService implements OnModuleInit {
 
             // 🚀 JITO TIP ACCOUNTS: Fetch Jito tip accounts on startup
             await this.refreshJitoTipAccounts();
+
+            // 🔁 IDEMPOTENCY: rehydrate pending-sell signatures from disk BEFORE
+            // resuming monitoring, so a sell tx that was broadcast-but-unconfirmed
+            // when the process died is reconciled on-chain (not blind re-sold) on
+            // the first resumed tick (finding: idempotency state was process-local).
+            this.pendingSellSignatures.load();
 
             // 🚀 RESUME MONITORING: Pantau lagi koin yang masih nyangkut/open
             await this.startMonitoringAllTrades();
@@ -635,6 +707,17 @@ export class TradeService implements OnModuleInit {
         await this.prismaService.$executeRaw`
             UPDATE "Trade"
             SET "totalFeesSol" = COALESCE("totalFeesSol", 0) + ${totalFeesSol}
+            WHERE "id" = ${tradeId}
+        `;
+    }
+
+    // profitUsd is Float? with no @default and no migration to backfill one, so a Prisma
+    // atomic `increment` (NULL + x = NULL in SQL) permanently leaves it NULL for every
+    // trade's first sell. Mirrors the incrementTradeFees COALESCE pattern above.
+    private async incrementTradeProfit(tradeId: number, profitUsd: number): Promise<void> {
+        await this.prismaService.$executeRaw`
+            UPDATE "Trade"
+            SET "profitUsd" = COALESCE("profitUsd", 0) + ${profitUsd}
             WHERE "id" = ${tradeId}
         `;
     }
@@ -1226,8 +1309,16 @@ export class TradeService implements OnModuleInit {
             `[Slot ${slotToUse}] Attempting to buy ${tokenMint} route=${route ?? 'GLOBAL'} with $${buyAmountUSD.toFixed(2)} (${amountInSol.toFixed(4)} SOL)`,
         );
 
-        const { success, entryPrice, error, txHash, actualSol, actualTokens, totalFeesSol } =
-            await this.executeJupiterSwap(
+        let {
+            success,
+            entryPrice,
+            error,
+            txHash,
+            actualSol,
+            actualTokens,
+            totalFeesSol,
+            jitoTipLamports,
+        } = await this.executeJupiterSwap(
                 WRAPPED_SOL_MINT,
                 tokenMint,
                 amountInLamports,
@@ -1240,6 +1331,91 @@ export class TradeService implements OnModuleInit {
                 effectiveDryRun,
                 route,
             );
+
+        // IDEMPOTENCY RECOVERY (finding: the shared post-broadcast guard orphans BUYs).
+        //
+        // SCOPE DISCLOSURE: this block is a DELIBERATE behavior change on the BUY path,
+        // outside the stop-loss/sell path the retry work targeted. It is NOT incidental
+        // scope creep — it is MANDATED by the project rule in .claude/CLAUDE.md: "Any code
+        // path that ... protects a live position MUST have ... an alert on final failure."
+        // The sell-path idempotency fix made the SHARED executeJupiterSwap return
+        // `post_broadcast_unconfirmed` for BUY too; without handling it here a BUY tx that
+        // actually LANDED becomes an orphaned, unmonitored bag (tokens in the wallet with no
+        // trade row -> no PriceMonitor, no stop-loss, no alert) — i.e. an unprotected open
+        // position, exactly what that rule forbids. Leaving BUY unchanged would therefore
+        // have INTRODUCED a rule violation, not preserved scope.
+        //
+        // executeJupiterSwap deliberately does NOT re-send after broadcast (a blind re-send
+        // could double-execute). SELL is reconciled on the next tick via
+        // pendingSellSignatures; a BUY has no tick loop, so reconcile the exact signature
+        // on-chain HERE: if the buy landed, recover it into a monitored trade using the real
+        // on-chain fill; otherwise fire a prominent alert so a possibly-open position is
+        // never silently lost.
+        if (
+            !success &&
+            !effectiveDryRun &&
+            typeof error === 'string' &&
+            error.startsWith('post_broadcast_unconfirmed') &&
+            txHash
+        ) {
+            const reconciled = await this.getActualSwapDetails(
+                txHash,
+                wallet.publicKey.toBase58(),
+                tokenMint,
+                // Real Jito tip paid for THIS broadcast attempt (0 if Jito wasn't used),
+                // returned by executeJupiterSwap above. Hardcoding 0 here would permanently
+                // undercount totalFeesSol for any BUY that had to go through this recovery path.
+                jitoTipLamports ?? 0,
+                'BUY',
+            );
+            if (reconciled && Math.abs(reconciled.tokenChange) > 0) {
+                const recTokens = Math.abs(reconciled.tokenChange);
+                const recSol = reconciled.cleanSolAmount ?? Math.abs(reconciled.solChange);
+                const recPrice = recTokens > 0 && solPrice ? (recSol * solPrice) / recTokens : 0;
+                if (recPrice > 0) {
+                    // The buy DID land — treat as success so the normal creation +
+                    // monitoring path below registers it (PriceMonitor picks up the DB row).
+                    success = true;
+                    actualSol = recSol;
+                    actualTokens = recTokens;
+                    totalFeesSol = reconciled.totalFeesSol;
+                    entryPrice = recPrice;
+                    error = undefined;
+                    this.logger.warn(
+                        `[BuyTrace] Recovered UNCONFIRMED BUY via on-chain reconciliation ` +
+                            `token=${tokenMint} chat=${telegramChatId} tx=${txHash} ` +
+                            `tokens=${recTokens} solSpent=${recSol} entryPrice=${recPrice}. ` +
+                            `Registering as a monitored trade.`,
+                    );
+                }
+            }
+            if (!success) {
+                // Could not confirm the buy landed (still in-flight, or genuinely failed).
+                // Never silently drop it — a tx that lands later would be unmonitored.
+                this.logger.error(
+                    `[BuyTrace] UNRECONCILED unconfirmed BUY token=${tokenMint} ` +
+                        `chat=${telegramChatId} tx=${txHash}. If it lands it will be UNMONITORED.`,
+                );
+                try {
+                    await this.reportingService.sendTradeFailureAlert({
+                        side: 'BUY',
+                        tokenMint,
+                        stage: 'CONFIRMATION',
+                        reason: `buy_broadcast_unconfirmed: ${error}`,
+                        amountUsd: buyAmountUSD,
+                        targetChatId,
+                        details:
+                            `BUY tx ${txHash} was broadcast but not confirmed and could not be ` +
+                            `reconciled on-chain. If it lands, the position will be UNMONITORED ` +
+                            `(no stop-loss). ACTIONABLE: check the signature and, if it landed, ` +
+                            `import/monitor it manually.`,
+                    });
+                } catch (alertErr) {
+                    const m = alertErr instanceof Error ? alertErr.message : String(alertErr);
+                    this.logger.error(`[BuyTrace] Failed to send unconfirmed-BUY alert: ${m}`);
+                }
+            }
+        }
 
         if (success && entryPrice > 0) {
             const finalAmountInSol = actualSol || amountInSol;
@@ -1294,69 +1470,142 @@ export class TradeService implements OnModuleInit {
                   })
                 : 0;
 
-            const savedTrade = existingOpenTrade
-                ? await this.prismaService.trade.update({
-                      where: { id: existingOpenTrade.id },
-                      data: {
-                          tokenMint,
-                          symbol: existingOpenTrade.symbol || symbol,
-                          slotNumber: existingOpenTrade.slotNumber,
-                          entryPrice: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
-                          highestPrice: mergedScaleIn?.mergedHighestPriceSol ?? entryPriceSol,
-                          trailingStopPrice: scaleInTrailingStopPrice,
-                          status: 'OPEN',
-                          mode: 'LIVE',
-                          route: existingOpenTrade.route ?? route ?? null,
-                          aiDecisionSnapshotId:
-                              existingOpenTrade.aiDecisionSnapshotId ?? aiDecisionSnapshotId ?? null,
-                          amountInSol: mergedScaleIn?.mergedAmountInSol ?? finalAmountInSol,
-                          buyTxHash: existingOpenTrade.buyTxHash || txHash || null,
-                          entryLiquidity:
-                              (existingOpenTrade.entryLiquidity ?? metadata?.liquidity) ?? 0,
-                          entryMarketCap:
-                              (existingOpenTrade.entryMarketCap ?? metadata?.marketCap) ?? 0,
-                          creatorAddress: existingOpenTrade.creatorAddress ?? metadata?.creator ?? null,
-                          topHolderAddress:
-                              existingOpenTrade.topHolderAddress ?? metadata?.topHolder ?? null,
-                          initialCreatorBalance:
-                              existingOpenTrade.initialCreatorBalance ?? initialCreatorBalance,
-                          initialTopHolderBalance:
-                              existingOpenTrade.initialTopHolderBalance ?? initialTopHolderBalance,
-                          targetTakeProfit:
-                              existingOpenTrade.targetTakeProfit ?? options?.targetTakeProfit,
-                          targetStopLoss:
-                              existingOpenTrade.targetStopLoss ?? options?.targetStopLoss,
-                          targetTrailingDistance:
-                              existingOpenTrade.targetTrailingDistance ?? options?.targetTrailingDistance,
-                          telegramChatId: tradeChatDbId || null,
-                      },
-                  })
-                : await this.prismaService.trade.create({
-                      data: {
-                          tokenMint,
-                          symbol,
-                          slotNumber: slotToUse,
-                          entryPrice: entryPriceSol,
-                          highestPrice: entryPriceSol,
-                          trailingStopPrice: 0, // PriceMonitor activates it once the position is in profit.
-                          status: 'OPEN',
-                          mode: 'LIVE',
-                          route,
-                          aiDecisionSnapshotId,
-                          amountInSol: finalAmountInSol,
-                          buyTxHash: txHash || null,
-                          entryLiquidity: metadata?.liquidity || 0,
-                          entryMarketCap: metadata?.marketCap || 0,
-                          creatorAddress: metadata?.creator,
-                          topHolderAddress: metadata?.topHolder,
-                          initialCreatorBalance,
-                          initialTopHolderBalance,
-                          targetTakeProfit: options?.targetTakeProfit,
-                          targetStopLoss: options?.targetStopLoss,
-                          targetTrailingDistance: options?.targetTrailingDistance,
-                          telegramChatId: tradeChatDbId || null,
-                      },
-                  });
+            let savedTrade: { id: number; slotNumber: number };
+            if (existingOpenTrade) {
+                // GUARDED WRITE (finding: scale-in-vs-close race). The on-chain reconciliation
+                // above this block can take up to ~10s (polling retries), so a concurrent
+                // executeSell can CLOSE this exact trade in that window. The previous
+                // unconditional `where: { id }` update would then silently resurrect the
+                // CLOSED trade back to OPEN using this stale pre-swap scale-in data. Guard the
+                // write with `status: 'OPEN'` and use updateMany (not update) so we can check
+                // the affected row count instead of relying on a thrown P2025.
+                //
+                // ADDITIONAL FIX (finding: scale-in-vs-partial-sell clobber): amountInSol /
+                // entryValueUsd / totalFeesSol below are written via Prisma's atomic
+                // `increment` with this FILL's own delta (finalAmountInSol / entryValueUsd /
+                // totalFeesSol), not `mergedScaleIn`'s absolute pre-confirmation sum. A
+                // concurrent partial-sell's atomic `multiply` (see recordExecutedSell) can
+                // land on these same columns between the `existingOpenTrade` read above and
+                // this write; incrementing by the fill's own delta -- instead of overwriting
+                // with a sum computed from the stale snapshot -- applies on top of whatever
+                // value is currently in the row, so it can never clobber that concurrent write
+                // regardless of ordering. entryPrice/highestPrice/solPriceAtEntry remain
+                // weighted-average values that cannot be expressed as a Prisma atomic
+                // operator; they keep using `mergedScaleIn`'s stale-snapshot computation (a
+                // separate, narrower, already-flagged gap -- see MINOR note on the sell side).
+                const scaleInUpdate = await this.prismaService.trade.updateMany({
+                    where: { id: existingOpenTrade.id, status: 'OPEN' },
+                    data: {
+                        tokenMint,
+                        symbol: existingOpenTrade.symbol || symbol,
+                        slotNumber: existingOpenTrade.slotNumber,
+                        entryPrice: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
+                        highestPrice: mergedScaleIn?.mergedHighestPriceSol ?? entryPriceSol,
+                        trailingStopPrice: scaleInTrailingStopPrice,
+                        status: 'OPEN',
+                        mode: 'LIVE',
+                        route: existingOpenTrade.route ?? route ?? null,
+                        aiDecisionSnapshotId:
+                            existingOpenTrade.aiDecisionSnapshotId ?? aiDecisionSnapshotId ?? null,
+                        amountInSol: { increment: finalAmountInSol },
+                        buyTxHash: existingOpenTrade.buyTxHash || txHash || null,
+                        entryLiquidity:
+                            (existingOpenTrade.entryLiquidity ?? metadata?.liquidity) ?? 0,
+                        entryMarketCap:
+                            (existingOpenTrade.entryMarketCap ?? metadata?.marketCap) ?? 0,
+                        creatorAddress: existingOpenTrade.creatorAddress ?? metadata?.creator ?? null,
+                        topHolderAddress:
+                            existingOpenTrade.topHolderAddress ?? metadata?.topHolder ?? null,
+                        initialCreatorBalance:
+                            existingOpenTrade.initialCreatorBalance ?? initialCreatorBalance,
+                        initialTopHolderBalance:
+                            existingOpenTrade.initialTopHolderBalance ?? initialTopHolderBalance,
+                        targetTakeProfit:
+                            existingOpenTrade.targetTakeProfit ?? options?.targetTakeProfit,
+                        targetStopLoss:
+                            existingOpenTrade.targetStopLoss ?? options?.targetStopLoss,
+                        targetTrailingDistance:
+                            existingOpenTrade.targetTrailingDistance ?? options?.targetTrailingDistance,
+                        telegramChatId: tradeChatDbId || null,
+                        // Folded into this SAME guarded updateMany (rather than a separate
+                        // unguarded `where: { id }` write afterward) so there is no second
+                        // write-gap for a concurrent SELL's CLOSE update to land in and get
+                        // silently overwritten with stale pre-close scale-in data.
+                        solPriceAtEntry: mergedScaleIn?.mergedSolPriceAtEntry ?? solPrice,
+                        entryValueUsd: { increment: entryValueUsd },
+                        totalFeesSol: { increment: totalFeesSol || 0 },
+                    },
+                });
+                if (scaleInUpdate.count === 0) {
+                    // Trade was already CLOSED by a concurrent sell by the time this scale-in
+                    // buy reconciled. Do NOT resurrect it. The buy DID land on-chain -- those
+                    // extra tokens/SOL are real and now unaccounted for on the (closed) trade
+                    // row -- so surface it loudly for manual reconciliation instead of silently
+                    // reopening a trade the sell path already closed.
+                    this.logger.error(
+                        `[BuyTrace] SCALE-IN RACE: buy for ${tokenMint} chat=${telegramChatId} ` +
+                            `tx=${txHash || 'n/a'} landed on-chain (solSpent=${finalAmountInSol}, ` +
+                            `tokens=${actualTokens ?? 'unknown'}) but existing trade ` +
+                            `id=${existingOpenTrade.id} was already CLOSED (concurrent sell) by the ` +
+                            `time of reconciliation. Skipped DB resurrection. ACTIONABLE: manually ` +
+                            `reconcile the extra tokens/SOL against trade id=${existingOpenTrade.id}.`,
+                    );
+                    try {
+                        // NOT sendTradeFailureAlert: that template hardcodes "EXECUTION FAILED" /
+                        // "No live trade was opened", both false here -- the buy DID land on-chain.
+                        await this.reportingService.sendTradeReconciliationAlert({
+                            side: 'BUY',
+                            tokenMint,
+                            symbol: existingOpenTrade.symbol || undefined,
+                            reason: `scale_in_race_closed: ${existingOpenTrade.id}`,
+                            targetChatId,
+                            details:
+                                `Scale-in BUY tx ${txHash || 'n/a'} landed on-chain (solSpent=` +
+                                `${finalAmountInSol}, tokens=${actualTokens ?? 'unknown'}) but trade ` +
+                                `id=${existingOpenTrade.id} was already CLOSED by a concurrent sell. ` +
+                                `DB was NOT updated. ACTIONABLE: manually reconcile the extra ` +
+                                `tokens/SOL against trade id=${existingOpenTrade.id}.`,
+                        });
+                    } catch (alertErr) {
+                        const m = alertErr instanceof Error ? alertErr.message : String(alertErr);
+                        this.logger.error(`[BuyTrace] Failed to send scale-in-race alert: ${m}`);
+                    }
+                    return {
+                        success: true,
+                        message:
+                            `Scale-in buy for ${tokenMint} landed on-chain but the trade was already ` +
+                            `closed by a concurrent sell; skipped DB update. Manual reconciliation required.`,
+                    };
+                }
+                savedTrade = { id: existingOpenTrade.id, slotNumber: existingOpenTrade.slotNumber };
+            } else {
+                savedTrade = await this.prismaService.trade.create({
+                    data: {
+                        tokenMint,
+                        symbol,
+                        slotNumber: slotToUse,
+                        entryPrice: entryPriceSol,
+                        highestPrice: entryPriceSol,
+                        trailingStopPrice: 0, // PriceMonitor activates it once the position is in profit.
+                        status: 'OPEN',
+                        mode: 'LIVE',
+                        route,
+                        aiDecisionSnapshotId,
+                        amountInSol: finalAmountInSol,
+                        buyTxHash: txHash || null,
+                        entryLiquidity: metadata?.liquidity || 0,
+                        entryMarketCap: metadata?.marketCap || 0,
+                        creatorAddress: metadata?.creator,
+                        topHolderAddress: metadata?.topHolder,
+                        initialCreatorBalance,
+                        initialTopHolderBalance,
+                        targetTakeProfit: options?.targetTakeProfit,
+                        targetStopLoss: options?.targetStopLoss,
+                        targetTrailingDistance: options?.targetTrailingDistance,
+                        telegramChatId: tradeChatDbId || null,
+                    },
+                });
+            }
 
             if (!existingOpenTrade) {
                 await this.updateTradeAuditFields(savedTrade.id, {
@@ -1364,16 +1613,9 @@ export class TradeService implements OnModuleInit {
                     entryValueUsd,
                     totalFeesSol: totalFeesSol || 0,
                 });
-            } else {
-                await this.prismaService.trade.update({
-                    where: { id: savedTrade.id },
-                    data: {
-                        solPriceAtEntry: mergedScaleIn?.mergedSolPriceAtEntry ?? solPrice,
-                        entryValueUsd: mergedScaleIn?.mergedEntryValueUsd ?? entryValueUsd,
-                        totalFeesSol: mergedScaleIn?.mergedTotalFeesSol ?? (totalFeesSol || 0),
-                    },
-                });
             }
+            // else: scale-in already wrote solPriceAtEntry/entryValueUsd/totalFeesSol as part
+            // of the guarded updateMany above -- no separate write needed (see comment there).
 
             if (existingOpenTrade) {
                 this.logger.log(
@@ -1488,6 +1730,114 @@ export class TradeService implements OnModuleInit {
                     );
                     return false;
                 }
+                // IDEMPOTENCY RECONCILIATION (finding: post-broadcast guard discarded txid).
+                // If a previous sell for this trade was broadcast but left UNCONFIRMED, resolve
+                // that exact tx's on-chain fate BEFORE re-selling. This closes the double-sell
+                // race: within the tx validity window the balance snapshot still shows the
+                // un-sold tokens, so a blind re-sell would double-execute if the in-flight tx
+                // then lands. After the validity window the balance is authoritative (a landed
+                // tx has already reduced it), so a re-sell is safe.
+                const pending = this.pendingSellSignatures.get(tradeId);
+                if (pending) {
+                    const fate = await this.resolveSignatureFate(pending);
+                    if (fate === 'UNKNOWN') {
+                        this.logger.warn(
+                            `[Trade ${tradeId}] Prior sell tx ${pending.signature} still unconfirmed ` +
+                                `and within its validity window — skipping this sell tick to avoid ` +
+                                `double-execution. Will reconcile again on the next tick.`,
+                        );
+                        return false;
+                    }
+                    if (fate === 'LANDED_OK') {
+                        // The prior broadcast sell ACTUALLY EXECUTED on-chain. Do NOT fall through
+                        // to a fresh balance read: for a full exit the balance is now ≈0, so the
+                        // zero-balance path would close the trade at exitPrice:0 / profitUsd:0 with
+                        // no sell alert — the realized SOL proceeds would be lost and the operator
+                        // never told. For a partial exit the balance read would re-sell the reduced
+                        // runner, over-exiting it. Instead recover the real fill (mirroring the BUY
+                        // reconciliation path) and record it exactly like a normal successful sell.
+                        this.pendingSellSignatures.delete(tradeId);
+                        const recWallet = await this.telegramWorkspace.getWalletKeypairByChatDbId(
+                            trade.telegramChatId,
+                        );
+                        const recDetails = await this.getActualSwapDetails(
+                            pending.signature,
+                            recWallet.publicKey.toBase58(),
+                            trade.tokenMint,
+                            // Real Jito tip paid on the ORIGINAL broadcast, persisted in
+                            // PendingSellStore at the time of that broadcast. Hardcoding 0
+                            // here would permanently undercount totalFeesSol for any SELL
+                            // that had to go through this cross-tick recovery path.
+                            pending.jitoTipLamports ?? 0,
+                            'SELL',
+                        );
+                        if (recDetails && Math.abs(recDetails.tokenChange) > 0) {
+                            const recTokens = Math.abs(recDetails.tokenChange);
+                            const recSol = recDetails.cleanSolAmount ?? Math.abs(recDetails.solChange);
+                            const recPercentage = pending.percentage ?? percentage;
+                            const recExitReason = pending.exitReason ?? exitReason;
+                            this.logger.warn(
+                                `[Trade ${tradeId}] Reconciled LANDED prior sell ${pending.signature}: ` +
+                                    `recovered fill tokens=${recTokens} sol=${recSol} pct=${recPercentage} ` +
+                                    `reason=${recExitReason}. Recording realized proceeds (no re-sell).`,
+                            );
+                            return await this.recordExecutedSell({
+                                trade,
+                                tradeId,
+                                percentage: recPercentage,
+                                exitReason: recExitReason,
+                                sellAmount: recTokens,
+                                exitPriceResult: undefined,
+                                actualSol: recSol,
+                                actualTokens: recTokens,
+                                txHash: pending.signature,
+                                totalFeesSol: recDetails.totalFeesSol,
+                                tradeDryRun,
+                                targetChatId,
+                                forceLive,
+                            });
+                        }
+                        // The tx landed but its fill could not be parsed on-chain. Falling through
+                        // to a balance-based sell here is unsafe (full exit → exitPrice:0 close with
+                        // lost proceeds; partial → re-sell of the runner). Bail loudly so an operator
+                        // can reconcile manually, per the project position-protection rule.
+                        this.logger.error(
+                            `[Trade ${tradeId}] Prior sell ${pending.signature} LANDED but its fill ` +
+                                `could not be recovered on-chain. Skipping this tick; manual ` +
+                                `reconciliation required. Trade left OPEN.`,
+                        );
+                        try {
+                            // NOT sendTradeFailureAlert: that template hardcodes "EXECUTION FAILED" /
+                            // "No live trade was opened", both false here -- the sell DID land on-chain
+                            // and the trade is still OPEN.
+                            await this.reportingService.sendTradeReconciliationAlert({
+                                side: 'SELL',
+                                tokenMint: trade.tokenMint,
+                                symbol: trade.symbol || undefined,
+                                reason: `sell_landed_unrecovered: ${pending.signature}`,
+                                targetChatId,
+                                details:
+                                    `A prior SELL tx ${pending.signature} landed on-chain but its ` +
+                                    `realized proceeds could not be parsed, so the trade row was NOT ` +
+                                    `updated. ACTIONABLE: inspect the signature and reconcile the ` +
+                                    `position manually.`,
+                            });
+                        } catch (alertErr) {
+                            const m =
+                                alertErr instanceof Error ? alertErr.message : String(alertErr);
+                            this.logger.error(
+                                `[Trade ${tradeId}] Failed to send landed-unrecovered alert: ${m}`,
+                            );
+                        }
+                        return false;
+                    }
+                    // LANDED_FAILED / NOT_FOUND: the tx will never land — safe to re-sell.
+                    this.pendingSellSignatures.delete(tradeId);
+                    this.logger.log(
+                        `[Trade ${tradeId}] Reconciled prior unconfirmed sell ${pending.signature}: ` +
+                            `${fate}. Proceeding with balance-checked sell.`,
+                    );
+                }
                 const wallet = await this.telegramWorkspace.getWalletKeypairByChatDbId(
                     trade.telegramChatId,
                 );
@@ -1522,10 +1872,18 @@ export class TradeService implements OnModuleInit {
                     `[Slot ${trade.slotNumber}] ⚠️ Zero balance for ${trade.tokenMint}. Closing trade.`,
                 );
                 if (percentage >= 1.0) {
-                    await this.prismaService.trade.update({
-                        where: { id: tradeId },
+                    // Guarded like the full-close/partial-sell writes below: a concurrent
+                    // writer may have already closed this trade, so only flip status when
+                    // it is still OPEN rather than unconditionally overwriting it.
+                    const zeroBalanceUpdate = await this.prismaService.trade.updateMany({
+                        where: { id: tradeId, status: 'OPEN' },
                         data: { status: 'CLOSED', exitPrice: 0, profitUsd: 0, exitReason },
                     });
+                    if (zeroBalanceUpdate.count === 0) {
+                        this.logger.warn(
+                            `[Slot ${trade.slotNumber}] Zero-balance close for trade ${tradeId} skipped: already closed by a concurrent writer.`,
+                        );
+                    }
                 }
                 return false;
             }
@@ -1537,6 +1895,7 @@ export class TradeService implements OnModuleInit {
             // 2. PANIC SLIPPAGE: Kalau SL, Trailing Stop, atau Rugpull, hajar slippage 15% (1500 bps) biar pasti laku
             const isUrgent = [
                 'STOP_LOSS',
+                'STOP_LOSS_ZONE_TIMEOUT',
                 'TRAILING_STOP',
                 'DEV_DUMP',
                 'RUGPULL',
@@ -1565,6 +1924,7 @@ export class TradeService implements OnModuleInit {
                 actualSol,
                 actualTokens,
                 totalFeesSol,
+                jitoTipLamports,
             } = await this.executeJupiterSwap(
                 trade.tokenMint,
                 'So11111111111111111111111111111111111111112',
@@ -1582,185 +1942,96 @@ export class TradeService implements OnModuleInit {
             );
 
             if (success) {
-                const quotedExitPrice = exitPriceResult || 0;
-                const liveSellSolPrice = await this.getSolPriceOrNull();
-                const safeSellSolPrice = resolveSafeSellSolPrice(
-                    liveSellSolPrice ?? 0,
-                    trade.solPriceAtEntry,
-                );
-
-                const fallbackSolPrice = safeSellSolPrice.solPrice || trade.solPriceAtEntry || 0;
-                const finalSolReceived = actualSol || (fallbackSolPrice > 0 ? (sellAmount * quotedExitPrice) / fallbackSolPrice : 0);
-                const finalTokensSold = actualTokens || sellAmount;
-                const entrySolValue = trade.amountInSol * percentage;
-                const realizedPnl = calculateRealizedSellPnl({
-                    solSpent: entrySolValue,
-                    solReceived: finalSolReceived,
-                    entrySolPrice: trade.solPriceAtEntry,
-                    sellSolPrice: safeSellSolPrice.solPrice,
-                });
-                const exitPrice =
-                    finalTokensSold > 0 && safeSellSolPrice.solPrice > 0
-                        ? (finalSolReceived * safeSellSolPrice.solPrice) / finalTokensSold
-                        : quotedExitPrice;
-                const profit = realizedPnl.usdProfitPercent;
-                const estimatedProfitUsd = realizedPnl.usdProfit;
-                const exitValueUsd = realizedPnl.usdReceived;
-                const totalUsdSpent = realizedPnl.usdSpent;
-                const totalUsdReceived = realizedPnl.usdReceived;
-                const solProfitPercent = realizedPnl.solProfitPercent;
-
-                this.logger.log(
-                    `[PNL] source=actual_sol token=${trade.tokenMint} solPnl=${solProfitPercent.toFixed(2)}% usdPnl=${profit.toFixed(2)}% solPriceSource=${safeSellSolPrice.source}`,
-                );
-                if (safeSellSolPrice.source !== 'live') {
-                    this.logger.warn(
-                        `[PNL] Live SOL price unavailable for ${trade.tokenMint}. USD sell report uses ${safeSellSolPrice.source}.`,
-                    );
-                }
-
-                // ✅ DATABASE UPDATE: Hanya dilakukan jika transaksi Solana SUKSES
-                if (percentage >= 1.0) {
-                    await this.prismaService.trade.update({
-                        where: { id: tradeId },
-                        data: {
-                            status: 'CLOSED',
-                            exitPrice,
-                            exitReason,
-                            sellTxHash: txHash || null,
-                            profitUsd: (trade.profitUsd || 0) + estimatedProfitUsd,
-                        },
-                    });
-                } else {
-                    const remainingEntryValueUsd =
-                        trade.entryValueUsd !== null && trade.entryValueUsd !== undefined
-                            ? trade.entryValueUsd * (1 - percentage)
-                            : undefined;
-                    const partialTakeProfitAt =
-                        exitReason === 'PARTIAL_TAKE_PROFIT'
-                            ? new Date()
-                            : trade.partialTakeProfitAt;
-                    const runnerFloorPercent = Number.parseFloat(
-                        this.configService.get<string>('RUNNER_BREAKEVEN_FLOOR_PERCENT') || '8',
-                    );
-                    const exitPriceSolForRunner =
-                        finalTokensSold > 0 ? finalSolReceived / finalTokensSold : 0;
-                    const runnerFloorPrice =
-                        trade.entryPrice *
-                        (1 + (Number.isFinite(runnerFloorPercent) ? runnerFloorPercent : 8) / 100);
-                    const runnerStopPrice =
-                        exitReason === 'PARTIAL_TAKE_PROFIT'
-                            ? // Never let the break-even floor sit at/above the current price, or the
-                              // runner would be liquidated on the next tick (guards a misconfigured
-                              // floor set above the take-profit trigger). exitPrice = partial-TP price.
-                              Math.min(runnerFloorPrice, exitPriceSolForRunner * 0.999)
-                            : trade.trailingStopPrice;
-
-                    await this.prismaService.trade.update({
-                        where: { id: tradeId },
-                        data: {
-                            amountInSol: trade.amountInSol * (1 - percentage),
-                            entryValueUsd: remainingEntryValueUsd,
-                            partialTakeProfitAt,
-                            trailingStopPrice: runnerStopPrice,
-                            profitUsd: (trade.profitUsd || 0) + estimatedProfitUsd,
-                        },
-                    });
-                }
-                if (totalFeesSol) {
-                    await this.incrementTradeFees(tradeId, totalFeesSol);
-                }
-
-                // 🧑‍💻 AUTO BLACKLIST ON DEV_DUMP/RUGPULL (Self-Learning)
-                if (['DEV_DUMP', 'RUGPULL'].includes(exitReason) && trade.creatorAddress) {
-                    try {
-                        const existingProfile = await this.prismaService.creatorProfile.findUnique({
-                            where: { address: trade.creatorAddress },
-                        });
-                        const ruggedCount = (existingProfile?.ruggedTokens || 0) + 1;
-                        const createdCount = existingProfile?.tokensCreated || 1;
-                        const tags = new Set(existingProfile?.tags || []);
-                        tags.add('Serial Rugger');
-
-                        await this.prismaService.creatorProfile.upsert({
-                            where: { address: trade.creatorAddress },
-                            update: {
-                                reason: exitReason,
-                                ruggedTokens: ruggedCount,
-                                isBlacklisted: true,
-                                riskScore: 100, // Instant blacklist
-                                tags: Array.from(tags),
-                                lastActiveAt: new Date(),
-                            },
-                            create: {
-                                address: trade.creatorAddress,
-                                reason: exitReason,
-                                tokensCreated: createdCount,
-                                ruggedTokens: 1,
-                                isBlacklisted: true,
-                                riskScore: 100,
-                                tags: ['Serial Rugger'],
-                            },
-                        });
-                        this.logger.warn(
-                            `[Blacklist] Automatically blacklisted creator ${trade.creatorAddress} for: ${exitReason}`,
-                        );
-                    } catch (dbErr) {
-                        const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
-                        this.logger.error(
-                            `[Blacklist] Failed to blacklist creator ${trade.creatorAddress}: ${msg}`,
-                        );
-                    }
-                }
-
-                const entryPriceUsdForReport =
-                    finalTokensSold > 0 && trade.solPriceAtEntry
-                        ? (entrySolValue / finalTokensSold) * trade.solPriceAtEntry
-                        : trade.entryPrice;
-
-                await this.reportingService.sendSellAlert(
-                    trade.tokenMint,
-                    exitPrice,
-                    profit,
+                return await this.recordExecutedSell({
+                    trade,
+                    tradeId,
+                    percentage,
                     exitReason,
-                    trade.symbol || undefined,
-                    {
-                        entryPriceUsd: entryPriceUsdForReport,
-                        exitPriceUsd: exitPrice,
-                        entryPriceSol: entrySolValue / finalTokensSold,
-                        exitPriceSol: finalSolReceived / finalTokensSold,
-                        solSpent: entrySolValue,
-                        solReceived: finalSolReceived,
-                        solProfitPercent,
-                        usdSpent: totalUsdSpent,
-                        usdReceived: totalUsdReceived,
-                    },
+                    sellAmount,
+                    exitPriceResult,
+                    actualSol,
+                    actualTokens,
+                    txHash,
+                    totalFeesSol,
                     tradeDryRun,
                     targetChatId,
-                );
-                if (!forceLive) {
-                    await this.reportingService.sendSwapResultReport({
-                        side: 'SELL',
-                        tokenMint: trade.tokenMint,
-                        symbol: trade.symbol || undefined,
-                        success: true,
-                        amountUsd: exitValueUsd,
-                        amountSol: finalSolReceived,
-                        txHash,
-                        dryRun: tradeDryRun,
-                        targetChatId,
-                        details: `Exit reason: ${exitReason.replace(/_/g, ' ')}`,
-                    });
-                }
-                return true;
+                    forceLive,
+                });
             }
 
             // ❌ SELL FAILED — trade tetap OPEN (tidak pernah di-CLOSED sebelum swap)
             this.logger.error(
                 `[Slot ${trade.slotNumber}] ❌ SELL FAILED on Solana: ${error}. Trade remains OPEN for retry.`,
             );
+            // IDEMPOTENCY (finding: post-broadcast guard discarded txid): a broadcast-but-
+            // unconfirmed sell tx is AMBIGUOUS — it may still land. Record its deterministic
+            // signature so the NEXT executeSell reconciles it on-chain (via the gate above)
+            // before re-selling, instead of blind-selling a possibly-stale balance snapshot
+            // (which double-sells if the in-flight tx lands). Only set for live trades that
+            // actually returned a signature.
+            if (!tradeDryRun && error?.startsWith('post_broadcast_unconfirmed') && txHash) {
+                this.pendingSellSignatures.set(tradeId, {
+                    signature: txHash,
+                    recordedAt: Date.now(),
+                    // Persist the exit size/reason so a later LANDED_OK reconciliation
+                    // finalizes with the ORIGINAL intent — a full exit closes, a partial
+                    // reduces the runner — instead of guessing from the current tick.
+                    percentage,
+                    exitReason,
+                    // Persist the REAL tip paid on this broadcast so a later LANDED_OK
+                    // reconciliation (which happens on a subsequent tick, after this call's
+                    // local jitoTipLamports has gone out of scope) can pass it to
+                    // getActualSwapDetails instead of hardcoding 0 and undercounting fees.
+                    jitoTipLamports: jitoTipLamports ?? 0,
+                });
+                this.logger.warn(
+                    `[Trade ${tradeId}] SELL broadcast but UNCONFIRMED (sig=${txHash}). ` +
+                        `Recorded for on-chain reconciliation before any re-sell to avoid double-execution.`,
+                );
+            }
             if (error?.startsWith('price_anomaly')) {
                 this.queuePriceAnomalyRetry(tradeId, currentPrice, exitReason, percentage);
+            }
+
+            // ESCALATION (proposal solana-stoploss-retry, requirement 4): a position-protecting
+            // exit (stop-loss / trailing / rug / panic) that keeps failing while the position is
+            // still OPEN is a real-money hazard, not a routine swap miss. Track consecutive
+            // failures and, once the per-tick retry budget is exhausted, fire the project's
+            // existing prominent failure alert (sendTradeFailureAlert) instead of only the routine
+            // swap-result report, plus an ACTIONABLE console line for operators tailing logs.
+            if (isUrgent) {
+                const failures = (this.consecutiveSellFailures.get(tradeId) || 0) + 1;
+                this.consecutiveSellFailures.set(tradeId, failures);
+                const alertThreshold = Number.parseInt(
+                    this.configService.get<string>('STOP_LOSS_ALERT_AFTER_FAILURES', '3'),
+                    10,
+                );
+                const threshold = Number.isFinite(alertThreshold) && alertThreshold > 0 ? alertThreshold : 3;
+                if (failures >= threshold) {
+                    // eslint-disable-next-line no-console
+                    console.error(
+                        `[ACTIONABLE][STOP-LOSS] Trade ${tradeId} (${trade.symbol || trade.tokenMint}) ` +
+                            `has FAILED to exit ${failures}x consecutively (reason=${exitReason}); position is STILL OPEN. ` +
+                            `Manual intervention likely required. Last error: ${error || 'unknown'}`,
+                    );
+                    try {
+                        await this.reportingService.sendTradeFailureAlert({
+                            side: 'SELL',
+                            tokenMint: trade.tokenMint,
+                            symbol: trade.symbol || undefined,
+                            stage: 'SWAP',
+                            reason: `stop_loss_stuck_open_x${failures}: ${error || 'unknown'}`,
+                            amountUsd: sellAmount * currentPrice,
+                            targetChatId,
+                            details:
+                                `${exitReason.replace(/_/g, ' ')} could not execute after ${failures} attempts. ` +
+                                `Position is STILL OPEN and exposed. ACTIONABLE: check RPC/DEX health or exit manually.`,
+                        });
+                    } catch (alertErr) {
+                        const msg = alertErr instanceof Error ? alertErr.message : String(alertErr);
+                        this.logger.error(`[Trade ${tradeId}] Failed to send stop-loss escalation alert: ${msg}`);
+                    }
+                }
             }
             if (!forceLive) {
                 await this.reportingService.sendSwapResultReport({
@@ -1796,6 +2067,338 @@ export class TradeService implements OnModuleInit {
         } finally {
             this.sellingTrades.delete(tradeId);
         }
+    }
+
+    /**
+     * Record an executed sell fill into the DB (CLOSE for a full exit, reduce+runner
+     * for a partial) and fire the sell alert / swap-result report. Extracted from the
+     * inline post-swap success path so the LANDED_OK reconciliation path records a
+     * recovered on-chain fill through the SAME logic (identical PnL, close/partial and
+     * alerting) instead of falling through to a balance read that loses proceeds.
+     */
+    private async recordExecutedSell(params: {
+        trade: PrismaTrade & TradeAuditFields;
+        tradeId: number;
+        percentage: number;
+        exitReason: string;
+        sellAmount: number;
+        exitPriceResult: number | undefined;
+        actualSol: number | undefined;
+        actualTokens: number | undefined;
+        txHash: string | undefined;
+        totalFeesSol: number | undefined;
+        tradeDryRun: boolean;
+        targetChatId: string | undefined;
+        forceLive: boolean;
+    }): Promise<boolean> {
+        const {
+            trade,
+            tradeId,
+            percentage,
+            exitReason,
+            sellAmount,
+            exitPriceResult,
+            actualSol,
+            actualTokens,
+            txHash,
+            totalFeesSol,
+            tradeDryRun,
+            targetChatId,
+            forceLive,
+        } = params;
+        const quotedExitPrice = exitPriceResult || 0;
+        // 'SELL' priority: this feeds realizedPnl/exitPrice persisted to the trade record below
+        // for a completed sell — real financial recording, not a display-only lookup — so it
+        // must not queue behind the (lower-priority) BUY lane.
+        const liveSellSolPrice = await this.getSolPriceOrNull('SELL');
+        const safeSellSolPrice = resolveSafeSellSolPrice(
+            liveSellSolPrice ?? 0,
+            trade.solPriceAtEntry,
+        );
+
+        const fallbackSolPrice = safeSellSolPrice.solPrice || trade.solPriceAtEntry || 0;
+        const finalSolReceived = actualSol || (fallbackSolPrice > 0 ? (sellAmount * quotedExitPrice) / fallbackSolPrice : 0);
+        const finalTokensSold = actualTokens || sellAmount;
+        const entrySolValue = trade.amountInSol * percentage;
+        const realizedPnl = calculateRealizedSellPnl({
+            solSpent: entrySolValue,
+            solReceived: finalSolReceived,
+            entrySolPrice: trade.solPriceAtEntry,
+            sellSolPrice: safeSellSolPrice.solPrice,
+        });
+        const exitPrice =
+            finalTokensSold > 0 && safeSellSolPrice.solPrice > 0
+                ? (finalSolReceived * safeSellSolPrice.solPrice) / finalTokensSold
+                : quotedExitPrice;
+        const profit = realizedPnl.usdProfitPercent;
+        const estimatedProfitUsd = realizedPnl.usdProfit;
+        const exitValueUsd = realizedPnl.usdReceived;
+        const totalUsdSpent = realizedPnl.usdSpent;
+        const totalUsdReceived = realizedPnl.usdReceived;
+        const solProfitPercent = realizedPnl.solProfitPercent;
+
+        this.logger.log(
+            `[PNL] source=actual_sol token=${trade.tokenMint} solPnl=${solProfitPercent.toFixed(2)}% usdPnl=${profit.toFixed(2)}% solPriceSource=${safeSellSolPrice.source}`,
+        );
+        if (safeSellSolPrice.source !== 'live') {
+            this.logger.warn(
+                `[PNL] Live SOL price unavailable for ${trade.tokenMint}. USD sell report uses ${safeSellSolPrice.source}.`,
+            );
+        }
+
+        // ✅ DATABASE UPDATE: Hanya dilakukan jika transaksi Solana SUKSES
+        // GUARDED WRITE (finding: full-close branch had no status guard while the
+        // partial-sell branch below did, and used a stale-snapshot absolute `profitUsd`
+        // add). Mirror the partial-sell branch: guard with `status: 'OPEN'` via
+        // updateMany. profitUsd itself is intentionally NOT part of this updateMany --
+        // it's Float? with no @default, and Prisma's atomic `increment` is NULL-propagating
+        // (NULL + x = NULL in SQL), which would permanently pin it at NULL. It's applied
+        // afterwards via incrementTradeProfit(), a raw-SQL COALESCE("profitUsd", 0) + x
+        // write, same pattern as incrementTradeFees below. `dbUpdateOk` gates every
+        // downstream side effect below (profit/fee increment, sell alert, swap-result
+        // report, return value) so a race-lost write never reports fabricated success.
+        let dbUpdateOk: boolean;
+        if (percentage >= 1.0) {
+            const fullCloseUpdate = await this.prismaService.trade.updateMany({
+                where: { id: tradeId, status: 'OPEN' },
+                data: {
+                    status: 'CLOSED',
+                    exitPrice,
+                    exitReason,
+                    sellTxHash: txHash || null,
+                },
+            });
+            dbUpdateOk = fullCloseUpdate.count > 0;
+            if (!dbUpdateOk) {
+                // The sell already landed on-chain but the trade row was no longer OPEN by
+                // the time this write ran (mirrors the partial-sell race below). Do NOT
+                // write -- surface loudly for manual reconciliation instead.
+                this.logger.error(
+                    `[Trade ${tradeId}] FULL SELL tx ${txHash || 'n/a'} landed on-chain ` +
+                        `(sol=${finalSolReceived}, tokens=${finalTokensSold}) but the trade row ` +
+                        `was no longer OPEN at write time. DB was NOT updated. ACTIONABLE: ` +
+                        `manually reconcile the realized proceeds against trade id=${tradeId}.`,
+                );
+                try {
+                    // NOT sendTradeFailureAlert: that template hardcodes "EXECUTION FAILED" /
+                    // "No live trade was opened", both false here -- the sell DID land on-chain.
+                    await this.reportingService.sendTradeReconciliationAlert({
+                        side: 'SELL',
+                        tokenMint: trade.tokenMint,
+                        symbol: trade.symbol || undefined,
+                        reason: `full_sell_race_closed: ${tradeId}`,
+                        targetChatId,
+                        details:
+                            `Full SELL tx ${txHash || 'n/a'} landed on-chain (sol=` +
+                            `${finalSolReceived}, tokens=${finalTokensSold}) but trade ` +
+                            `id=${tradeId} was no longer OPEN when the DB write ran. DB was NOT ` +
+                            `updated. ACTIONABLE: manually reconcile the realized proceeds ` +
+                            `against trade id=${tradeId}.`,
+                    });
+                } catch (alertErr) {
+                    const m = alertErr instanceof Error ? alertErr.message : String(alertErr);
+                    this.logger.error(
+                        `[Trade ${tradeId}] Failed to send full-sell-race alert: ${m}`,
+                    );
+                }
+            }
+        } else {
+            const partialTakeProfitAt =
+                exitReason === 'PARTIAL_TAKE_PROFIT'
+                    ? new Date()
+                    : trade.partialTakeProfitAt;
+            const runnerFloorPercent = Number.parseFloat(
+                this.configService.get<string>('RUNNER_BREAKEVEN_FLOOR_PERCENT') || '8',
+            );
+            const exitPriceSolForRunner =
+                finalTokensSold > 0 ? finalSolReceived / finalTokensSold : 0;
+            // undefined (not trade.trailingStopPrice) when this exit isn't a partial-TP: the
+            // field is intentionally omitted from the write below rather than rewritten with
+            // its own stale snapshot value (see guard comment).
+            let runnerStopPrice: number | undefined;
+            if (exitReason === 'PARTIAL_TAKE_PROFIT') {
+                // Finding (MINOR): the floor used to be computed from `trade.entryPrice`, the
+                // pre-swap snapshot read at the top of executeSell -- a concurrent scale-in
+                // that changes entryPrice during the swap confirmation window (can take
+                // seconds) would still floor the runner off the stale entry price. Re-read
+                // entryPrice immediately before use to shrink that staleness window down to
+                // this single query. Narrow blast radius: only this PARTIAL_TAKE_PROFIT floor
+                // value, not principal/PnL accounting -- those are already race-safe above.
+                const freshEntryPriceRow = await this.prismaService.trade.findUnique({
+                    where: { id: tradeId },
+                    select: { entryPrice: true },
+                });
+                const currentEntryPrice = freshEntryPriceRow?.entryPrice ?? trade.entryPrice;
+                const runnerFloorPrice =
+                    currentEntryPrice *
+                    (1 + (Number.isFinite(runnerFloorPercent) ? runnerFloorPercent : 8) / 100);
+                // Never let the break-even floor sit at/above the current price, or the
+                // runner would be liquidated on the next tick (guards a misconfigured floor
+                // set above the take-profit trigger). exitPrice = partial-TP price.
+                runnerStopPrice = Math.min(runnerFloorPrice, exitPriceSolForRunner * 0.999);
+            }
+
+            // GUARDED WRITE (finding: partial-sell vs scale-in race). `trade` here is a
+            // snapshot read at the top of executeSell, before the swap broadcast/confirmation
+            // (which can take seconds) -- a concurrent scale-in buy's guarded updateMany
+            // (above, ~line 1471) can land in that window and update these SAME columns on
+            // this SAME row. The previous unconditional `where: { id }` `update` wrote
+            // absolute values computed from this stale snapshot, silently discarding
+            // whichever side wrote last. amountInSol/entryValueUsd are now written with
+            // Prisma's atomic `multiply` operator -- the DB applies it to whatever value is
+            // currently in the row, so it can never clobber a concurrent write regardless of
+            // ordering. trailingStopPrice is only included when this exit actually intends to
+            // change it (PARTIAL_TAKE_PROFIT), instead of always rewriting the stale
+            // pre-race value back. `status: 'OPEN'` mirrors the scale-in guard so a trade
+            // closed by something else is never silently rewritten.
+            const partialSellUpdate = await this.prismaService.trade.updateMany({
+                where: { id: tradeId, status: 'OPEN' },
+                data: {
+                    amountInSol: { multiply: 1 - percentage },
+                    entryValueUsd: { multiply: 1 - percentage },
+                    partialTakeProfitAt,
+                    ...(runnerStopPrice !== undefined ? { trailingStopPrice: runnerStopPrice } : {}),
+                },
+            });
+            dbUpdateOk = partialSellUpdate.count > 0;
+            if (partialSellUpdate.count === 0) {
+                // The sell already landed on-chain (tokens sold, SOL received) but the trade
+                // row was no longer OPEN by the time this write ran. Do NOT write -- there is
+                // no safe absolute value to fall back to. Surface loudly for manual
+                // reconciliation instead of silently doing nothing.
+                this.logger.error(
+                    `[Trade ${tradeId}] PARTIAL SELL tx ${txHash || 'n/a'} landed on-chain ` +
+                        `(sol=${finalSolReceived}, tokens=${finalTokensSold}) but the trade row ` +
+                        `was no longer OPEN at write time. DB was NOT updated. ACTIONABLE: ` +
+                        `manually reconcile the realized proceeds against trade id=${tradeId}.`,
+                );
+                try {
+                    // NOT sendTradeFailureAlert: that template hardcodes "EXECUTION FAILED" /
+                    // "No live trade was opened", both false here -- the sell DID land on-chain.
+                    await this.reportingService.sendTradeReconciliationAlert({
+                        side: 'SELL',
+                        tokenMint: trade.tokenMint,
+                        symbol: trade.symbol || undefined,
+                        reason: `partial_sell_race_closed: ${tradeId}`,
+                        targetChatId,
+                        details:
+                            `Partial SELL tx ${txHash || 'n/a'} landed on-chain (sol=` +
+                            `${finalSolReceived}, tokens=${finalTokensSold}) but trade ` +
+                            `id=${tradeId} was no longer OPEN when the DB write ran. DB was NOT ` +
+                            `updated. ACTIONABLE: manually reconcile the realized proceeds ` +
+                            `against trade id=${tradeId}.`,
+                    });
+                } catch (alertErr) {
+                    const m = alertErr instanceof Error ? alertErr.message : String(alertErr);
+                    this.logger.error(
+                        `[Trade ${tradeId}] Failed to send partial-sell-race alert: ${m}`,
+                    );
+                }
+            }
+        }
+        // Gated on dbUpdateOk: if the trade row write above was skipped (race-lost --
+        // count === 0), the operator was already told "No data was overwritten. Manual
+        // reconciliation required." Silently bumping totalFeesSol/profitUsd here would
+        // contradict that alert on the exact same row.
+        // profitUsd increment is split out of the updateMany above (see incrementTradeProfit)
+        // and always applied -- not gated on truthiness like totalFeesSol -- so a null
+        // profitUsd is coalesced to 0 even on a break-even (0 profit) sell.
+        if (dbUpdateOk) {
+            await this.incrementTradeProfit(tradeId, estimatedProfitUsd);
+        }
+        if (dbUpdateOk && totalFeesSol) {
+            await this.incrementTradeFees(tradeId, totalFeesSol);
+        }
+
+        // 🧑‍💻 AUTO BLACKLIST ON DEV_DUMP/RUGPULL (Self-Learning)
+        if (['DEV_DUMP', 'RUGPULL'].includes(exitReason) && trade.creatorAddress) {
+            try {
+                const existingProfile = await this.prismaService.creatorProfile.findUnique({
+                    where: { address: trade.creatorAddress },
+                });
+                const ruggedCount = (existingProfile?.ruggedTokens || 0) + 1;
+                const createdCount = existingProfile?.tokensCreated || 1;
+                const tags = new Set(existingProfile?.tags || []);
+                tags.add('Serial Rugger');
+
+                await this.prismaService.creatorProfile.upsert({
+                    where: { address: trade.creatorAddress },
+                    update: {
+                        reason: exitReason,
+                        ruggedTokens: ruggedCount,
+                        isBlacklisted: true,
+                        riskScore: 100, // Instant blacklist
+                        tags: Array.from(tags),
+                        lastActiveAt: new Date(),
+                    },
+                    create: {
+                        address: trade.creatorAddress,
+                        reason: exitReason,
+                        tokensCreated: createdCount,
+                        ruggedTokens: 1,
+                        isBlacklisted: true,
+                        riskScore: 100,
+                        tags: ['Serial Rugger'],
+                    },
+                });
+                this.logger.warn(
+                    `[Blacklist] Automatically blacklisted creator ${trade.creatorAddress} for: ${exitReason}`,
+                );
+            } catch (dbErr) {
+                const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
+                this.logger.error(
+                    `[Blacklist] Failed to blacklist creator ${trade.creatorAddress}: ${msg}`,
+                );
+            }
+        }
+
+        // Gated on dbUpdateOk: a race-lost write (count === 0) already fired the "landed
+        // on-chain but NOT recorded, manual reconciliation required" alert above. Firing a
+        // routine success alert with fabricated profit/exit numbers for the SAME event
+        // right after would directly contradict it.
+        if (dbUpdateOk) {
+            const entryPriceUsdForReport =
+                finalTokensSold > 0 && trade.solPriceAtEntry
+                    ? (entrySolValue / finalTokensSold) * trade.solPriceAtEntry
+                    : trade.entryPrice;
+
+            await this.reportingService.sendSellAlert(
+                trade.tokenMint,
+                exitPrice,
+                profit,
+                exitReason,
+                trade.symbol || undefined,
+                {
+                    entryPriceUsd: entryPriceUsdForReport,
+                    exitPriceUsd: exitPrice,
+                    entryPriceSol: entrySolValue / finalTokensSold,
+                    exitPriceSol: finalSolReceived / finalTokensSold,
+                    solSpent: entrySolValue,
+                    solReceived: finalSolReceived,
+                    solProfitPercent,
+                    usdSpent: totalUsdSpent,
+                    usdReceived: totalUsdReceived,
+                },
+                tradeDryRun,
+                targetChatId,
+            );
+            if (!forceLive) {
+                await this.reportingService.sendSwapResultReport({
+                    side: 'SELL',
+                    tokenMint: trade.tokenMint,
+                    symbol: trade.symbol || undefined,
+                    success: true,
+                    amountUsd: exitValueUsd,
+                    amountSol: finalSolReceived,
+                    txHash,
+                    dryRun: tradeDryRun,
+                    targetChatId,
+                    details: `Exit reason: ${exitReason.replace(/_/g, ' ')}`,
+                });
+            }
+        }
+        this.consecutiveSellFailures.delete(tradeId);
+        return dbUpdateOk;
     }
 
     private getEntryValueUsdForSell(
@@ -1869,6 +2472,64 @@ export class TradeService implements OnModuleInit {
         }, 60_000);
     }
 
+    /**
+     * Resolve the on-chain fate of a broadcast-but-unconfirmed sell signature so the
+     * caller can decide whether re-selling is safe (idempotency reconciliation for the
+     * post-broadcast failure path).
+     *
+     *   LANDED_OK     — tx is confirmed/finalized with no error; the sell executed.
+     *   LANDED_FAILED — tx landed but reverted; the tokens were NOT sold.
+     *   NOT_FOUND     — tx cannot be found AND its validity window has elapsed, so it can
+     *                   never land; the balance is now authoritative → safe to re-sell.
+     *   UNKNOWN       — tx is not yet confirmed and is still within its validity window (or
+     *                   the status RPC itself failed); its fate is genuinely ambiguous, so
+     *                   the caller MUST NOT re-sell yet (would risk a double-sell).
+     *
+     * The validity window is bounded by SELL_UNCONFIRMED_TTL_MS (default 90s ≈ Solana's
+     * ~150-block blockhash lifetime). Crucially, after the window a re-sell is safe
+     * regardless of RPC state: if the tx had landed it already reduced the balance, and if
+     * it did not it can never land — either way the fresh balance read reflects reality.
+     */
+    private async resolveSignatureFate(pending: {
+        signature: string;
+        recordedAt: number;
+    }): Promise<'LANDED_OK' | 'LANDED_FAILED' | 'NOT_FOUND' | 'UNKNOWN'> {
+        const configuredTtl = Number.parseInt(
+            this.configService.get<string>('SELL_UNCONFIRMED_TTL_MS', '90000'),
+            10,
+        );
+        const ttlMs = Number.isFinite(configuredTtl) && configuredTtl > 0 ? configuredTtl : 90_000;
+        const windowElapsed = Date.now() - pending.recordedAt > ttlMs;
+        try {
+            const res = await this.connection.getSignatureStatus(pending.signature, {
+                searchTransactionHistory: true,
+            });
+            const status = res?.value;
+            if (status) {
+                if (status.err) return 'LANDED_FAILED';
+                const conf = status.confirmationStatus;
+                if (conf === 'confirmed' || conf === 'finalized' || (status.confirmations ?? 0) > 0) {
+                    return 'LANDED_OK';
+                }
+                // 'processed' only: still settling. Treat as landed once the window elapses
+                // (a processed tx does not roll back after its blockhash expires).
+                return windowElapsed ? 'LANDED_OK' : 'UNKNOWN';
+            }
+            // Not found: may still be in-flight within the window; only definitively gone
+            // (and thus safe to re-sell) once the validity window has passed.
+            return windowElapsed ? 'NOT_FOUND' : 'UNKNOWN';
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.logger.warn(
+                `[Trade] Signature reconciliation RPC error for ${pending.signature}: ${msg}. ` +
+                    `${windowElapsed ? 'Validity window elapsed — balance is authoritative.' : 'Deferring re-sell (fate still ambiguous).'}`,
+            );
+            // Cannot prove the tx did NOT land. Within the window that is unsafe → UNKNOWN;
+            // past the window the balance is authoritative regardless → NOT_FOUND.
+            return windowElapsed ? 'NOT_FOUND' : 'UNKNOWN';
+        }
+    }
+
     private async executeJupiterSwap(
         inputMint: string,
         outputMint: string,
@@ -1881,6 +2542,12 @@ export class TradeService implements OnModuleInit {
         wallet?: Keypair,
         dryRun = false,
         route?: TradeRoute,
+        // Error classification of the failure that triggered THIS retry attempt (i.e.
+        // the errorClass of the immediately preceding attempt). Threaded through the
+        // recursive retry so SELL slippage escalation can distinguish a genuine
+        // market/execution retry cause from a rate-limit (429) retry, which has
+        // nothing to do with actual market slippage.
+        lastErrorClass?: RpcErrorClass,
     ): Promise<{
         success: boolean;
         entryPrice: number;
@@ -1889,6 +2556,12 @@ export class TradeService implements OnModuleInit {
         actualSol?: number;
         actualTokens?: number;
         totalFeesSol?: number;
+        // Jito tip actually paid for the broadcast attempt this result reflects (0 if Jito
+        // was not used). Populated on the post-broadcast-unconfirmed failure path so callers'
+        // on-chain recovery/reconciliation can reuse the REAL tip instead of hardcoding 0
+        // (finding: hardcoding 0 there permanently undercounts totalFeesSol for any swap that
+        // had to go through crash/idempotency recovery after actually paying a Jito tip).
+        jitoTipLamports?: number;
     }> {
         const maxRetries = Number.parseInt(
             this.configService.get<string>('TRADE_MAX_RETRIES', '5'),
@@ -1898,6 +2571,24 @@ export class TradeService implements OnModuleInit {
             throw new Error('Live swap execution requires a chat wallet.');
         }
         const activeWallet = wallet;
+        // IDEMPOTENCY GUARD (proposal solana-stoploss-retry, requirement 3): once the
+        // transaction has been broadcast to the network, a thrown confirmation error is
+        // AMBIGUOUS — the swap may already have landed on-chain. Re-quoting and re-sending
+        // in that state risks a double-sell, which is worse than the original 429 bug. So we
+        // only allow the internal recursive retry for PRE-broadcast failures (quote/build/send
+        // rejected). Post-broadcast failures return control to executeSell, which re-fetches the
+        // live on-chain balance before any further attempt.
+        let broadcasted = false;
+        // Deterministic on-chain signature of the signed tx, captured BEFORE the wire
+        // send. On a post-broadcast confirmation failure this is handed back to the
+        // caller (instead of being discarded as undefined) so the ambiguous tx can be
+        // reconciled on-chain before any re-sell — even if sendRawTransaction itself
+        // timed out before returning a txid.
+        let broadcastSignature: string | undefined;
+        // Jito tip for this attempt. Declared outside the try block (unlike the other Jito
+        // locals) so the post-broadcast-unconfirmed catch below can hand the real value back
+        // to the caller instead of that path losing it to block scoping.
+        let jitoTipLamports = 0;
         try {
             // Jurus Pamungkas: Pakai Paid Endpoint & API Key
             const hostname = 'api.jup.ag';
@@ -1938,12 +2629,24 @@ export class TradeService implements OnModuleInit {
                         `[Jupiter] Retrying route=${route ?? 'GLOBAL'} proposedSlippageBps=${proposedRetrySlippage} cappedSlippageBps=${slippage}`,
                     );
                 }
+            } else if (retryCount > 0 && lastErrorClass === 'RATE_LIMIT') {
+                // A 429/rate-limit failure is not evidence of market movement — reuse the
+                // base slippage instead of escalating, so we don't widen slippage
+                // tolerance for a reason unrelated to actual price/execution risk.
+                slippage = requestedSlippageBps;
+                this.logger.warn(
+                    `[Jupiter] Retrying SELL after RATE_LIMIT: keeping base slippage ${slippage} bps (no escalation)`,
+                );
             } else if (retryCount > 0) {
                 slippage = Math.min(requestedSlippageBps + retryCount * 250, 2000);
                 this.logger.warn(`[Jupiter] Retrying SELL with higher slippage: ${slippage} bps`);
             }
             const quoteUrl = `${baseUrl}/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=${slippage}`;
-            const quoteResponse = await axios.get(quoteUrl, config);
+            // Routed through JupiterLimiter (not raw axios) so this call is spaced/prioritized
+            // against every other Jupiter request: SELL quotes jump ahead of BUY quotes, and a
+            // 429 here is handled by the limiter's own SELL-retry/BUY-abort rule BEFORE it ever
+            // reaches the existing higher-level retry/backoff below.
+            const quoteResponse = await JupiterLimiter.get(quoteUrl, side, config);
             const quoteData = quoteResponse.data;
             // PRICE IMPACT GUARD: route-aware and normalized for Jupiter response variants.
             if (side === 'BUY' && quoteData.priceImpactPct !== undefined) {
@@ -1988,7 +2691,12 @@ export class TradeService implements OnModuleInit {
             } else {
                 // SELL: Price = (outAmount_sol * solPrice) / inAmount_token.
                 // Do not use the legacy $150 SOL fallback here; it can create fake USD profit.
-                const solPrice = await this.getSolPriceOrNull();
+                // 'SELL' priority: this call is part of the SELL's own critical path (its
+                // result feeds calculatedPrice/validateSellPrice below, gating whether the
+                // swap proceeds at all), not an informational lookup — it must not queue
+                // behind unrelated SELL-lane traffic the way the default BUY-lane priority
+                // would (BUY always drains last, see JupiterLimiter class doc).
+                const solPrice = await this.getSolPriceOrNull('SELL');
                 const outAmountSol = quoteData.outAmount / 1_000_000_000;
                 const inAmountToken = amount / Math.pow(10, decimals);
                 const calculatedPrice = solPrice && inAmountToken > 0 ? (outAmountSol * solPrice) / inAmountToken : 0;
@@ -2049,7 +2757,8 @@ export class TradeService implements OnModuleInit {
                 this.logger.warn('[Jupiter] Falling back to direct send on retry to avoid bundle expiry.');
             }
 
-            const swapResponse = await axios.post(
+            // Routed through JupiterLimiter for the same reason as the quote call above.
+            const swapResponse = await JupiterLimiter.post(
                 `${baseUrl}/swap/v1/swap`,
                 {
                     quoteResponse: quoteData,
@@ -2058,6 +2767,7 @@ export class TradeService implements OnModuleInit {
                     dynamicComputeUnitLimit: true,
                     prioritizationFeeLamports: feeConfig,
                 },
+                side,
                 config,
             );
 
@@ -2065,11 +2775,18 @@ export class TradeService implements OnModuleInit {
                 Buffer.from(swapResponse.data.swapTransaction, 'base64'),
             );
             transaction.sign([activeWallet]);
+            // A Solana signature is deterministic over the signed message, so the exact
+            // on-chain signature is known here, BEFORE broadcasting. Both the Jito path
+            // (txid = signatures[0]) and the direct path (sendRawTransaction returns the
+            // same signature) resolve to this value. Capturing it now guarantees the
+            // post-broadcast failure path can reconcile the tx even if the send call
+            // itself throws before returning a txid.
+            broadcastSignature = bs58.encode(transaction.signatures[0]);
             const confirmationBlockhash = transaction.message.recentBlockhash;
             const swapLastValidBlockHeight = Number(swapResponse.data?.lastValidBlockHeight);
             const hasSwapLastValidBlockHeight =
                 Number.isFinite(swapLastValidBlockHeight) && swapLastValidBlockHeight > 0;
-            const jitoTipLamports = useJito ? Math.floor(jitoTipSol * 1_000_000_000) : 0;
+            jitoTipLamports = useJito ? Math.floor(jitoTipSol * 1_000_000_000) : 0;
 
             let txid = '';
 
@@ -2111,16 +2828,33 @@ export class TradeService implements OnModuleInit {
                     );
 
                     if (bundleResponse.data?.error) {
+                        // The block engine received the request but REJECTED the bundle
+                        // (it will not land). This is a definitive pre-broadcast rejection —
+                        // leave `broadcasted` false so the outer catch can safely retry
+                        // rather than freezing the position on a non-existent in-flight tx.
                         throw new Error(
                             `Jito Bundle Error: ${JSON.stringify(bundleResponse.data.error)}`,
                         );
                     }
 
+                    // IDEMPOTENCY: the bundle was accepted by the block engine → it is now
+                    // on the wire. Only from here is a subsequent confirmation failure
+                    // ambiguous, so mark broadcast AFTER acceptance (not before the send).
+                    broadcasted = true;
                     this.logger.log(
                         `[Jito] 🎉 Bundle accepted! ID: ${bundleResponse.data?.result}`,
                     );
                     txid = bs58.encode(transaction.signatures[0]);
                 } catch (e: unknown) {
+                    // If axios.post ITSELF threw (not the bundle-error rethrow above) with an
+                    // ambiguous transport failure (timeout / reset / 5xx), the bundle MAY
+                    // already have reached the block engine — treat as broadcast so the
+                    // caller reconciles on-chain instead of blind re-sending. A definitive
+                    // pre-broadcast rejection (429 / structured error / bundle-error rethrow)
+                    // leaves `broadcasted` false → safe to retry.
+                    if (!broadcasted && isAmbiguousSendFailure(e)) {
+                        broadcasted = true;
+                    }
                     const errResponse =
                         e instanceof Error && 'response' in e
                             ? JSON.stringify(
@@ -2132,11 +2866,29 @@ export class TradeService implements OnModuleInit {
                     throw new Error(`Jito Submission Error: ${msg}`);
                 }
             } else {
-                txid = await this.connection.sendRawTransaction(transaction.serialize(), {
-                    skipPreflight: false,
-                    preflightCommitment: 'confirmed',
-                    maxRetries: 3,
-                });
+                // IDEMPOTENCY: sendRawTransaction({skipPreflight:false}) runs preflight
+                // simulation THEN submission behind one await. A preflight/simulation
+                // failure throws BEFORE the tx reaches the leader (definitively NOT
+                // broadcast — safe to retry), whereas a transport timeout/reset MAY have
+                // reached the leader (ambiguous — must not blind re-send). Marking
+                // `broadcasted` true unconditionally BEFORE the send misclassified every
+                // preflight rejection as post-broadcast, freezing a monitored SELL for the
+                // full unconfirmed-TTL on a tx that never hit the wire. So: mark broadcast
+                // only AFTER a successful send, and on a throw only when the failure is
+                // genuinely ambiguous (see isAmbiguousSendFailure).
+                try {
+                    txid = await this.connection.sendRawTransaction(transaction.serialize(), {
+                        skipPreflight: false,
+                        preflightCommitment: 'confirmed',
+                        maxRetries: 3,
+                    });
+                    broadcasted = true;
+                } catch (sendErr) {
+                    if (isAmbiguousSendFailure(sendErr)) {
+                        broadcasted = true;
+                    }
+                    throw sendErr;
+                }
             }
 
             this.logger.log(`[Jupiter] Transaction sent: ${txid}. Waiting confirmation...`);
@@ -2177,7 +2929,7 @@ export class TradeService implements OnModuleInit {
                     side,
                 );
                 if (actualSwap) {
-                    const solPrice = side === 'SELL' ? await this.getSolPriceOrNull() : await this.getSolPrice();
+                    const solPrice = side === 'SELL' ? await this.getSolPriceOrNull('SELL') : await this.getSolPrice();
                     totalFeesSol = actualSwap.totalFeesSol;
                     actualSol = actualSwap.cleanSolAmount ?? Math.abs(actualSwap.solChange);
                     actualTokens = Math.abs(actualSwap.tokenChange);
@@ -2229,9 +2981,61 @@ export class TradeService implements OnModuleInit {
                 };
             }
             const message = error instanceof Error ? error.message : String(error);
+            const errorClass = classifyRpcError(error);
+
+            // IDEMPOTENCY: the tx was already broadcast — do NOT recursively re-send.
+            // Returning failure lets executeSell reconcile THIS EXACT tx on-chain before
+            // any further attempt, so a swap that actually landed is not sold twice. The
+            // deterministic signature is returned (not discarded) so the caller does not
+            // have to rely on a raceable balance snapshot: within the tx validity window
+            // the balance still shows the un-sold tokens, and a blind re-sell would
+            // double-execute.
+            if (broadcasted) {
+                this.logger.error(
+                    `[Jupiter] ${side} failed AFTER broadcast (${errorClass}): ${message}. ` +
+                        `Not re-sending in-call to avoid double-execution; returning signature ` +
+                        `${broadcastSignature ?? 'unknown'} for on-chain reconciliation by the caller.`,
+                );
+                return {
+                    success: false,
+                    entryPrice: 0,
+                    error: `post_broadcast_unconfirmed:${message}`,
+                    txHash: broadcastSignature,
+                    jitoTipLamports,
+                };
+            }
+
             if (retryCount < maxRetries - 1) {
-                const waitTime = 1000 * (retryCount + 1);
-                this.logger.log(`[Jupiter] Retrying in ${waitTime}ms...`);
+                // Rate-limit-aware failover: rotate to a backup RPC endpoint on 429 so the
+                // retry does not hit the same throttled provider (requirement 2).
+                if (errorClass === 'RATE_LIMIT') {
+                    this.rotateRpcConnection();
+                }
+                // Bounded exponential backoff + jitter on 429/5xx/timeout (requirement 1),
+                // replacing the previous flat linear 1000*(n+1) delay that could compound
+                // rate-limiting. Non-transport errors keep retrying too (no regression) but
+                // with the same jittered backoff.
+                //
+                // Exception: JupiterLimiter already ran its own SELL-priority 429 backoff
+                // (up to SELL_MAX_ATTEMPTS attempts, ~1s+2s) before rejecting with this
+                // marker (jupiter-limiter.ts). Applying a FULL fresh exponential backoff here
+                // on top, independently at each of the SELL's several dispatch points
+                // (quote/fallback-price/swap), would stack two uncoordinated retry layers for
+                // the SAME rate-limit event and compound worst-case tail latency. Skip this
+                // layer's wait in that specific case -- the limiter already paid it.
+                const sellRetriesExhaustedInLimiter = Boolean(
+                    (error as { jupiterSellRetriesExhausted?: boolean } | null | undefined)
+                        ?.jupiterSellRetriesExhausted,
+                );
+                const backoffOpts = { baseMs: 1000, maxMs: 8000, jitterRatio: 0.5 };
+                const waitTime = sellRetriesExhaustedInLimiter
+                    ? 0
+                    : isRetryableRpcError(error)
+                      ? computeBackoffDelay(retryCount, backoffOpts)
+                      : 1000 * (retryCount + 1);
+                this.logger.log(
+                    `[Jupiter] Retrying in ${waitTime}ms (class=${errorClass}, attempt ${retryCount + 2}/${maxRetries})...`,
+                );
                 await new Promise((res) => setTimeout(res, waitTime));
                 return this.executeJupiterSwap(
                     inputMint,
@@ -2244,6 +3048,8 @@ export class TradeService implements OnModuleInit {
                     priorityFeeLamports,
                     activeWallet,
                     dryRun,
+                    route,
+                    errorClass,
                 );
             }
             return { success: false, entryPrice: 0, error: message, txHash: undefined };
@@ -2448,12 +3254,19 @@ export class TradeService implements OnModuleInit {
      */
     private async getSellPriceFallback(tokenMint: string): Promise<number | null> {
         try {
-            const response = await axios.get(`https://api.jup.ag/price/v3?ids=${tokenMint}`, {
+            // Same host/endpoint family as getSolPriceOrNull, and called unconditionally on
+            // every SELL — must go through JupiterLimiter (not raw axios) so it is spaced
+            // and prioritized against the rest of the Jupiter traffic instead of bypassing
+            // the limiter's throttling entirely. 'SELL' priority matches the quote/swap
+            // calls for this same SELL flow (protective, not informational).
+            const response = await JupiterLimiter.get<
+                Record<string, { usdPrice?: number } | undefined>
+            >(`https://api.jup.ag/price/v3?ids=${tokenMint}`, 'SELL', {
                 timeout: 5000,
                 headers: { 'x-api-key': this.jupiterApiKey },
                 httpsAgent: this.httpsAgent,
             });
-            const data = response.data as Record<string, { usdPrice?: number } | undefined> | null;
+            const data = response.data;
             const price = data?.[tokenMint]?.usdPrice;
             return price && !isNaN(price) ? price : null;
         } catch {
@@ -2483,10 +3296,15 @@ export class TradeService implements OnModuleInit {
         return (await this.getSolPriceOrNull()) ?? 150;
     }
 
-    private async getSolPriceOrNull(): Promise<number | null> {
+    private async getSolPriceOrNull(priority: JupiterPriority = 'BUY'): Promise<number | null> {
         try {
-            const response = await axios.get(
+            // Default 'BUY': informational-only call sites (not protective like a SELL)
+            // stay routed through the BUY lane so they never compete with SELL requests for
+            // the shared Jupiter API budget. Call sites that are themselves part of a SELL's
+            // own critical path must pass 'SELL' explicitly (see call site comments).
+            const response = await JupiterLimiter.get(
                 `https://api.jup.ag/price/v3?ids=${WRAPPED_SOL_MINT}`,
+                priority,
                 {
                     timeout: 3000,
                     headers: { 'x-api-key': this.jupiterApiKey },
@@ -2528,12 +3346,16 @@ export class TradeService implements OnModuleInit {
             },
         });
 
-        const currentPrice = await this.reportingService.fetchCurrentPrice(tokenMint);
-        if (!currentPrice) {
-            return { success: false, message: 'Failed to fetch current price.' };
-        }
-
         if (trade) {
+            // 'SELL' priority: this manual-sell authorization path gates executeSell() right
+            // below, so the price lookup itself must not queue behind the (lower-priority) BUY
+            // lane — the default priority ('BUY') would add avoidable queueing latency here.
+            // Only fetched in this branch: the untracked-token (else) branch below never uses
+            // currentPrice, so fetching it unconditionally would waste a protected SELL-lane slot.
+            const currentPrice = await this.reportingService.fetchCurrentPrice(tokenMint, 'SELL');
+            if (!currentPrice) {
+                return { success: false, message: 'Failed to fetch current price.' };
+            }
             await this.executeSell(trade.id, currentPrice, 'MANUAL_SELL', percentage, true);
             return {
                 success: true,
@@ -2554,7 +3376,7 @@ export class TradeService implements OnModuleInit {
                 actualBalance * percentage * Math.pow(10, decimals),
             );
 
-            const { success, error } = await this.executeJupiterSwap(
+            const { success, error, txHash } = await this.executeJupiterSwap(
                 tokenMint,
                 WRAPPED_SOL_MINT,
                 amountInLamports,
@@ -2571,6 +3393,23 @@ export class TradeService implements OnModuleInit {
                 return {
                     success: true,
                     message: `Manual sell for ${(percentage * 100).toFixed(0)}% (${tokenMint}) executed.`,
+                };
+            }
+            // A manual sell for an untracked token has no tick loop or DB row to reconcile
+            // against, but a broadcast-but-unconfirmed sell MUST NOT be reported as a plain
+            // failure with its signature discarded: the tx may still land. Surface the exact
+            // signature so a re-sell is balance-checked (the wallet balance is re-read on the
+            // next attempt at the top of this path) and the operator can reconcile on-chain.
+            if (typeof error === 'string' && error.startsWith('post_broadcast_unconfirmed') && txHash) {
+                this.logger.warn(
+                    `[ManualSell] UNCONFIRMED sell token=${tokenMint} tx=${txHash}. It may still ` +
+                        `land; a retry re-reads the live balance before re-selling.`,
+                );
+                return {
+                    success: false,
+                    message:
+                        `Manual sell was broadcast but not confirmed (tx ${txHash}). It may still ` +
+                        `land — re-check the wallet balance before retrying to avoid double-selling.`,
                 };
             }
             return { success: false, message: error || 'Swap failed' };

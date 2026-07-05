@@ -103,8 +103,21 @@ export class PriceMonitorService {
     private readonly healthCheckBeforeEarlyTrailing: boolean;
     private readonly minNetExitProfitPercent: number;
     private readonly minTrailingDistanceBeforePartialPercent: number;
-    private readonly lastAlertTime = new Map<string, number>(); // Cooldown alert: tokenMint -> timestamp
-    private readonly lastRiskAdjustmentAlertTime = new Map<string, number>();
+    private readonly enableDynamicHoldZone: boolean;
+    private readonly dynamicHoldZoneMaxMs: number;
+    private readonly stopLossGuardDepthFloorPercent: number;
+    // Verifier MINOR fix: tunable via config like every other threshold in this constructor,
+    // instead of a hardcoded literal buried in the batch loop.
+    private readonly monitorConcurrencyLimit: number;
+    // FIX C1: first-entered timestamp per trade.id while sitting in the dynamic hold zone,
+    // so a position can't be held there indefinitely on repeated AI "non-critical" reads.
+    private readonly dynamicHoldZoneEnteredAt = new Map<number, number>();
+    // Verifier MAJOR fix: keyed by trade.id, not tokenMint — two different chats can each
+    // hold their own OPEN LIVE trade on the same tokenMint (trade.service.ts scopes the
+    // duplicate-open-trade guard by telegramChatId), so a tokenMint key let one trade's
+    // cooldown suppress another trade's alert entirely.
+    private readonly lastAlertTime = new Map<number, number>(); // Cooldown alert: trade.id -> timestamp
+    private readonly lastRiskAdjustmentAlertTime = new Map<number, number>(); // trade.id -> timestamp
     private readonly healthCheckCache = new Map<number, { checkedAt: number; result: AIHealthCheckResult }>();
     private ipCache: Record<string, string> = {};
     private readonly fallbackApiIps: Record<string, string> = {
@@ -149,7 +162,26 @@ export class PriceMonitorService {
             0,
             this.getNumberConfig('MIN_TRAILING_DISTANCE_BEFORE_PARTIAL_PERCENT', 3),
         );
+        this.enableDynamicHoldZone = this.getBooleanConfig('ENABLE_DYNAMIC_HOLD_ZONE', true);
+        this.dynamicHoldZoneMaxMs = Math.max(
+            0,
+            this.getNumberConfig('DYNAMIC_HOLD_ZONE_MAX_SECONDS', 60) * 1000,
+        );
+        // Verifier MAJOR fix: 20 collided exactly with the hard-coded targetStopLoss=20.0 used
+        // by the "Established Rebound & CTO" route (established-analyzer.service.ts), making the
+        // STOP_LOSS branch (which only fires once profitPercent <= -effectiveStopLossPercent)
+        // trivially satisfy this depth-floor bypass every time for that route — unconditionally
+        // nullifying the FIX C2 guard for it. 30 keeps a real margin above every known route SL
+        // (GLOBAL/MICIN=13, WHALE=10, Established=20) so the guard stays meaningful there too.
+        this.stopLossGuardDepthFloorPercent = Math.max(
+            0,
+            this.getNumberConfig('STOP_LOSS_GUARD_DEPTH_FLOOR_PERCENT', 30),
+        );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
+        this.monitorConcurrencyLimit = Math.max(
+            1,
+            Math.floor(this.getNumberConfig('PRICE_MONITOR_CONCURRENCY_LIMIT', 3)),
+        );
     }
 
     private getBooleanConfig(key: string, fallback: boolean): boolean {
@@ -178,6 +210,10 @@ export class PriceMonitorService {
         return this.getNumberConfig(fallbackKey, fallback);
     }
     private readonly processingTrades = new Set<number>();
+    // FIX B2: consecutive-ticks-without-a-price counter per trade, so a trade that
+    // silently stops receiving fresh prices (stop-loss/trailing can't be evaluated)
+    // is escalated instead of skipped forever with no trace.
+    private readonly priceMissCounts = new Map<number, number>();
 
     private calculateNoisePressure(signals: TradeFreshMarketSignals): { severity: number; reasons: string[]; isFakePump: boolean } {
         let severity = 0;
@@ -241,40 +277,145 @@ export class PriceMonitorService {
             },
         });
 
+        // FIX (verifier MINOR): a trade that leaves OPEN status while mid-outage (sold,
+        // closed, etc. via a path other than the fresh-price success branch below) never
+        // reappears in openTrades again, so its priceMissCounts entry would otherwise never
+        // be released. Prune against the current OPEN snapshot every tick — including when
+        // openTrades is empty — instead of relying solely on the delete() below.
+        if (
+            this.priceMissCounts.size > 0 ||
+            this.dynamicHoldZoneEnteredAt.size > 0 ||
+            this.lastAlertTime.size > 0 ||
+            this.lastRiskAdjustmentAlertTime.size > 0
+        ) {
+            const openTradeIds = new Set(openTrades.map((t) => t.id));
+            for (const id of this.priceMissCounts.keys()) {
+                if (!openTradeIds.has(id)) this.priceMissCounts.delete(id);
+            }
+            // FIX C1: a trade that leaves OPEN status (sold, closed, etc.) must not keep
+            // occupying a dynamic-hold-zone timer entry forever.
+            for (const id of this.dynamicHoldZoneEnteredAt.keys()) {
+                if (!openTradeIds.has(id)) this.dynamicHoldZoneEnteredAt.delete(id);
+            }
+            // Verifier MAJOR fix: lastAlertTime/lastRiskAdjustmentAlertTime were re-keyed from
+            // tokenMint to trade.id (a Prisma autoincrement Int) but never pruned -- every closed
+            // trade left a permanent dead entry, an unbounded memory leak for the life of the
+            // process. Prune both against the same fresh OPEN snapshot used above.
+            for (const id of this.lastAlertTime.keys()) {
+                if (!openTradeIds.has(id)) this.lastAlertTime.delete(id);
+            }
+            for (const id of this.lastRiskAdjustmentAlertTime.keys()) {
+                if (!openTradeIds.has(id)) this.lastRiskAdjustmentAlertTime.delete(id);
+            }
+        }
+
         if (openTrades.length === 0) return;
 
         // 📦 BATCHING: Get all prices in one go
         const mints = openTrades.map((t) => t.tokenMint);
         const freshMarketDataMap = await this.getBatchFreshMarketData(mints);
 
-        for (const trade of openTrades) {
-            if (this.processingTrades.has(trade.id)) continue;
-
-            if (trade.telegramChatId) {
-                const chatSettings = await this.telegramWorkspace.getChatSettingsByChatDbId(
-                    trade.telegramChatId,
-                );
-                if (chatSettings?.dryRun ?? true) {
-                    this.logger.debug(
-                        `[Slot ${trade.slotNumber}] Skipping auto-sell for dry-run chat ${trade.telegramChatId}.`,
-                    );
-                    continue;
-                }
+        // FIX B3: fetch SOL/USD at most once per tick (not once per trade) — evaluateTrade
+        // no longer hits the Jupiter price endpoint per-trade, per-tick. Fetched lazily (only
+        // once a trade actually reaches evaluation) so a tick where every trade is dry-run or
+        // price-missing never calls Jupiter at all.
+        // FIX A4b: cache the in-flight PROMISE (not just the resolved value), so concurrent
+        // trades within the same batch that race into this function before it resolves all
+        // share the single in-flight request instead of each firing their own call.
+        let cachedSolPriceUsdPromise: Promise<number> | null = null;
+        const getSolPriceUsdForTick = (): Promise<number> => {
+            if (cachedSolPriceUsdPromise === null) {
+                cachedSolPriceUsdPromise = this.tradeService.getSolPrice();
             }
+            return cachedSolPriceUsdPromise;
+        };
 
-            const freshMarketData = freshMarketDataMap.get(trade.tokenMint);
-            const currentPrice = freshMarketData?.priceUsd ?? 0;
-            if (currentPrice <= 0) continue;
+        // FIX A4b: evaluate trades within a tick with small bounded concurrency instead of
+        // strictly sequentially, so one slow trade (stuck sell retry, slow AI health-check
+        // call) doesn't block the rest of the tick's trades behind it. Concurrency is capped
+        // (not unbounded) because per-trade external calls (RPC balance checks in
+        // evaluateTrade, AI health-check calls) are not behind any shared rate limiter.
+        // Promise.all is safe here: the ENTIRE body of the mapped callback below (including
+        // the processingTrades claim, not just the per-trade evaluation logic) is wrapped in
+        // the outer try/catch immediately below, so the mapped promise structurally cannot
+        // reject -- this no longer depends on every branch individually remembering to catch
+        // its own errors. A future edit would have to deliberately move code outside this
+        // outer try for Promise.all's fail-fast semantics to resurface.
+        for (let i = 0; i < openTrades.length; i += this.monitorConcurrencyLimit) {
+            const batch = openTrades.slice(i, i + this.monitorConcurrencyLimit);
+            await Promise.all(
+                batch.map(async (trade) => {
+                    try {
+                        if (this.processingTrades.has(trade.id)) return;
+                        // FIX A4a: claim the slot synchronously, right after the has() check and
+                        // before any await, so an overlapping @Interval(2000) tick can't also
+                        // pass has() for the same trade while this iteration is still awaiting.
+                        this.processingTrades.add(trade.id);
+                        try {
+                            if (trade.telegramChatId) {
+                                const chatSettings = await this.telegramWorkspace.getChatSettingsByChatDbId(
+                                    trade.telegramChatId,
+                                );
+                                if (chatSettings?.dryRun ?? true) {
+                                    this.logger.debug(
+                                        `[Slot ${trade.slotNumber}] Skipping auto-sell for dry-run chat ${trade.telegramChatId}.`,
+                                    );
+                                    return;
+                                }
+                            }
 
-            this.processingTrades.add(trade.id);
-            try {
-                await this.evaluateTrade(trade, currentPrice, freshMarketData);
-            } catch (error) {
-                const msg = error instanceof Error ? error.message : String(error);
-                this.logger.error(`Error evaluating ${trade.tokenMint}: ${msg}`);
-            } finally {
-                this.processingTrades.delete(trade.id);
-            }
+                            const freshMarketData = freshMarketDataMap.get(trade.tokenMint);
+                            const currentPrice = freshMarketData?.priceUsd ?? 0;
+                            if (currentPrice <= 0) {
+                                // FIX B2: upgrade the silent skip to a visible, escalating signal.
+                                const misses = (this.priceMissCounts.get(trade.id) || 0) + 1;
+                                this.priceMissCounts.set(trade.id, misses);
+                                this.logger.warn(
+                                    `[Slot ${trade.slotNumber}] No fresh price for ${trade.tokenMint}: ${misses} consecutive miss(es). Stop-loss/trailing evaluation skipped this tick.`,
+                                );
+
+                                const alertThreshold = Number.parseInt(
+                                    this.configService.get<string>('PRICE_MISS_ALERT_AFTER_TICKS', '3'),
+                                    10,
+                                );
+                                const threshold =
+                                    Number.isFinite(alertThreshold) && alertThreshold > 0 ? alertThreshold : 3;
+                                // FIX (verifier MINOR): re-escalate every `threshold` ticks instead of firing
+                                // exactly once for the entire outage — a 10-minute gap should keep alerting,
+                                // not go quiet after the first ping.
+                                if (misses >= threshold && misses % threshold === 0) {
+                                    try {
+                                        await this.reportingService.sendPriceMissAlert({
+                                            tokenMint: trade.tokenMint,
+                                            symbol: trade.symbol || undefined,
+                                            misses,
+                                            reason: `price_miss_x${misses}: no fresh market price for ${misses} consecutive ticks`,
+                                            details:
+                                                'Trade has gone dark: stop-loss/trailing-stop cannot be evaluated without a live price. Check DexScreener/RPC health.',
+                                            targetChatId: trade.telegramChat?.chatId,
+                                        });
+                                    } catch (alertErr) {
+                                        const msg = alertErr instanceof Error ? alertErr.message : String(alertErr);
+                                        this.logger.error(
+                                            `[Trade ${trade.id}] Failed to send price-miss alert: ${msg}`,
+                                        );
+                                    }
+                                }
+                                return;
+                            }
+                            this.priceMissCounts.delete(trade.id);
+
+                            const solPriceUsd = await getSolPriceUsdForTick();
+                            await this.evaluateTrade(trade, currentPrice, solPriceUsd, freshMarketData);
+                        } finally {
+                            this.processingTrades.delete(trade.id);
+                        }
+                    } catch (error) {
+                        const msg = error instanceof Error ? error.message : String(error);
+                        this.logger.error(`Error evaluating ${trade.tokenMint}: ${msg}`);
+                    }
+                }),
+            );
         }
     }
 
@@ -333,7 +474,10 @@ export class PriceMonitorService {
             }
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            this.logger.debug(`DexScreener batch market snapshot failed: ${message}`);
+            // FIX B2: this failure silently starves every open trade of a price this
+            // tick (falls through to the per-trade currentPrice <= 0 skip) — make it
+            // visible at warn, not debug.
+            this.logger.warn(`DexScreener batch market snapshot failed: ${message}`);
             return result;
         }
 
@@ -484,10 +628,22 @@ export class PriceMonitorService {
     private shouldGuardEarlyNonCriticalExit(
         trade: Pick<Trade, 'createdAt'>,
         exitReason: string,
+        profitPercent: number,
         nowMs = Date.now(),
     ): boolean {
         if (!this.conservativeExitGuardEnabled || this.minNonCriticalHoldMs <= 0) return false;
         if (this.isEmergencyExitReason(exitReason)) return false;
+        // FIX C2: depth floor — never guard a STOP_LOSS past a configurable loss depth,
+        // regardless of trade age. This does NOT exempt STOP_LOSS from the guard entirely;
+        // it only stops the guard once the position is deep enough that fee-churn protection
+        // is no longer the relevant concern.
+        if (
+            exitReason === 'STOP_LOSS' &&
+            Number.isFinite(profitPercent) &&
+            profitPercent <= -this.stopLossGuardDepthFloorPercent
+        ) {
+            return false;
+        }
         return this.getTradeAgeMs(trade, nowMs) < this.minNonCriticalHoldMs;
     }
 
@@ -505,7 +661,7 @@ export class PriceMonitorService {
         effectiveStopLossPercent: number,
         signals: TradeFreshMarketSignals,
     ): Promise<boolean> {
-        if (!this.shouldGuardEarlyNonCriticalExit(trade, exitReason)) return false;
+        if (!this.shouldGuardEarlyNonCriticalExit(trade, exitReason, profitPercent)) return false;
 
         const ageSeconds = this.getTradeAgeMs(trade) / 1000;
         const minHoldSeconds = this.minNonCriticalHoldMs / 1000;
@@ -709,9 +865,12 @@ export class PriceMonitorService {
     private async evaluateTrade(
         trade: TradeWithTelegramChat,
         currentPrice: number,
+        solPriceUsd: number,
         freshMarketSignals?: TradeFreshMarketSignals,
     ) {
-        const currentSolUsd = await this.tradeService.getSolPrice();
+        // FIX B3: solPriceUsd is fetched at most once per tick (lazily, on first use) by
+        // monitorPrices() instead of being fetched here per-trade, per-tick.
+        const currentSolUsd = solPriceUsd;
         const priceBasis = resolveMonitorSolPriceBasis({
             currentPriceUsd: currentPrice,
             currentSolUsd,
@@ -867,7 +1026,46 @@ export class PriceMonitorService {
             return;
         }
 
-        if (this.isDynamicHoldZone(profitPercent, effectiveStopLossPercent)) {
+        // FIX C1: the dynamic hold zone can be disabled outright via config, and is capped so a
+        // trade can't sit in the -halfSL..-SL band indefinitely just because the AI keeps
+        // reporting non-critical.
+        if (this.enableDynamicHoldZone && this.isDynamicHoldZone(profitPercent, effectiveStopLossPercent)) {
+            const zoneEnteredAt = this.dynamicHoldZoneEnteredAt.get(trade.id);
+            const nowMs = Date.now();
+
+            if (zoneEnteredAt === undefined) {
+                this.dynamicHoldZoneEnteredAt.set(trade.id, nowMs);
+                // FIX C3: zone-entry observability, so incident diagnosis doesn't need a DB query.
+                this.logger.log(
+                    `[Slot ${trade.slotNumber}] Dynamic hold zone ENTERED. tradeId=${trade.id} pnl=${profitPercent.toFixed(2)}% age=${(this.getTradeAgeMs(trade) / 1000).toFixed(1)}s`,
+                );
+            } else {
+                const zoneDurationMs = nowMs - zoneEnteredAt;
+                // Verifier MINOR fix: the zone timer is keyed off zoneEnteredAt, independent of
+                // overall trade age. Without also requiring the overall min-hold window to have
+                // elapsed, this is a second, shorter, unconditional bypass of the same FIX C2
+                // guard (a trade can enter the zone almost immediately after open, then force-exit
+                // here well before MIN_NON_CRITICAL_HOLD_SECONDS would have released it).
+                const minHoldElapsed =
+                    !this.conservativeExitGuardEnabled ||
+                    this.minNonCriticalHoldMs <= 0 ||
+                    this.getTradeAgeMs(trade, nowMs) >= this.minNonCriticalHoldMs;
+                if (
+                    this.dynamicHoldZoneMaxMs > 0 &&
+                    zoneDurationMs >= this.dynamicHoldZoneMaxMs &&
+                    minHoldElapsed
+                ) {
+                    this.logger.warn(
+                        `[Slot ${trade.slotNumber}] Dynamic hold zone MAX DURATION exceeded (${(zoneDurationMs / 1000).toFixed(1)}s >= ${(this.dynamicHoldZoneMaxMs / 1000).toFixed(0)}s). Forcing exit regardless of AI health. pnl=${profitPercent.toFixed(2)}% sl=${effectiveStopLossPercent}%`,
+                    );
+                    this.dynamicHoldZoneEnteredAt.delete(trade.id);
+                    // Verifier MINOR fix: distinct exitReason from the genuine hard-floor STOP_LOSS
+                    // exit below, so the two are no longer indistinguishable in DB/reporting.
+                    await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS_ZONE_TIMEOUT');
+                    return;
+                }
+            }
+
             const healthCheck = await this.shouldHoldOrCut(
                 trade,
                 profitPercent,
@@ -879,6 +1077,7 @@ export class PriceMonitorService {
                 this.logger.warn(
                     `[Slot ${trade.slotNumber}] AI Health CRITICAL before full SL. pnl=${profitPercent.toFixed(2)}% sl=${effectiveStopLossPercent}% reentry=${healthCheck.reentrySignal}. reason=${healthCheck.reasoning}`,
                 );
+                this.dynamicHoldZoneEnteredAt.delete(trade.id);
                 await this.tradeService.executeSell(trade.id, currentPrice, 'AI_HEALTH_CRITICAL');
                 return;
             }
@@ -889,8 +1088,38 @@ export class PriceMonitorService {
             return;
         }
 
+        // Not (or no longer) in the dynamic hold zone — release any tracked entry timestamp.
+        if (this.dynamicHoldZoneEnteredAt.has(trade.id)) {
+            this.dynamicHoldZoneEnteredAt.delete(trade.id);
+        }
+
         // Route-aware stop loss remains the hard floor after the dynamic hold zone is exhausted.
         if (profitPercent <= -effectiveStopLossPercent) {
+            // Record the moment the hard STOP_LOSS floor was FIRST detected — independent of
+            // whether a guard below (dynamic hold zone / early-exit guard) subsequently holds
+            // the position and delays the actual sell. "Triggered" means detected, not executed.
+            // Fire-and-forget + atomic `slTriggeredAt: null` guard so this never blocks the hot
+            // evaluation path and never overwrites an already-set timestamp on later ticks.
+            if (!trade.slTriggeredAt) {
+                // FIX C3: log the hard-floor crossing with trade age, so incident diagnosis doesn't
+                // need a DB query. Verifier MINOR fix: gated on the same first-occurrence check as
+                // the persistence below (slTriggeredAt still null) — without this it re-fired every
+                // 2s tick for up to the whole min-hold window while a guard below held the position.
+                this.logger.warn(
+                    `[Slot ${trade.slotNumber}] STOP_LOSS floor crossed. tradeId=${trade.id} pnl=${profitPercent.toFixed(2)}% sl=${effectiveStopLossPercent}% age=${(this.getTradeAgeMs(trade) / 1000).toFixed(1)}s`,
+                );
+                void this.prismaService.trade
+                    .updateMany({
+                        where: { id: trade.id, slTriggeredAt: null },
+                        data: { slTriggeredAt: new Date() },
+                    })
+                    .catch((err) => {
+                        this.logger.warn(
+                            `[Slot ${trade.slotNumber}] Failed to persist slTriggeredAt for tradeId=${trade.id}: ${err instanceof Error ? err.message : String(err)}`,
+                        );
+                    });
+            }
+
             if (
                 await this.handleEarlyNonCriticalExitGuard(
                     trade,
@@ -939,7 +1168,7 @@ export class PriceMonitorService {
 
             // Anti-Spam Trailing Alert
             const now = Date.now();
-            const lastAlert = this.lastAlertTime.get(trade.tokenMint) || 0;
+            const lastAlert = this.lastAlertTime.get(trade.id) || 0;
             if (profitPercent >= trailingActivationPercent && now - lastAlert > 5 * 60 * 1000) {
                 await this.reportingService.sendTrailingAlert(
                     trade.tokenMint,
@@ -947,7 +1176,7 @@ export class PriceMonitorService {
                     currentPrice,
                     trade.symbol || undefined,
                 );
-                this.lastAlertTime.set(trade.tokenMint, now);
+                this.lastAlertTime.set(trade.id, now);
             }
         } else if (
             effectiveTrailingDistancePercent < baseTrailingDistancePercent &&
@@ -1093,7 +1322,7 @@ export class PriceMonitorService {
     ): Promise<void> {
         try {
             const now = Date.now();
-            const lastAlertAt = this.lastRiskAdjustmentAlertTime.get(trade.tokenMint) || 0;
+            const lastAlertAt = this.lastRiskAdjustmentAlertTime.get(trade.id) || 0;
             if (now - lastAlertAt < 5 * 60 * 1000) {
                 return;
             }
@@ -1109,7 +1338,7 @@ export class PriceMonitorService {
                 priceChange1h: signals.priceChange1h,
                 targetChatId,
             });
-            this.lastRiskAdjustmentAlertTime.set(trade.tokenMint, now);
+            this.lastRiskAdjustmentAlertTime.set(trade.id, now);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             this.logger.warn(

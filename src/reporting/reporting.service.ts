@@ -8,6 +8,7 @@ import * as https from 'https';
 import * as TelegramBot from 'node-telegram-bot-api';
 import { DexLimiter } from '../common/dex-limiter';
 import { computeNetProfitUsd } from '../common/fee-utils';
+import { JupiterLimiter, JupiterPriority } from '../common/jupiter-limiter';
 import {
     isWithdrawalsEnabled,
     isWithdrawChatAllowed,
@@ -952,16 +953,25 @@ export class ReportingService implements OnModuleInit {
         await this.sendMessage(statusMsg, {}, 0, targetChatId);
     }
 
-    async fetchCurrentPrice(tokenMint: string): Promise<number | null> {
+    // priority defaults to 'BUY' (informational-only call site, not part of a protective
+    // SELL's own critical path) so this competes for the shared Jupiter API budget the same
+    // way JupiterLimiter's other informational-default callers do (see trade.service.ts's
+    // getSolPriceOrNull). Callers on a SELL's critical path may pass 'SELL' explicitly.
+    async fetchCurrentPrice(
+        tokenMint: string,
+        priority: JupiterPriority = 'BUY',
+    ): Promise<number | null> {
         try {
             const apiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
-            const response = await axios
-                .get(`https://api.jup.ag/price/v3?ids=${tokenMint}`, {
-                    timeout: 5000,
-                    headers: { 'x-api-key': apiKey },
-                    httpsAgent: this.httpsAgent,
-                })
-                .catch(() => null);
+            // Routed through JupiterLimiter (not raw axios) so this shares the throttled
+            // Jupiter API budget/queue with every other Jupiter call instead of bypassing it.
+            const response = await JupiterLimiter.get<
+                Record<string, { usdPrice?: number } | undefined>
+            >(`https://api.jup.ag/price/v3?ids=${tokenMint}`, priority, {
+                timeout: 5000,
+                headers: { 'x-api-key': apiKey },
+                httpsAgent: this.httpsAgent,
+            }).catch(() => null);
 
             if (response?.data) {
                 const data = response.data as Record<
@@ -1331,6 +1341,71 @@ export class ReportingService implements OnModuleInit {
             detailsLine +
             `------------------\n` +
             `\u{1F6A6} Status: No live trade was opened.`;
+
+        await this.sendMessage(message, { parse_mode: undefined }, 0, params.targetChatId);
+    }
+
+    /**
+     * Dedicated template for an already-OPEN live trade that has stopped receiving a
+     * fresh market price (price-monitor's stop-loss/trailing evaluation is blind until
+     * price data resumes). Deliberately NOT routed through sendTradeFailureAlert: that
+     * template hardcodes "EXECUTION FAILED" / "No live trade was opened", both false
+     * here -- nothing failed to execute, and a position is in fact still open.
+     */
+    async sendPriceMissAlert(params: {
+        tokenMint: string;
+        symbol?: string;
+        misses: number;
+        reason: string;
+        details?: string;
+        targetChatId?: string;
+    }): Promise<void> {
+        const displaySymbol = params.symbol || 'UNKNOWN';
+        const detailsLine = params.details ? `📋 Details: ${params.details}\n` : '';
+
+        const message =
+            `⚠️ STALE PRICE ALERT (position still OPEN)\n` +
+            `------------------\n` +
+            `💎 Token: ${displaySymbol}\n` +
+            `🆔 Mint: ${params.tokenMint}\n` +
+            `🔁 Consecutive misses: ${params.misses}\n` +
+            `🚫 Reason: ${params.reason}\n` +
+            detailsLine +
+            `------------------\n` +
+            `Status: Trade is OPEN and held. No fresh market price is arriving, so stop-loss/trailing-stop protection cannot be evaluated until price data resumes.`;
+
+        await this.sendMessage(message, { parse_mode: undefined }, 0, params.targetChatId);
+    }
+
+    /**
+     * Dedicated template for a BUY/SELL that landed ON-CHAIN but whose trade-row write
+     * was skipped by a concurrency guard (race with another write on the same trade),
+     * so the DB was NOT updated. Deliberately NOT routed through sendTradeFailureAlert:
+     * that template hardcodes "EXECUTION FAILED" / "No live trade was opened", both
+     * false here -- the swap actually succeeded on-chain and a trade may still be open.
+     * Mirrors why sendPriceMissAlert was split out for the same reason (see above).
+     */
+    async sendTradeReconciliationAlert(params: {
+        side: 'BUY' | 'SELL';
+        tokenMint: string;
+        symbol?: string;
+        reason: string;
+        details?: string;
+        targetChatId?: string;
+    }): Promise<void> {
+        const displaySymbol = params.symbol || 'UNKNOWN';
+        const detailsLine = params.details ? `📋 Details: ${params.details}\n` : '';
+
+        const message =
+            `⚠️ ${params.side} LANDED — MANUAL RECONCILIATION NEEDED\n` +
+            `------------------\n` +
+            `💎 Token: ${displaySymbol}\n` +
+            `🆔 Mint: ${params.tokenMint}\n` +
+            `🚫 Reason: ${params.reason}\n` +
+            detailsLine +
+            `------------------\n` +
+            `Status: The swap landed on-chain, but a concurrent write meant the trade row could ` +
+            `not be safely updated. No data was overwritten. Manual reconciliation required.`;
 
         await this.sendMessage(message, { parse_mode: undefined }, 0, params.targetChatId);
     }

@@ -4,6 +4,7 @@ import {
     parseChatIdList,
     validateWithdrawAccess,
 } from '../common/withdraw-guard';
+import { ReportingService } from './reporting.service';
 
 describe('withdraw guard helpers', () => {
     it('denies withdraw when chat id is not in allowlist', () => {
@@ -74,5 +75,60 @@ describe('withdraw guard helpers', () => {
                 signerPublicKey: 'wallet-a',
             }),
         ).toEqual({ allowed: true });
+    });
+});
+
+describe('ReportingService.sendPriceMissAlert', () => {
+    afterEach(() => {
+        jest.restoreAllMocks();
+    });
+
+    function createService() {
+        const configService = { get: jest.fn((_key: string, fallback?: unknown) => fallback) };
+        const telegramWorkspace = { getActiveChatIds: jest.fn().mockResolvedValue([]) };
+
+        return new ReportingService(
+            configService as never,
+            {} as never,
+            {} as never,
+            telegramWorkspace as never,
+        );
+    }
+
+    it('describes a stale-priced OPEN position instead of reusing the failed-execution template (verifier MAJOR fix)', async () => {
+        const service = createService();
+        const sendMessageSpy = jest
+            .spyOn(
+                service as unknown as { sendMessage: (...args: unknown[]) => Promise<void> },
+                'sendMessage',
+            )
+            .mockResolvedValue(undefined);
+
+        await service.sendPriceMissAlert({
+            tokenMint: 'MINT123',
+            symbol: 'FOO',
+            misses: 5,
+            reason: 'price_miss_x5: no fresh market price for 5 consecutive ticks',
+            details:
+                'Trade has gone dark: stop-loss/trailing-stop cannot be evaluated without a live price.',
+            targetChatId: 'chat-1',
+        });
+
+        expect(sendMessageSpy).toHaveBeenCalledTimes(1);
+        const [message, , , targetChatId] = sendMessageSpy.mock.calls[0] as [
+            string,
+            unknown,
+            number,
+            string,
+        ];
+        expect(targetChatId).toBe('chat-1');
+        expect(message).toContain('MINT123');
+        expect(message).toContain('OPEN');
+        expect(message).toContain('5');
+
+        // Nothing failed to execute and a position is in fact open -- the old
+        // sendTradeFailureAlert reuse asserted the opposite of both.
+        expect(message).not.toContain('EXECUTION FAILED');
+        expect(message).not.toContain('No live trade was opened');
     });
 });
