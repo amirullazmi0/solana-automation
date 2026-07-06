@@ -3284,10 +3284,10 @@ export class TradeService implements OnModuleInit {
                 { mint: new (await import('@solana/web3.js')).PublicKey(tokenMint) },
             );
 
-            if (accounts.value.length > 0) {
-                return accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount ?? 0;
-            }
-            return 0;
+            return accounts.value.reduce((sum, account) => {
+                const amount = account.account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+                return sum + amount;
+            }, 0);
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`Failed to get token balance for ${walletAddress}: ${msg}`);
@@ -3713,10 +3713,21 @@ export class TradeService implements OnModuleInit {
             source: 'ON_CHAIN';
         }>> {
         const wallet = await this.getWallet(chatId);
+        const walletAddress = wallet.publicKey.toBase58();
         const [onChainHoldings, chatRecord] = await Promise.all([
-            this.getWalletHoldings(wallet.publicKey.toBase58()),
+            this.getWalletHoldings(walletAddress),
             this.telegramWorkspace.getChatById(chatId),
         ]);
+
+        const holdingsByMint = new Map<string, { mint: string; symbol: string; balance: number }>();
+        for (const holding of onChainHoldings) {
+            const existing = holdingsByMint.get(holding.mint);
+            holdingsByMint.set(holding.mint, {
+                mint: holding.mint,
+                symbol: existing?.symbol || holding.symbol,
+                balance: (existing?.balance || 0) + holding.balance,
+            });
+        }
 
         const currentSolPriceUsd = await this.getSolPrice();
         const openTradeMetaByMint = new Map<
@@ -3754,8 +3765,24 @@ export class TradeService implements OnModuleInit {
             }
         }
 
+        const dustThreshold = Number.parseFloat(
+            this.configService.get<string>('TRADE_DUST_THRESHOLD', '0.000001'),
+        );
+        for (const [mint, meta] of openTradeMetaByMint.entries()) {
+            if (holdingsByMint.has(mint)) continue;
+
+            const balance = await this.getTokenBalance(walletAddress, mint);
+            if (balance === null || balance <= dustThreshold) continue;
+
+            holdingsByMint.set(mint, {
+                mint,
+                symbol: meta.symbol || 'UNKNOWN',
+                balance,
+            });
+        }
+
         const portfolio = await Promise.all(
-            onChainHoldings.map(async (holding) => {
+            Array.from(holdingsByMint.values()).map(async (holding) => {
                 const meta = openTradeMetaByMint.get(holding.mint);
                 const currentPriceUsd = await this.reportingService.fetchCurrentPrice(holding.mint);
                 const valueUsd = currentPriceUsd && holding.balance > 0 ? currentPriceUsd * holding.balance : undefined;
