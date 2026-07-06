@@ -500,11 +500,26 @@ export class ReportingService implements OnModuleInit {
             const pnlSol = holding.pnlSol ?? 0;
             const pnlPercent = holding.pnlPercent ?? 0;
             const pnlEmoji = pnlSol >= 0 ? '🟢' : '🔴';
-            const entryValueSolText = holding.entryValueSol !== undefined ? holding.entryValueSol.toFixed(4) + ' SOL' : 'N/A';
-            const entryPriceSolText = holding.entryPriceSol !== undefined ? holding.entryPriceSol.toFixed(8) + ' SOL' : 'N/A';
-            const currentPriceSolText = holding.currentPriceSol !== undefined ? holding.currentPriceSol.toFixed(8) + ' SOL' : 'N/A';
-            const solAtEntryText = holding.solPriceAtEntry !== undefined ? '$' + holding.solPriceAtEntry.toFixed(2) : 'N/A';
-            const solNowText = holding.currentSolPriceUsd !== undefined ? '$' + holding.currentSolPriceUsd.toFixed(2) : 'N/A';
+            const entryValueSolText =
+                holding.entryValueSol !== undefined
+                    ? holding.entryValueSol.toFixed(4) + ' SOL'
+                    : 'N/A';
+            const entryPriceSolText =
+                holding.entryPriceSol !== undefined
+                    ? holding.entryPriceSol.toFixed(8) + ' SOL'
+                    : 'N/A';
+            const currentPriceSolText =
+                holding.currentPriceSol !== undefined
+                    ? holding.currentPriceSol.toFixed(8) + ' SOL'
+                    : 'N/A';
+            const solAtEntryText =
+                holding.solPriceAtEntry !== undefined
+                    ? '$' + holding.solPriceAtEntry.toFixed(2)
+                    : 'N/A';
+            const solNowText =
+                holding.currentSolPriceUsd !== undefined
+                    ? '$' + holding.currentSolPriceUsd.toFixed(2)
+                    : 'N/A';
             const message =
                 '🪙 *' +
                 (holding.symbol || 'UNKNOWN') +
@@ -601,41 +616,41 @@ export class ReportingService implements OnModuleInit {
         const buttons: TelegramBot.InlineKeyboardButton[][] = [
             [{ text: '----- Slots -----', callback_data: 'settings:noop|slots' }],
             [
-                { text: '1 slot', callback_data: 'settings:slots|1' },
-                { text: '2 slots', callback_data: 'settings:slots|2' },
-                { text: '3 slots', callback_data: 'settings:slots|3' },
-                { text: '4 slots', callback_data: 'settings:slots|4' },
+                { text: '1', callback_data: 'settings:slots|1' },
+                { text: '2', callback_data: 'settings:slots|2' },
+                { text: '3', callback_data: 'settings:slots|3' },
+                { text: '4', callback_data: 'settings:slots|4' },
             ],
             [{ text: '----- Position -----', callback_data: 'settings:noop|position' }],
             [
-                { text: '$2 / entry', callback_data: 'settings:position|2' },
-                { text: '$4 / entry', callback_data: 'settings:position|4' },
-                { text: '$5 / entry', callback_data: 'settings:position|5' },
-                { text: '$6 / entry', callback_data: 'settings:position|6' },
+                { text: '$2', callback_data: 'settings:position|2' },
+                { text: '$4', callback_data: 'settings:position|4' },
+                { text: '$5', callback_data: 'settings:position|5' },
+                { text: '$6', callback_data: 'settings:position|6' },
             ],
             [
-                { text: '$7 / entry', callback_data: 'settings:position|7' },
-                { text: '$8 / entry', callback_data: 'settings:position|8' },
-                { text: '$9 / entry', callback_data: 'settings:position|9' },
-                { text: '$10 / entry', callback_data: 'settings:position|10' },
+                { text: '$7', callback_data: 'settings:position|7' },
+                { text: '$8', callback_data: 'settings:position|8' },
+                { text: '$9', callback_data: 'settings:position|9' },
+                { text: '$10', callback_data: 'settings:position|10' },
             ],
             [
-                { text: '$15 / entry', callback_data: 'settings:position|15' },
-                { text: '$20 / entry', callback_data: 'settings:position|20' },
-                { text: '$50 / entry', callback_data: 'settings:position|50' },
-                { text: '$100 / entry', callback_data: 'settings:position|100' },
+                { text: '$15', callback_data: 'settings:position|15' },
+                { text: '$20', callback_data: 'settings:position|20' },
+                { text: '$50', callback_data: 'settings:position|50' },
+                { text: '$100', callback_data: 'settings:position|100' },
             ],
             [{ text: '----- Slippage -----', callback_data: 'settings:noop|slippage' }],
             [
-                { text: '0.50% slippage', callback_data: 'settings:slippage|0.005' },
-                { text: '1.00% slippage', callback_data: 'settings:slippage|0.01' },
-                { text: '2.00% slippage', callback_data: 'settings:slippage|0.02' },
-                { text: '3.00% slippage', callback_data: 'settings:slippage|0.03' },
+                { text: '0.50%', callback_data: 'settings:slippage|0.005' },
+                { text: '1.00%', callback_data: 'settings:slippage|0.01' },
+                { text: '2.00%', callback_data: 'settings:slippage|0.02' },
+                { text: '3.00%', callback_data: 'settings:slippage|0.03' },
             ],
             [{ text: '----- Dry Run -----', callback_data: 'settings:noop|dryrun' }],
             [
-                { text: 'dryRun true', callback_data: 'settings:dryrun|true' },
-                { text: 'dryRun false', callback_data: 'settings:dryrun|false' },
+                { text: 'true ✅', callback_data: 'settings:dryrun|true' },
+                { text: 'false ❌', callback_data: 'settings:dryrun|false' },
             ],
         ];
 

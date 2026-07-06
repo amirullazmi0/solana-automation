@@ -1902,7 +1902,10 @@ export class TradeService implements OnModuleInit {
                 'PANIC_SELL',
                 'AI_HEALTH_CRITICAL',
             ].includes(exitReason);
-            const sellSlippage = isUrgent ? 1500 : this.slippageBps;
+            const requestedSellSlippageBps = tradeSettings
+                ? Math.max(1, Math.round(tradeSettings.slippageOnSol * 10000))
+                : this.slippageBps;
+            const sellSlippage = isUrgent ? 1500 : requestedSellSlippageBps;
 
             // 🚀 Panic Gas Accel: Hajar priority fee tinggi (0.0005 SOL = 500,000 lamports) biar instan masuk block pertama
             const sellPriorityFee = isUrgent ? 500_000 : undefined;
