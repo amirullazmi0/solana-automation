@@ -1,7 +1,6 @@
 import { PriceMonitorService, resolveMonitorSolPriceBasis } from './price-monitor.service';
 import { DexLimiter } from '../common/dex-limiter';
 
-
 describe('resolveMonitorSolPriceBasis', () => {
     it('keeps SOL-denominated trade prices as SOL basis', () => {
         const basis = resolveMonitorSolPriceBasis({
@@ -59,7 +58,11 @@ describe('PriceMonitorService conservative exit guard', () => {
             ) => boolean;
             shouldRunEarlyExitHealthCheck: (exitReason: string) => boolean;
             estimateNetProfitPercent: (
-                trade: { entryValueUsd?: number | null; solPriceAtEntry?: number | null; totalFeesSol?: number | null },
+                trade: {
+                    entryValueUsd?: number | null;
+                    solPriceAtEntry?: number | null;
+                    totalFeesSol?: number | null;
+                },
                 grossProfitPercent: number,
             ) => number;
         };
@@ -71,7 +74,9 @@ describe('PriceMonitorService conservative exit guard', () => {
         const trade = { createdAt: new Date(now - 30_000) };
 
         expect(service.shouldGuardEarlyNonCriticalExit(trade, 'STOP_LOSS', -10, now)).toBe(true);
-        expect(service.shouldGuardEarlyNonCriticalExit(trade, 'TRAILING_STOP', -10, now)).toBe(true);
+        expect(service.shouldGuardEarlyNonCriticalExit(trade, 'TRAILING_STOP', -10, now)).toBe(
+            true,
+        );
     });
 
     it('allows non-critical exits after the minimum hold window', () => {
@@ -118,7 +123,9 @@ describe('PriceMonitorService conservative exit guard', () => {
         expect(service.shouldGuardEarlyNonCriticalExit(trade, 'STOP_LOSS', -20, now)).toBe(false);
         expect(service.shouldGuardEarlyNonCriticalExit(trade, 'STOP_LOSS', -35, now)).toBe(false);
         // TRAILING_STOP is not subject to the STOP_LOSS depth floor; age still governs it.
-        expect(service.shouldGuardEarlyNonCriticalExit(trade, 'TRAILING_STOP', -35, now)).toBe(true);
+        expect(service.shouldGuardEarlyNonCriticalExit(trade, 'TRAILING_STOP', -35, now)).toBe(
+            true,
+        );
     });
     it('estimates net profit after buy and sell fee drag above the Jito threshold', () => {
         const service = createService({
@@ -167,7 +174,9 @@ describe('PriceMonitorService conservative exit guard', () => {
                         JITO_TIP_SOL: 0.001,
                         HEALTH_CHECK_BEFORE_EARLY_TRAILING: true,
                     };
-                    return Object.prototype.hasOwnProperty.call(config, key) ? config[key] : fallback;
+                    return Object.prototype.hasOwnProperty.call(config, key)
+                        ? config[key]
+                        : fallback;
                 }),
             } as never,
             { watchlist: { findUnique: jest.fn().mockResolvedValue(null) } } as never,
@@ -236,7 +245,9 @@ describe('PriceMonitorService conservative exit guard', () => {
                         MIN_NET_EXIT_PROFIT_PERCENT: 3,
                         HEALTH_CHECK_BEFORE_EARLY_TRAILING: true,
                     };
-                    return Object.prototype.hasOwnProperty.call(config, key) ? config[key] : fallback;
+                    return Object.prototype.hasOwnProperty.call(config, key)
+                        ? config[key]
+                        : fallback;
                 }),
             } as never,
             { watchlist: { findUnique: jest.fn().mockResolvedValue(null) } } as never,
@@ -355,7 +366,8 @@ describe('PriceMonitorService.monitorPrices', () => {
         };
         const telegramWorkspace = { getChatSettingsByChatDbId: jest.fn() };
         const reportingService = {
-            sendPriceMissAlert: overrides.sendPriceMissAlert ?? jest.fn().mockResolvedValue(undefined),
+            sendPriceMissAlert:
+                overrides.sendPriceMissAlert ?? jest.fn().mockResolvedValue(undefined),
         };
 
         const service = new PriceMonitorService(
@@ -371,7 +383,13 @@ describe('PriceMonitorService.monitorPrices', () => {
     }
 
     it('skips a trade already claimed by a concurrent tick (FIX A4a: processingTrades race guard)', async () => {
-        const trade = { id: 1, tokenMint: 'MINT1', slotNumber: 1, telegramChatId: null, telegramChat: null };
+        const trade = {
+            id: 1,
+            tokenMint: 'MINT1',
+            slotNumber: 1,
+            telegramChatId: null,
+            telegramChat: null,
+        };
         const findMany = jest.fn().mockResolvedValue([trade]);
         const getSolPrice = jest.fn().mockResolvedValue(150);
         mockDexScreenerPairs([{ mint: 'MINT1', priceUsd: '1.5' }]);
@@ -525,8 +543,20 @@ describe('PriceMonitorService.monitorPrices', () => {
     });
 
     it('fetches SOL/USD at most once per tick across multiple trades (FIX B3 hoisting)', async () => {
-        const tradeA = { id: 10, tokenMint: 'MINT_A', slotNumber: 10, telegramChatId: null, telegramChat: null };
-        const tradeB = { id: 11, tokenMint: 'MINT_B', slotNumber: 11, telegramChatId: null, telegramChat: null };
+        const tradeA = {
+            id: 10,
+            tokenMint: 'MINT_A',
+            slotNumber: 10,
+            telegramChatId: null,
+            telegramChat: null,
+        };
+        const tradeB = {
+            id: 11,
+            tokenMint: 'MINT_B',
+            slotNumber: 11,
+            telegramChatId: null,
+            telegramChat: null,
+        };
         const findMany = jest.fn().mockResolvedValue([tradeA, tradeB]);
         const getSolPrice = jest.fn().mockResolvedValue(150);
         mockDexScreenerPairs([
@@ -546,7 +576,13 @@ describe('PriceMonitorService.monitorPrices', () => {
     });
 
     it('never fetches SOL/USD when every trade this tick is price-missing (nitpick fix: no unconditional per-tick call)', async () => {
-        const trade = { id: 12, tokenMint: 'MINT_MISS', slotNumber: 12, telegramChatId: null, telegramChat: null };
+        const trade = {
+            id: 12,
+            tokenMint: 'MINT_MISS',
+            slotNumber: 12,
+            telegramChatId: null,
+            telegramChat: null,
+        };
         const findMany = jest.fn().mockResolvedValue([trade]);
         const getSolPrice = jest.fn().mockResolvedValue(150);
         jest.spyOn(DexLimiter, 'get').mockResolvedValue({ data: { pairs: [] } } as never);
@@ -666,7 +702,9 @@ describe('PriceMonitorService dynamic hold zone (FIX C1) forced exit on timeout'
     };
 
     it('marks the zone as entered on first tick without forcing an exit', async () => {
-        const { service, executeSell, evaluateTokenHealth } = createZoneService({ config: zoneConfig });
+        const { service, executeSell, evaluateTokenHealth } = createZoneService({
+            config: zoneConfig,
+        });
         const trade = makeZoneTrade();
 
         await service.evaluateTrade(trade, 0.0017, 100, zoneSignals);
@@ -677,7 +715,9 @@ describe('PriceMonitorService dynamic hold zone (FIX C1) forced exit on timeout'
     });
 
     it('force-exits with a distinct exitReason once the zone max duration elapses, bypassing the AI health check', async () => {
-        const { service, executeSell, evaluateTokenHealth } = createZoneService({ config: zoneConfig });
+        const { service, executeSell, evaluateTokenHealth } = createZoneService({
+            config: zoneConfig,
+        });
         // Trade is well past MIN_NON_CRITICAL_HOLD_SECONDS (90s), isolating the zone-timeout
         // behavior from the min-hold gate exercised in the next test.
         const trade = makeZoneTrade({ createdAt: new Date(Date.now() - 120_000) });
@@ -693,7 +733,9 @@ describe('PriceMonitorService dynamic hold zone (FIX C1) forced exit on timeout'
     });
 
     it('does not force-exit on zone timeout before the overall min-hold window has elapsed (verifier fix)', async () => {
-        const { service, executeSell, evaluateTokenHealth } = createZoneService({ config: zoneConfig });
+        const { service, executeSell, evaluateTokenHealth } = createZoneService({
+            config: zoneConfig,
+        });
         // Trade is only 10s old -- well inside MIN_NON_CRITICAL_HOLD_SECONDS (90s).
         const trade = makeZoneTrade({ createdAt: new Date(Date.now() - 10_000) });
         // Zone entered 90s ago -- past DYNAMIC_HOLD_ZONE_MAX_SECONDS (60s) in isolation, but
@@ -708,6 +750,213 @@ describe('PriceMonitorService dynamic hold zone (FIX C1) forced exit on timeout'
     });
 });
 
+describe('PriceMonitorService AI cutloss defense', () => {
+    afterEach(() => {
+        jest.restoreAllMocks();
+    });
+
+    function createCutlossService(
+        overrides: {
+            config?: Record<string, unknown>;
+            evaluateCutlossDefense?: jest.Mock;
+        } = {},
+    ) {
+        const configService = {
+            get: jest.fn((key: string, fallback?: unknown) =>
+                overrides.config && Object.prototype.hasOwnProperty.call(overrides.config, key)
+                    ? overrides.config[key]
+                    : fallback,
+            ),
+        };
+        const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+        const prismaService = {
+            trade: { updateMany },
+            watchlist: { findUnique: jest.fn().mockResolvedValue(null) },
+        };
+        const executeSell = jest.fn().mockResolvedValue(true);
+        const aiService = {
+            getRecommendedTrailingDistance: jest.fn().mockReturnValue(999),
+            evaluateCutlossDefense:
+                overrides.evaluateCutlossDefense ??
+                jest.fn().mockResolvedValue({
+                    action: 'SELL',
+                    confidenceLevel: 'high',
+                    reasoning: 'flow patah',
+                }),
+        };
+
+        const service = new PriceMonitorService(
+            configService as never,
+            prismaService as never,
+            { executeSell } as never,
+            {} as never,
+            {} as never,
+            aiService as never,
+        ) as unknown as EvaluateTradeTestable;
+
+        return { service, executeSell, updateMany, aiService };
+    }
+
+    function makeCutlossTrade(overrides: Record<string, unknown> = {}) {
+        return {
+            id: 900,
+            slotNumber: 9,
+            tokenMint: 'MINT_CUTLOSS',
+            symbol: 'CUT',
+            route: 'MICIN',
+            targetStopLoss: 12,
+            targetTrailingDistance: null,
+            targetTakeProfit: null,
+            partialTakeProfitAt: null,
+            entryPrice: 0.00002,
+            highestPrice: 0.00002,
+            trailingStopPrice: 0,
+            solPriceAtEntry: 100,
+            entryValueUsd: 3,
+            totalFeesSol: 0,
+            createdAt: new Date(Date.now() - 120_000),
+            creatorAddress: null,
+            topHolderAddress: null,
+            initialCreatorBalance: null,
+            initialTopHolderBalance: null,
+            slTriggeredAt: null,
+            aiCutlossDefenseCount: 0,
+            aiCutlossLastAt: null,
+            aiCutlossReason: null,
+            telegramChat: null,
+            ...overrides,
+        };
+    }
+
+    function mockFreshCutlossPair(priceUsd = '0.00175') {
+        jest.spyOn(DexLimiter, 'get').mockResolvedValue({
+            data: {
+                pairs: [
+                    {
+                        baseToken: { address: 'MINT_CUTLOSS' },
+                        priceUsd,
+                        liquidity: { usd: 10000 },
+                        volume: { m5: 1200, h1: 10000 },
+                        txns: { m5: { buys: 12, sells: 4 } },
+                        priceChange: { h1: -5 },
+                        fdv: 50000,
+                    },
+                ],
+            },
+        } as never);
+    }
+
+    const cutlossSignals = {
+        priceUsd: 0.00175,
+        volScore: 0.5,
+        priceChange1h: -5,
+        liquidityUsd: 10000,
+        marketCapUsd: 50000,
+        volume5mUsd: 1200,
+        volume1hUsd: 10000,
+        buys5mCount: 12,
+        sells5mCount: 4,
+        volumeSurge: 1.44,
+        zScore: 0.88,
+    };
+
+    it('extends targetStopLoss and does not sell when AI sees a bounce setup', async () => {
+        mockFreshCutlossPair();
+        const evaluateCutlossDefense = jest.fn().mockResolvedValue({
+            action: 'EXTEND_CUTLOSS',
+            confidenceLevel: 'high',
+            reasoning: 'buy pressure masih kuat',
+            newStopLossPercent: 18,
+        });
+        const { service, executeSell, updateMany } = createCutlossService({
+            config: {
+                ENABLE_AI_CUTLOSS_DEFENSE: true,
+                AI_CUTLOSS_MAX_EXTENSION_PERCENT: 10,
+                AI_CUTLOSS_HARD_FLOOR_PERCENT: 35,
+                AI_CUTLOSS_MAX_DEFENSES_PER_TRADE: 1,
+            },
+            evaluateCutlossDefense,
+        });
+
+        await service.evaluateTrade(makeCutlossTrade(), 0.00175, 100, cutlossSignals);
+
+        expect(executeSell).not.toHaveBeenCalled();
+        expect(updateMany).toHaveBeenCalledWith(
+            expect.objectContaining({
+                data: expect.objectContaining({
+                    targetStopLoss: 18,
+                    aiCutlossDefenseCount: { increment: 1 },
+                    aiCutlossReason: 'buy pressure masih kuat',
+                }),
+            }),
+        );
+    });
+
+    it('sells with AI_STOP_LOSS_CONFIRMED when AI confirms cutloss', async () => {
+        mockFreshCutlossPair();
+        const { service, executeSell } = createCutlossService({
+            config: { ENABLE_AI_CUTLOSS_DEFENSE: true },
+            evaluateCutlossDefense: jest.fn().mockResolvedValue({
+                action: 'SELL',
+                confidenceLevel: 'high',
+                reasoning: 'sell pressure dominan',
+            }),
+        });
+
+        await service.evaluateTrade(makeCutlossTrade(), 0.00175, 100, cutlossSignals);
+
+        expect(executeSell).toHaveBeenCalledWith(900, 0.00175, 'AI_STOP_LOSS_CONFIRMED');
+    });
+
+    it('fails closed with STOP_LOSS when the AI cutloss defense call throws', async () => {
+        mockFreshCutlossPair();
+        const { service, executeSell } = createCutlossService({
+            config: { ENABLE_AI_CUTLOSS_DEFENSE: true },
+            evaluateCutlossDefense: jest.fn().mockRejectedValue(new Error('ai timeout')),
+        });
+
+        await service.evaluateTrade(makeCutlossTrade(), 0.00175, 100, cutlossSignals);
+
+        expect(executeSell).toHaveBeenCalledWith(900, 0.00175, 'STOP_LOSS');
+    });
+
+    it('bypasses AI defense after max defense count and uses normal STOP_LOSS', async () => {
+        mockFreshCutlossPair();
+        const evaluateCutlossDefense = jest.fn();
+        const { service, executeSell } = createCutlossService({
+            config: {
+                ENABLE_AI_CUTLOSS_DEFENSE: true,
+                ENABLE_CONSERVATIVE_EXIT_GUARD: false,
+                AI_CUTLOSS_MAX_DEFENSES_PER_TRADE: 1,
+            },
+            evaluateCutlossDefense,
+        });
+
+        await service.evaluateTrade(
+            makeCutlossTrade({ aiCutlossDefenseCount: 1 }),
+            0.00175,
+            100,
+            cutlossSignals,
+        );
+
+        expect(evaluateCutlossDefense).not.toHaveBeenCalled();
+        expect(executeSell).toHaveBeenCalledWith(900, 0.00175, 'STOP_LOSS');
+    });
+
+    it('holds without AI call when forced fresh price recovers above cutloss', async () => {
+        mockFreshCutlossPair('0.00178');
+        const evaluateCutlossDefense = jest.fn();
+        const { service, executeSell } = createCutlossService({
+            config: { ENABLE_AI_CUTLOSS_DEFENSE: true },
+            evaluateCutlossDefense,
+        });
+
+        await service.evaluateTrade(makeCutlossTrade(), 0.00175, 100, cutlossSignals);
+
+        expect(evaluateCutlossDefense).not.toHaveBeenCalled();
+        expect(executeSell).not.toHaveBeenCalled();
+    });
+});
 type TrailingAlertTestable = {
     evaluateTrade: (
         trade: unknown,
@@ -829,4 +1078,3 @@ describe('PriceMonitorService trailing alert cooldown (trade.id re-keying, verif
         expect(sendTrailingAlert).toHaveBeenCalledTimes(1);
     });
 });
-

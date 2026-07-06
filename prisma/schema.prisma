@@ -148,6 +148,9 @@ model Trade {
   mode                    TradeMode   @default(LIVE)
   route                   TradeRoute?
   aiDecisionSnapshotId    Int?
+  aiCutlossDefenseCount   Int         @default(0)
+  aiCutlossLastAt         DateTime?
+  aiCutlossReason         String?
   amountInSol             Float
   buyTxHash               String?
   sellTxHash              String?

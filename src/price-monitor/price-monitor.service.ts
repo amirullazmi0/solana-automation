@@ -11,7 +11,7 @@ import { DexLimiter } from '../common/dex-limiter';
 import { AIService } from '../ai/ai.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 import { DexScreenerPair } from '../dto/analyzer.dto';
-import { AIHealthCheckMetrics, AIHealthCheckResult } from '../dto/ai.dto';
+import { AICutlossDefenseMetrics, AIHealthCheckMetrics, AIHealthCheckResult } from '../dto/ai.dto';
 
 interface TradeFreshMarketSignals {
     priceUsd: number;
@@ -65,7 +65,8 @@ export function resolveMonitorSolPriceBasis(params: {
     if (!Number.isFinite(currentSolUsd) || currentSolUsd <= 0) return null;
 
     const currentPriceSol = currentPriceUsd / currentSolUsd;
-    const fallbackSolUsd = Number.isFinite(solPriceAtEntry) && solPriceAtEntry > 0 ? solPriceAtEntry : currentSolUsd;
+    const fallbackSolUsd =
+        Number.isFinite(solPriceAtEntry) && solPriceAtEntry > 0 ? solPriceAtEntry : currentSolUsd;
     const toSolBasis = (value: number): { value: number; legacy: boolean } => {
         const numeric = Number(value);
         if (!Number.isFinite(numeric) || numeric <= 0) return { value: 0, legacy: false };
@@ -90,7 +91,6 @@ export function resolveMonitorSolPriceBasis(params: {
     };
 }
 
-
 @Injectable()
 export class PriceMonitorService {
     private readonly logger = new Logger(PriceMonitorService.name);
@@ -106,6 +106,11 @@ export class PriceMonitorService {
     private readonly enableDynamicHoldZone: boolean;
     private readonly dynamicHoldZoneMaxMs: number;
     private readonly stopLossGuardDepthFloorPercent: number;
+    private readonly enableAiCutlossDefense: boolean;
+    private readonly aiCutlossMaxExtensionPercent: number;
+    private readonly aiCutlossHardFloorPercent: number;
+    private readonly aiCutlossMaxDefensesPerTrade: number;
+    private readonly aiCutlossMinConfidence: 'high' | 'medium' | 'low';
     // Verifier MINOR fix: tunable via config like every other threshold in this constructor,
     // instead of a hardcoded literal buried in the batch loop.
     private readonly monitorConcurrencyLimit: number;
@@ -118,7 +123,10 @@ export class PriceMonitorService {
     // cooldown suppress another trade's alert entirely.
     private readonly lastAlertTime = new Map<number, number>(); // Cooldown alert: trade.id -> timestamp
     private readonly lastRiskAdjustmentAlertTime = new Map<number, number>(); // trade.id -> timestamp
-    private readonly healthCheckCache = new Map<number, { checkedAt: number; result: AIHealthCheckResult }>();
+    private readonly healthCheckCache = new Map<
+        number,
+        { checkedAt: number; result: AIHealthCheckResult }
+    >();
     private ipCache: Record<string, string> = {};
     private readonly fallbackApiIps: Record<string, string> = {
         'api.jup.ag': '18.239.105.107',
@@ -146,10 +154,7 @@ export class PriceMonitorService {
             0,
             this.getNumberConfig('MIN_NON_CRITICAL_HOLD_SECONDS', 60) * 1000,
         );
-        this.healthCheckBeforeEarlySl = this.getBooleanConfig(
-            'HEALTH_CHECK_BEFORE_EARLY_SL',
-            true,
-        );
+        this.healthCheckBeforeEarlySl = this.getBooleanConfig('HEALTH_CHECK_BEFORE_EARLY_SL', true);
         this.healthCheckBeforeEarlyTrailing = this.getBooleanConfig(
             'HEALTH_CHECK_BEFORE_EARLY_TRAILING',
             true,
@@ -177,6 +182,23 @@ export class PriceMonitorService {
             0,
             this.getNumberConfig('STOP_LOSS_GUARD_DEPTH_FLOOR_PERCENT', 30),
         );
+        this.enableAiCutlossDefense = this.getBooleanConfig('ENABLE_AI_CUTLOSS_DEFENSE', true);
+        this.aiCutlossMaxExtensionPercent = Math.max(
+            0,
+            this.getNumberConfig('AI_CUTLOSS_MAX_EXTENSION_PERCENT', 10),
+        );
+        this.aiCutlossHardFloorPercent = Math.max(
+            this.stopLossPercent,
+            this.getNumberConfig('AI_CUTLOSS_HARD_FLOOR_PERCENT', 45),
+        );
+        this.aiCutlossMaxDefensesPerTrade = Math.max(
+            0,
+            Math.floor(this.getNumberConfig('AI_CUTLOSS_MAX_DEFENSES_PER_TRADE', 1)),
+        );
+        this.aiCutlossMinConfidence = this.getConfidenceConfig(
+            'AI_CUTLOSS_MIN_CONFIDENCE',
+            'medium',
+        );
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
         this.monitorConcurrencyLimit = Math.max(
             1,
@@ -193,6 +215,19 @@ export class PriceMonitorService {
         return fallback;
     }
 
+    private getConfidenceConfig(
+        key: string,
+        fallback: 'high' | 'medium' | 'low',
+    ): 'high' | 'medium' | 'low' {
+        const raw = String(this.configService.get<string>(key, fallback)).trim().toLowerCase();
+        return raw === 'high' || raw === 'medium' || raw === 'low' ? raw : fallback;
+    }
+
+    private confidenceRank(value: 'high' | 'medium' | 'low'): number {
+        if (value === 'high') return 3;
+        if (value === 'medium') return 2;
+        return 1;
+    }
     private getNumberConfig(key: string, fallback: number): number {
         const value = Number.parseFloat(this.configService.get<string>(key, String(fallback)));
         return Number.isFinite(value) ? value : fallback;
@@ -215,7 +250,11 @@ export class PriceMonitorService {
     // is escalated instead of skipped forever with no trace.
     private readonly priceMissCounts = new Map<number, number>();
 
-    private calculateNoisePressure(signals: TradeFreshMarketSignals): { severity: number; reasons: string[]; isFakePump: boolean } {
+    private calculateNoisePressure(signals: TradeFreshMarketSignals): {
+        severity: number;
+        reasons: string[];
+        isFakePump: boolean;
+    } {
         let severity = 0;
         const reasons: string[] = [];
 
@@ -244,7 +283,8 @@ export class PriceMonitorService {
             reasons.push('weak-z-support');
         }
 
-        const sellPressure = signals.sells5mCount > signals.buys5mCount * 1.1 && signals.sells5mCount >= 5;
+        const sellPressure =
+            signals.sells5mCount > signals.buys5mCount * 1.1 && signals.sells5mCount >= 5;
         if (sellPressure) {
             severity += 20;
             reasons.push('sell-pressure');
@@ -353,9 +393,10 @@ export class PriceMonitorService {
                         this.processingTrades.add(trade.id);
                         try {
                             if (trade.telegramChatId) {
-                                const chatSettings = await this.telegramWorkspace.getChatSettingsByChatDbId(
-                                    trade.telegramChatId,
-                                );
+                                const chatSettings =
+                                    await this.telegramWorkspace.getChatSettingsByChatDbId(
+                                        trade.telegramChatId,
+                                    );
                                 if (chatSettings?.dryRun ?? true) {
                                     this.logger.debug(
                                         `[Slot ${trade.slotNumber}] Skipping auto-sell for dry-run chat ${trade.telegramChatId}.`,
@@ -375,11 +416,16 @@ export class PriceMonitorService {
                                 );
 
                                 const alertThreshold = Number.parseInt(
-                                    this.configService.get<string>('PRICE_MISS_ALERT_AFTER_TICKS', '3'),
+                                    this.configService.get<string>(
+                                        'PRICE_MISS_ALERT_AFTER_TICKS',
+                                        '3',
+                                    ),
                                     10,
                                 );
                                 const threshold =
-                                    Number.isFinite(alertThreshold) && alertThreshold > 0 ? alertThreshold : 3;
+                                    Number.isFinite(alertThreshold) && alertThreshold > 0
+                                        ? alertThreshold
+                                        : 3;
                                 // FIX (verifier MINOR): re-escalate every `threshold` ticks instead of firing
                                 // exactly once for the entire outage — a 10-minute gap should keep alerting,
                                 // not go quiet after the first ping.
@@ -395,7 +441,10 @@ export class PriceMonitorService {
                                             targetChatId: trade.telegramChat?.chatId,
                                         });
                                     } catch (alertErr) {
-                                        const msg = alertErr instanceof Error ? alertErr.message : String(alertErr);
+                                        const msg =
+                                            alertErr instanceof Error
+                                                ? alertErr.message
+                                                : String(alertErr);
                                         this.logger.error(
                                             `[Trade ${trade.id}] Failed to send price-miss alert: ${msg}`,
                                         );
@@ -406,7 +455,12 @@ export class PriceMonitorService {
                             this.priceMissCounts.delete(trade.id);
 
                             const solPriceUsd = await getSolPriceUsdForTick();
-                            await this.evaluateTrade(trade, currentPrice, solPriceUsd, freshMarketData);
+                            await this.evaluateTrade(
+                                trade,
+                                currentPrice,
+                                solPriceUsd,
+                                freshMarketData,
+                            );
                         } finally {
                             this.processingTrades.delete(trade.id);
                         }
@@ -500,7 +554,7 @@ export class PriceMonitorService {
         const volScore = liquidityUsd > 0 ? (volume5mUsd / liquidityUsd) * confidenceScore : 0;
         const zScore =
             averageVolume5m > 0
-                ? (volume5mUsd - averageVolume5m) / ((averageVolume5m * 0.5) || 1)
+                ? (volume5mUsd - averageVolume5m) / (averageVolume5m * 0.5 || 1)
                 : 0;
 
         return {
@@ -607,7 +661,11 @@ export class PriceMonitorService {
     }
 
     private isDynamicHoldZone(profitPercent: number, stopLossPercent: number): boolean {
-        if (!Number.isFinite(profitPercent) || !Number.isFinite(stopLossPercent) || stopLossPercent <= 0) {
+        if (
+            !Number.isFinite(profitPercent) ||
+            !Number.isFinite(stopLossPercent) ||
+            stopLossPercent <= 0
+        ) {
             return false;
         }
 
@@ -862,6 +920,155 @@ export class PriceMonitorService {
         return result;
     }
 
+    private async handleAiCutlossDefense(
+        trade: TradeWithTelegramChat,
+        currentPrice: number,
+        currentSolUsd: number,
+        profitPercent: number,
+        effectiveStopLossPercent: number,
+        fallbackSignals: TradeFreshMarketSignals,
+    ): Promise<boolean> {
+        if (!this.enableAiCutlossDefense || this.aiCutlossMaxDefensesPerTrade <= 0) return false;
+
+        const currentLossDepthPercent = Math.max(0, -profitPercent);
+        if (currentLossDepthPercent >= this.aiCutlossHardFloorPercent) {
+            this.logger.warn(
+                `[Slot ${trade.slotNumber}] AI cutloss defense bypassed: hard floor reached. loss=${currentLossDepthPercent.toFixed(2)}% hardFloor=${this.aiCutlossHardFloorPercent}%`,
+            );
+            return false;
+        }
+
+        const defenseCount = Math.max(0, trade.aiCutlossDefenseCount ?? 0);
+        if (defenseCount >= this.aiCutlossMaxDefensesPerTrade) {
+            this.logger.warn(
+                `[Slot ${trade.slotNumber}] AI cutloss defense bypassed: max defenses reached. count=${defenseCount}/${this.aiCutlossMaxDefensesPerTrade}`,
+            );
+            return false;
+        }
+
+        try {
+            const refreshedSignals = await this.getDexScreenerMarketSnapshot(trade.tokenMint);
+            const signals = refreshedSignals ?? fallbackSignals;
+            const refreshedPrice = signals.priceUsd > 0 ? signals.priceUsd : currentPrice;
+            const refreshedBasis = resolveMonitorSolPriceBasis({
+                currentPriceUsd: refreshedPrice,
+                currentSolUsd,
+                entryPrice: trade.entryPrice,
+                highestPrice: trade.highestPrice,
+                trailingStopPrice: trade.trailingStopPrice,
+                solPriceAtEntry: trade.solPriceAtEntry,
+            });
+
+            if (!refreshedBasis) {
+                this.logger.warn(
+                    `[Slot ${trade.slotNumber}] AI cutloss defense could not resolve refreshed price basis. Fail-closing with STOP_LOSS.`,
+                );
+                await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
+                return true;
+            }
+
+            const refreshedProfitPercent =
+                ((refreshedBasis.currentPriceSol - refreshedBasis.entryPriceSol) /
+                    refreshedBasis.entryPriceSol) *
+                100;
+            if (refreshedProfitPercent > -effectiveStopLossPercent) {
+                this.logger.log(
+                    `[Slot ${trade.slotNumber}] AI cutloss defense refreshed price recovered above SL. oldPnl=${profitPercent.toFixed(2)}% freshPnl=${refreshedProfitPercent.toFixed(2)}%. Holding without AI call.`,
+                );
+                return true;
+            }
+
+            const watchlist = await this.getWatchlistHealthContext(trade.tokenMint);
+            const ageHours = (Date.now() - new Date(trade.createdAt).getTime()) / (1000 * 60 * 60);
+            const route = trade.route === 'WHALE' ? 'WHALE' : 'MICIN';
+            const metrics: AICutlossDefenseMetrics = {
+                ageHours,
+                liquidityUsd: signals.liquidityUsd,
+                marketCapUsd: signals.marketCapUsd,
+                volume5mUsd: signals.volume5mUsd,
+                buys5mCount: signals.buys5mCount,
+                sells5mCount: signals.sells5mCount,
+                priceChange1hPct: signals.priceChange1h,
+                isPumpFun: watchlist?.isPumpFun ?? false,
+                hasWebsite: watchlist?.hasWebsite ?? false,
+                hasTwitter: watchlist?.hasTwitter ?? false,
+                hasTelegram: watchlist?.hasTelegram ?? false,
+                isDexPaidUpdated: watchlist?.isDexPaidUpdated ?? undefined,
+                isCommunityTakeover: watchlist?.isCommunityTakeover ?? undefined,
+                tokenName: watchlist?.tokenName ?? trade.symbol ?? undefined,
+                whaleSignalScore: watchlist?.whaleSignalScore ?? undefined,
+                volumeSurge: signals.volumeSurge,
+                volScore: signals.volScore,
+                zScore: signals.zScore,
+                currentProfitPercent: refreshedProfitPercent,
+                stopLossPercent: effectiveStopLossPercent,
+                route,
+                entryPriceUsd: refreshedBasis.entryPriceSol * currentSolUsd,
+                currentPriceUsd: refreshedPrice,
+                highestPriceUsd:
+                    Math.max(refreshedBasis.highestPriceSol, refreshedBasis.currentPriceSol) *
+                    currentSolUsd,
+                trailingStopPriceUsd: refreshedBasis.trailingStopPriceSol * currentSolUsd,
+                currentLossDepthPercent: Math.max(0, -refreshedProfitPercent),
+                defenseCount,
+                maxExtensionPercent: this.aiCutlossMaxExtensionPercent,
+                hardFloorPercent: this.aiCutlossHardFloorPercent,
+            };
+
+            const decision = await this.aiService.evaluateCutlossDefense(
+                trade.tokenMint,
+                trade.symbol || trade.tokenMint,
+                metrics,
+            );
+            const minimumConfidence = this.confidenceRank(this.aiCutlossMinConfidence);
+            const decisionConfidence = this.confidenceRank(decision.confidenceLevel);
+
+            if (
+                decision.action === 'EXTEND_CUTLOSS' &&
+                decision.newStopLossPercent !== undefined &&
+                decisionConfidence >= minimumConfidence
+            ) {
+                const boundedStopLoss = Math.min(
+                    this.aiCutlossHardFloorPercent,
+                    Math.max(
+                        effectiveStopLossPercent + 0.01,
+                        Math.min(
+                            effectiveStopLossPercent + this.aiCutlossMaxExtensionPercent,
+                            decision.newStopLossPercent,
+                        ),
+                    ),
+                );
+                if (boundedStopLoss > effectiveStopLossPercent) {
+                    await this.prismaService.trade.updateMany({
+                        where: { id: trade.id, status: 'OPEN' },
+                        data: {
+                            targetStopLoss: boundedStopLoss,
+                            aiCutlossDefenseCount: { increment: 1 },
+                            aiCutlossLastAt: new Date(),
+                            aiCutlossReason: decision.reasoning,
+                        },
+                    });
+                    this.logger.warn(
+                        `[Slot ${trade.slotNumber}] AI cutloss defense EXTEND. tradeId=${trade.id} pnl=${refreshedProfitPercent.toFixed(2)}% oldSL=${effectiveStopLossPercent}% newSL=${boundedStopLoss}% confidence=${decision.confidenceLevel} reason=${decision.reasoning}`,
+                    );
+                    return true;
+                }
+            }
+
+            this.logger.warn(
+                `[Slot ${trade.slotNumber}] AI cutloss defense SELL. tradeId=${trade.id} pnl=${refreshedProfitPercent.toFixed(2)}% action=${decision.action} confidence=${decision.confidenceLevel} min=${this.aiCutlossMinConfidence} reason=${decision.reasoning}`,
+            );
+            await this.tradeService.executeSell(trade.id, refreshedPrice, 'AI_STOP_LOSS_CONFIRMED');
+            return true;
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error(
+                `[Slot ${trade.slotNumber}] AI cutloss defense failed; fail-closing with STOP_LOSS. ${message}`,
+            );
+            await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS');
+            return true;
+        }
+    }
     private async evaluateTrade(
         trade: TradeWithTelegramChat,
         currentPrice: number,
@@ -946,12 +1153,16 @@ export class PriceMonitorService {
             ? rawNoiseAdjustedTrailingDistance
             : Math.max(
                   rawNoiseAdjustedTrailingDistance,
-                  Math.min(baseTrailingDistancePercent, this.minTrailingDistanceBeforePartialPercent),
+                  Math.min(
+                      baseTrailingDistancePercent,
+                      this.minTrailingDistanceBeforePartialPercent,
+                  ),
               );
         const runnerTrailingMultiplier = trade.partialTakeProfitAt
             ? Math.max(1, this.getNumberConfig('RUNNER_TRAILING_DISTANCE_MULTIPLIER', 2))
             : 1;
-        const effectiveTrailingDistancePercent = noiseAdjustedTrailingDistance * runnerTrailingMultiplier;
+        const effectiveTrailingDistancePercent =
+            noiseAdjustedTrailingDistance * runnerTrailingMultiplier;
 
         this.logger.debug(
             `[Slot ${trade.slotNumber}] Evaluating ${trade.symbol}: Price: $${currentPrice.toFixed(8)} / ${currentPriceSol.toFixed(10)} SOL, Profit: ${profitPercent.toFixed(2)}%, SL: -${effectiveStopLossPercent}%, TSL: ${trailingStopPriceSol.toFixed(10)} SOL, basis=${priceBasis.basis}`,
@@ -1029,7 +1240,10 @@ export class PriceMonitorService {
         // FIX C1: the dynamic hold zone can be disabled outright via config, and is capped so a
         // trade can't sit in the -halfSL..-SL band indefinitely just because the AI keeps
         // reporting non-critical.
-        if (this.enableDynamicHoldZone && this.isDynamicHoldZone(profitPercent, effectiveStopLossPercent)) {
+        if (
+            this.enableDynamicHoldZone &&
+            this.isDynamicHoldZone(profitPercent, effectiveStopLossPercent)
+        ) {
             const zoneEnteredAt = this.dynamicHoldZoneEnteredAt.get(trade.id);
             const nowMs = Date.now();
 
@@ -1061,7 +1275,11 @@ export class PriceMonitorService {
                     this.dynamicHoldZoneEnteredAt.delete(trade.id);
                     // Verifier MINOR fix: distinct exitReason from the genuine hard-floor STOP_LOSS
                     // exit below, so the two are no longer indistinguishable in DB/reporting.
-                    await this.tradeService.executeSell(trade.id, currentPrice, 'STOP_LOSS_ZONE_TIMEOUT');
+                    await this.tradeService.executeSell(
+                        trade.id,
+                        currentPrice,
+                        'STOP_LOSS_ZONE_TIMEOUT',
+                    );
                     return;
                 }
             }
@@ -1121,6 +1339,18 @@ export class PriceMonitorService {
             }
 
             if (
+                await this.handleAiCutlossDefense(
+                    trade,
+                    currentPrice,
+                    currentSolUsd,
+                    profitPercent,
+                    effectiveStopLossPercent,
+                    normalizedFreshMarketSignals,
+                )
+            ) {
+                return;
+            }
+            if (
                 await this.handleEarlyNonCriticalExitGuard(
                     trade,
                     currentPrice,
@@ -1152,7 +1382,10 @@ export class PriceMonitorService {
             if (profitPercent >= 15) {
                 const feeDragPercent = this.estimateFeeDragPercent(trade);
                 const marginPercent = this.getNumberConfig('BREAKEVEN_MARGIN_PERCENT', 2);
-                const configFloorPercent = this.getNumberConfig('RUNNER_BREAKEVEN_FLOOR_PERCENT', 8);
+                const configFloorPercent = this.getNumberConfig(
+                    'RUNNER_BREAKEVEN_FLOOR_PERCENT',
+                    8,
+                );
                 const floorPercent = Math.max(feeDragPercent + marginPercent, configFloorPercent);
                 const breakEvenPlus = entryPriceSol * (1 + floorPercent / 100);
                 newTrailingStop = Math.max(newTrailingStop, breakEvenPlus);
@@ -1347,4 +1580,3 @@ export class PriceMonitorService {
         }
     }
 }
-
