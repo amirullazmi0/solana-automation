@@ -1,0 +1,4 @@
+ALTER TABLE "Trade"
+ADD COLUMN "aiCutlossDefenseCount" INTEGER NOT NULL DEFAULT 0,
+ADD COLUMN "aiCutlossLastAt" TIMESTAMP(3),
+ADD COLUMN "aiCutlossReason" TEXT;

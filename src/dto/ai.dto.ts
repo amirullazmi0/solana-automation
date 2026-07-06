@@ -53,7 +53,25 @@ export interface AIHealthCheckResult {
     reentrySignal: boolean;
 }
 
-export interface AIThresholdSnapshot {    botMode: string;
+export interface AICutlossDefenseMetrics extends AIHealthCheckMetrics {
+    entryPriceUsd: number;
+    currentPriceUsd: number;
+    highestPriceUsd: number;
+    trailingStopPriceUsd: number;
+    currentLossDepthPercent: number;
+    defenseCount: number;
+    maxExtensionPercent: number;
+    hardFloorPercent: number;
+}
+
+export interface AICutlossDefenseResult {
+    action: 'SELL' | 'EXTEND_CUTLOSS';
+    confidenceLevel: 'high' | 'medium' | 'low';
+    reasoning: string;
+    newStopLossPercent?: number;
+}
+export interface AIThresholdSnapshot {
+    botMode: string;
     aiConvictionThreshold: number;
     minLiquidityUsd: number;
     minVolumeUsd: number;

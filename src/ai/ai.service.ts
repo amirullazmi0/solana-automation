@@ -5,6 +5,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
     AIAnalysisMetrics,
     AIAnalysisResult,
+    AICutlossDefenseMetrics,
+    AICutlossDefenseResult,
     AIHealthCheckMetrics,
     AIHealthCheckResult,
     AIThresholdSnapshot,
@@ -123,7 +125,9 @@ export class AIService {
             return snapshot.id;
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
-            this.logger.warn(`[AI TRACE] Failed to save decision snapshot for ${tokenMint}: ${msg}`);
+            this.logger.warn(
+                `[AI TRACE] Failed to save decision snapshot for ${tokenMint}: ${msg}`,
+            );
             return undefined;
         }
     }
@@ -173,23 +177,25 @@ export class AIService {
     ): AIAnalysisResult {
         const score = Number(parsed.cuanConvictionScore);
         const predictedPump = Number(parsed.predictedPumpPercentage);
-        const confidenceLevel = ['high', 'medium', 'low'].includes(
-            parsed.confidenceLevel || '',
-        )
+        const confidenceLevel = ['high', 'medium', 'low'].includes(parsed.confidenceLevel || '')
             ? (parsed.confidenceLevel as AIAnalysisResult['confidenceLevel'])
             : 'low';
         const action = parsed.action === 'buy' || parsed.action === 'skip' ? parsed.action : 'skip';
 
         const result: AIAnalysisResult = {
             cuanConvictionScore: Number.isFinite(score) ? Math.min(Math.max(score, 0), 100) : 0,
-            predictedPumpPercentage: Number.isFinite(predictedPump) ? Math.max(predictedPump, 0) : 0,
+            predictedPumpPercentage: Number.isFinite(predictedPump)
+                ? Math.max(predictedPump, 0)
+                : 0,
             confidenceLevel,
             reasoning:
                 typeof parsed.reasoning === 'string' && parsed.reasoning.trim().length > 0
                     ? parsed.reasoning.trim().slice(0, 500)
                     : 'No reasoning provided.',
             action,
-            positionSizeMultiplier: this.sanitizePositionSizeMultiplier(parsed.positionSizeMultiplier),
+            positionSizeMultiplier: this.sanitizePositionSizeMultiplier(
+                parsed.positionSizeMultiplier,
+            ),
             customTrailingBaseDistance: this.sanitizeTrailingBaseDistance(
                 parsed.customTrailingBaseDistance,
             ),
@@ -260,7 +266,9 @@ export class AIService {
 
     private getDeterministicHealthCheck(metrics: AIHealthCheckMetrics): AIHealthCheckResult {
         const buyConfidence = this.calculateBuyConfidence(metrics);
-        const socialCount = [metrics.hasWebsite, metrics.hasTwitter, metrics.hasTelegram].filter(Boolean).length;
+        const socialCount = [metrics.hasWebsite, metrics.hasTwitter, metrics.hasTelegram].filter(
+            Boolean,
+        ).length;
         const volumeSurge = metrics.volumeSurge ?? 0;
         const liquidityDead = metrics.liquidityUsd <= 0;
         const volumeDead = metrics.volume5mUsd <= 0;
@@ -285,7 +293,8 @@ export class AIService {
         }
 
         const hasBouncePressure = metrics.buys5mCount > metrics.sells5mCount && volumeSurge >= 1.1;
-        const hasHealthyStructure = buyConfidence >= 0.55 && metrics.volume5mUsd > 0 && metrics.liquidityUsd > 0;
+        const hasHealthyStructure =
+            buyConfidence >= 0.55 && metrics.volume5mUsd > 0 && metrics.liquidityUsd > 0;
         const hasSocialAnchor = socialCount > 0;
 
         if (hasHealthyStructure && (hasBouncePressure || hasSocialAnchor)) {
@@ -302,11 +311,250 @@ export class AIService {
         return {
             status: 'CRITICAL',
             confidenceLevel: 'low',
-            reasoning: 'Fallback health check critical: sinyal kesehatan tidak cukup kuat untuk menahan posisi dekat stop loss.',
+            reasoning:
+                'Fallback health check critical: sinyal kesehatan tidak cukup kuat untuk menahan posisi dekat stop loss.',
             reentrySignal: false,
         };
     }
 
+    private normalizeCutlossDefenseResult(
+        parsed: Partial<AICutlossDefenseResult>,
+        fallback: AICutlossDefenseResult,
+        metrics: AICutlossDefenseMetrics,
+    ): AICutlossDefenseResult {
+        const confidenceLevel = ['high', 'medium', 'low'].includes(parsed.confidenceLevel || '')
+            ? (parsed.confidenceLevel as AICutlossDefenseResult['confidenceLevel'])
+            : fallback.confidenceLevel;
+        const reasoning =
+            typeof parsed.reasoning === 'string' && parsed.reasoning.trim().length > 0
+                ? parsed.reasoning.trim().slice(0, 500)
+                : fallback.reasoning;
+        const requestedStopLoss = Number(parsed.newStopLossPercent);
+        const minimumStopLoss = Math.max(
+            metrics.stopLossPercent,
+            metrics.currentLossDepthPercent + 1,
+        );
+        const maximumStopLoss = Math.min(
+            metrics.hardFloorPercent,
+            metrics.stopLossPercent + metrics.maxExtensionPercent,
+        );
+
+        if (parsed.action === 'EXTEND_CUTLOSS' && Number.isFinite(requestedStopLoss)) {
+            const newStopLossPercent = Math.max(
+                minimumStopLoss,
+                Math.min(maximumStopLoss, requestedStopLoss),
+            );
+            if (
+                newStopLossPercent > metrics.stopLossPercent &&
+                newStopLossPercent <= metrics.hardFloorPercent
+            ) {
+                return {
+                    action: 'EXTEND_CUTLOSS',
+                    confidenceLevel,
+                    reasoning,
+                    newStopLossPercent,
+                };
+            }
+        }
+
+        return {
+            action: 'SELL',
+            confidenceLevel,
+            reasoning:
+                parsed.action === 'EXTEND_CUTLOSS'
+                    ? `${reasoning} Requested cutloss extension was outside safety bounds.`.slice(
+                          0,
+                          500,
+                      )
+                    : reasoning,
+        };
+    }
+
+    private getDeterministicCutlossDefense(
+        metrics: AICutlossDefenseMetrics,
+    ): AICutlossDefenseResult {
+        const buyConfidence = this.calculateBuyConfidence(metrics);
+        const volumeSurge = metrics.volumeSurge ?? 0;
+        const liquidityDead = metrics.liquidityUsd <= 0;
+        const volumeDead = metrics.volume5mUsd <= 0;
+        const sellPressure = metrics.sells5mCount >= Math.max(5, metrics.buys5mCount * 1.5);
+        const volumeCollapse = volumeSurge > 0 && volumeSurge < 0.5;
+        const deepMomentumBreak = metrics.priceChange1hPct <= -25;
+        const alreadyNearHardFloor =
+            metrics.currentLossDepthPercent >= metrics.hardFloorPercent - 1;
+
+        if (
+            liquidityDead ||
+            volumeDead ||
+            sellPressure ||
+            volumeCollapse ||
+            deepMomentumBreak ||
+            alreadyNearHardFloor
+        ) {
+            const reasons = [
+                liquidityDead ? 'liquidity kosong' : undefined,
+                volumeDead ? 'volume 5m kosong' : undefined,
+                sellPressure ? 'sell pressure dominan' : undefined,
+                volumeCollapse ? 'volume acceleration melemah tajam' : undefined,
+                deepMomentumBreak ? 'momentum 1h breakdown' : undefined,
+                alreadyNearHardFloor ? 'loss sudah dekat hard floor' : undefined,
+            ].filter(Boolean);
+            return {
+                action: 'SELL',
+                confidenceLevel: 'medium',
+                reasoning: `Fallback cutloss defense SELL: ${reasons.join(', ')}.`,
+            };
+        }
+
+        const hasBouncePressure = metrics.buys5mCount > metrics.sells5mCount && volumeSurge >= 1.1;
+        const hasHealthyStructure =
+            buyConfidence >= 0.58 && metrics.liquidityUsd > 0 && metrics.volume5mUsd > 0;
+        const trendStillRecoverable = metrics.priceChange1hPct > -20;
+        const hasSocialAnchor =
+            [metrics.hasWebsite, metrics.hasTwitter, metrics.hasTelegram].filter(Boolean).length >
+            0;
+
+        if (hasBouncePressure && hasHealthyStructure && trendStillRecoverable) {
+            const suggestedStopLoss = Math.min(
+                metrics.hardFloorPercent,
+                Math.max(
+                    metrics.currentLossDepthPercent + 3,
+                    metrics.stopLossPercent +
+                        Math.min(metrics.maxExtensionPercent, hasSocialAnchor ? 7 : 5),
+                ),
+            );
+            return {
+                action: 'EXTEND_CUTLOSS',
+                confidenceLevel: hasSocialAnchor ? 'high' : 'medium',
+                reasoning:
+                    'Fallback cutloss defense HOLD: buy pressure dan volume masih mendukung potensi bounce.',
+                newStopLossPercent: suggestedStopLoss,
+            };
+        }
+
+        return {
+            action: 'SELL',
+            confidenceLevel: 'low',
+            reasoning:
+                'Fallback cutloss defense SELL: sinyal bounce belum cukup kuat untuk memperlebar cutloss.',
+        };
+    }
+
+    async evaluateCutlossDefense(
+        tokenMint: string,
+        symbol: string,
+        metrics: AICutlossDefenseMetrics,
+    ): Promise<AICutlossDefenseResult> {
+        const fallback = this.getDeterministicCutlossDefense(metrics);
+        const apiKey = this.configService.get<string>('OPENAI_API_KEY');
+        if (!apiKey) {
+            this.logger.warn(
+                `[AI Cutloss] OPENAI_API_KEY is not configured for ${tokenMint}. Using deterministic fallback.`,
+            );
+            return fallback;
+        }
+
+        const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
+        const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
+
+        try {
+            const response = await axios.post<OpenAIChatCompletionResponse>(
+                `${baseUrl}/chat/completions`,
+                {
+                    model,
+                    messages: [
+                        {
+                            role: 'system',
+                            content: `You are MaSoul Sniper's AI Cutloss Defense Engine for already-open Solana positions.
+Return only valid JSON with exactly these fields:
+{
+  "action": "SELL" | "EXTEND_CUTLOSS",
+  "confidenceLevel": "high" | "medium" | "low",
+  "reasoning": "brief Indonesian reason, max 2 sentences",
+  "newStopLossPercent": <number, required only when EXTEND_CUTLOSS>
+}
+Rules:
+- SELL means execute cutloss now because liquidity, volume, buy pressure, social support, or momentum no longer justify the risk.
+- EXTEND_CUTLOSS means the dip can be given a bounded wider stop because fresh data shows likely bounce/recovery.
+- EXTEND_CUTLOSS requires concrete fresh support: buys dominate sells, volume is alive or accelerating, liquidity is not broken, and 1h structure is not structurally dead.
+- Never extend beyond hardFloorPercent or stopLossPercent + maxExtensionPercent.
+- Be conservative. If confidence is low, prefer SELL.`,
+                        },
+                        {
+                            role: 'user',
+                            content: JSON.stringify({
+                                tokenMint,
+                                symbol,
+                                pnlPercent: metrics.currentProfitPercent,
+                                currentLossDepthPercent: metrics.currentLossDepthPercent,
+                                stopLossPercent: metrics.stopLossPercent,
+                                maxExtensionPercent: metrics.maxExtensionPercent,
+                                hardFloorPercent: metrics.hardFloorPercent,
+                                defenseCount: metrics.defenseCount,
+                                ageHours: metrics.ageHours,
+                                liquidityUsd: metrics.liquidityUsd,
+                                marketCapUsd: metrics.marketCapUsd,
+                                volume5mUsd: metrics.volume5mUsd,
+                                buys5mCount: metrics.buys5mCount,
+                                sells5mCount: metrics.sells5mCount,
+                                buyConfidence: this.calculateBuyConfidence(metrics),
+                                priceChange1hPct: metrics.priceChange1hPct,
+                                volumeSurge: metrics.volumeSurge,
+                                volScore: metrics.volScore,
+                                zScore: metrics.zScore,
+                                prices: {
+                                    entryPriceUsd: metrics.entryPriceUsd,
+                                    currentPriceUsd: metrics.currentPriceUsd,
+                                    highestPriceUsd: metrics.highestPriceUsd,
+                                    trailingStopPriceUsd: metrics.trailingStopPriceUsd,
+                                },
+                                socials: {
+                                    website: metrics.hasWebsite,
+                                    twitter: metrics.hasTwitter,
+                                    telegram: metrics.hasTelegram,
+                                    dexPaidUpdated: metrics.isDexPaidUpdated,
+                                    communityTakeover: metrics.isCommunityTakeover,
+                                },
+                                route: metrics.route,
+                                fallbackVerdict: fallback,
+                            }),
+                        },
+                    ],
+                    response_format: { type: 'json_object' },
+                    temperature: 0.1,
+                },
+                {
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json',
+                    },
+                    timeout: 8000,
+                },
+            );
+
+            const content = response.data.choices?.[0]?.message?.content;
+            if (!content) throw new Error('Empty response from AI cutloss defense');
+
+            const result = this.normalizeCutlossDefenseResult(
+                JSON.parse(content) as Partial<AICutlossDefenseResult>,
+                fallback,
+                metrics,
+            );
+            this.logger.log(
+                `[AI Cutloss] ${symbol || tokenMint} action=${result.action} confidence=${result.confidenceLevel} newSL=${result.newStopLossPercent ?? 'n/a'} reason=${result.reasoning}`,
+            );
+            return result;
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(
+                `[AI Cutloss] Check failed for ${tokenMint}: ${msg}. Using fallback=${fallback.action}.`,
+            );
+            return {
+                ...fallback,
+                reasoning: `${fallback.reasoning} AI unavailable: ${msg}`.slice(0, 500),
+            };
+        }
+    }
     async evaluateTokenHealth(
         tokenMint: string,
         symbol: string,
@@ -315,7 +563,9 @@ export class AIService {
         const fallback = this.getDeterministicHealthCheck(metrics);
         const apiKey = this.configService.get<string>('OPENAI_API_KEY');
         if (!apiKey) {
-            this.logger.warn(`[AI Health] OPENAI_API_KEY is not configured for ${tokenMint}. Using deterministic fallback.`);
+            this.logger.warn(
+                `[AI Health] OPENAI_API_KEY is not configured for ${tokenMint}. Using deterministic fallback.`,
+            );
             return fallback;
         }
 
@@ -389,14 +639,18 @@ Rules:
             const content = response.data.choices?.[0]?.message?.content;
             if (!content) throw new Error('Empty response from AI health check');
 
-            const result = this.normalizeHealthCheckResult(JSON.parse(content) as Partial<AIHealthCheckResult>);
+            const result = this.normalizeHealthCheckResult(
+                JSON.parse(content) as Partial<AIHealthCheckResult>,
+            );
             this.logger.log(
                 `[AI Health] ${symbol || tokenMint} verdict=${result.status} confidence=${result.confidenceLevel} reentry=${result.reentrySignal} reason=${result.reasoning}`,
             );
             return result;
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
-            this.logger.warn(`[AI Health] Check failed for ${tokenMint}: ${msg}. Using fallback=${fallback.status}.`);
+            this.logger.warn(
+                `[AI Health] Check failed for ${tokenMint}: ${msg}. Using fallback=${fallback.status}.`,
+            );
             return {
                 ...fallback,
                 reasoning: `${fallback.reasoning} AI unavailable: ${msg}`.slice(0, 500),
@@ -440,7 +694,9 @@ Rules:
         const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
         const thresholds = this.getThresholdSnapshot();
 
-        this.logger.log(`🧠 Calling AI Model (${model}) to analyze token $${symbol} (${tokenMint})...`);
+        this.logger.log(
+            `🧠 Calling AI Model (${model}) to analyze token $${symbol} (${tokenMint})...`,
+        );
 
         try {
             const systemPrompt = `You are MaSoul Sniper's AI Conviction Engine, an expert Solana on-chain analyst and quantitative memecoin trader.
@@ -646,7 +902,3 @@ Evaluate against the live thresholds above and return the JSON decision.`;
         }
     }
 }
-
-
-
-
