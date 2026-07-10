@@ -182,7 +182,7 @@ export class PriceMonitorService {
             0,
             this.getNumberConfig('STOP_LOSS_GUARD_DEPTH_FLOOR_PERCENT', 30),
         );
-        this.enableAiCutlossDefense = this.getBooleanConfig('ENABLE_AI_CUTLOSS_DEFENSE', true);
+        this.enableAiCutlossDefense = this.getBooleanConfig('ENABLE_AI_CUTLOSS_DEFENSE', false);
         this.aiCutlossMaxExtensionPercent = Math.max(
             0,
             this.getNumberConfig('AI_CUTLOSS_MAX_EXTENSION_PERCENT', 10),
