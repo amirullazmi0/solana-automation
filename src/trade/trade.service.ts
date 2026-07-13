@@ -1432,17 +1432,18 @@ export class TradeService implements OnModuleInit {
                     message: `[DRY_RUN] Quote validated. No live swap executed for ${symbol}.`,
                 };
             }
-            // Get initial balances for watch addresses
-            let initialCreatorBalance = 0;
-            let initialTopHolderBalance = 0;
+            // Keep RPC failures distinct from a real zero balance. A failed lookup must not
+            // disable the developer-dump watcher by being silently stored as 0.
+            let initialCreatorBalance: number | null = null;
+            let initialTopHolderBalance: number | null = null;
 
             if (metadata?.creator) {
                 const bal = await this.getTokenBalance(metadata.creator, tokenMint);
-                initialCreatorBalance = typeof bal === 'number' ? bal : 0;
+                initialCreatorBalance = typeof bal === 'number' && Number.isFinite(bal) ? bal : null;
             }
             if (metadata?.topHolder) {
                 const bal = await this.getTokenBalance(metadata.topHolder, tokenMint);
-                initialTopHolderBalance = typeof bal === 'number' ? bal : 0;
+                initialTopHolderBalance = typeof bal === 'number' && Number.isFinite(bal) ? bal : null;
             }
 
             const mergedScaleIn = existingOpenTrade

@@ -50,6 +50,30 @@ export interface MonitorSolPriceBasis {
     basis: 'sol' | 'legacy_usd_converted';
 }
 
+export interface CreatorDumpCheckResult {
+    detected: boolean;
+    dumpPercent: number | null;
+}
+
+export function detectCreatorDump(
+    initialCreatorBalance: unknown,
+    currentCreatorBalance: unknown,
+    thresholdPercent = 20,
+): CreatorDumpCheckResult {
+    const initial = Number(initialCreatorBalance);
+    const current = Number(currentCreatorBalance);
+    if (!Number.isFinite(initial) || initial <= 0 || !Number.isFinite(current)) {
+        return { detected: false, dumpPercent: null };
+    }
+
+    const threshold = Math.min(100, Math.max(0, Number(thresholdPercent))) / 100;
+    const dumpPercent = Math.max(0, (1 - current / initial) * 100);
+    return {
+        detected: current < initial * (1 - threshold),
+        dumpPercent,
+    };
+}
+
 export function resolveMonitorSolPriceBasis(params: {
     currentPriceUsd: number;
     currentSolUsd: number;
@@ -107,6 +131,7 @@ export class PriceMonitorService {
     private readonly dynamicHoldZoneMaxMs: number;
     private readonly stopLossGuardDepthFloorPercent: number;
     private readonly enableAiCutlossDefense: boolean;
+    private readonly devDumpThresholdRatio: number;
     private readonly aiCutlossMaxExtensionPercent: number;
     private readonly aiCutlossHardFloorPercent: number;
     private readonly aiCutlossMaxDefensesPerTrade: number;
@@ -183,6 +208,10 @@ export class PriceMonitorService {
             this.getNumberConfig('STOP_LOSS_GUARD_DEPTH_FLOOR_PERCENT', 30),
         );
         this.enableAiCutlossDefense = this.getBooleanConfig('ENABLE_AI_CUTLOSS_DEFENSE', false);
+        this.devDumpThresholdRatio = Math.min(
+            1,
+            Math.max(0, this.getNumberConfig('DEV_DUMP_THRESHOLD_PERCENT', 20) / 100),
+        );
         this.aiCutlossMaxExtensionPercent = Math.max(
             0,
             this.getNumberConfig('AI_CUTLOSS_MAX_EXTENSION_PERCENT', 10),
@@ -1202,15 +1231,18 @@ export class PriceMonitorService {
                     trade.creatorAddress,
                     trade.tokenMint,
                 );
-                if (typeof currentCreatorBalance === 'number' && trade.initialCreatorBalance) {
-                    if (currentCreatorBalance < trade.initialCreatorBalance * 0.8) {
-                        // Dev dump > 20% (Lebih sensitif buat modal kecil)
+                const creatorDump = detectCreatorDump(
+                    trade.initialCreatorBalance,
+                    currentCreatorBalance,
+                    this.devDumpThresholdRatio * 100,
+                );
+                if (creatorDump.detected) {
+                    // A zero baseline means the creator had no tracked tokens; there is no dump to measure.
                         this.logger.warn(
                             `[Slot ${trade.slotNumber}] 🔥 EMERGENCY: Developer is dumping! PANIC SELL.`,
                         );
                         await this.tradeService.executeSell(trade.id, currentPrice, 'DEV_DUMP');
-                        return;
-                    }
+                    return;
                 }
             }
             // Top Whale Check (Leniency 15%)

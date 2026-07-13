@@ -1104,7 +1104,13 @@ export class AnalyzerService {
                 .slice(0, 10)
                 .reduce((sum: number, holder: RugCheckHolder) => sum + holder.share, 0);
 
-            if (top10Share > 20) {
+            const maxTop10Share = Math.max(
+                0,
+                Number.parseFloat(
+                    String(this.configService.get('MAX_TOP10_HOLDER_PCT', '20')),
+                ),
+            );
+            if (top10Share > maxTop10Share) {
                 this.logger.warn(
                     `❌ REJECTED: Top 10 Holders menguasai ${top10Share.toFixed(2)}% supply. Terlalu pekat!`,
                 );
@@ -1258,6 +1264,33 @@ export class AnalyzerService {
             const creatorPct = ownership.creatorPct ?? 0;
             const isCTO = creator ? ownership.isCTO : false;
 
+            const requireDevZeroBalance = ['true', '1', 'yes', 'on'].includes(
+                String(this.configService.get('REQUIRE_DEV_ZERO_BALANCE', 'false'))
+                    .trim()
+                    .toLowerCase(),
+            );
+            const maxCreatorHoldPctForBuy = Math.max(
+                0,
+                Number.parseFloat(
+                    String(this.configService.get('MAX_CREATOR_HOLD_PCT_FOR_BUY', '0.1')),
+                ),
+            );
+            if (
+                requireDevZeroBalance &&
+                (!creator || !Number.isFinite(creatorPct) || creatorPct > maxCreatorHoldPctForBuy)
+            ) {
+                this.logger.warn(
+                    `[${tokenMint}] Creator is not effectively empty (${creatorPct.toFixed(4)}%). Skip.`,
+                );
+                return {
+                    passed: false,
+                    reason: 'creator_not_zero',
+                    permanent: true,
+                    isCTO,
+                };
+            }
+
+
             // Hitung safetyIndex menggunakan persentase (pct) langsung dari API
             const top10SumPct = filteredHolders
                 .slice(0, 10)
@@ -1348,8 +1381,7 @@ export class AnalyzerService {
                 };
             }
 
-            if (creator && !isCTO) {
-                if (creatorPct > 5) {
+            if (creator && creatorPct > maxCreatorHoldPctForBuy) {
                     this.logger.warn(
                         `[${tokenMint}] 🛑 Creator holds too much (${creatorPct.toFixed(2)}%). Skip.`,
                     );
@@ -1360,7 +1392,6 @@ export class AnalyzerService {
                         permanent: true,
                         isCTO,
                     };
-                }
             }
 
             return {
@@ -1437,8 +1468,10 @@ export class AnalyzerService {
                 const accounts = await this.connection.getParsedTokenAccountsByOwner(creatorKey, {
                     mint: mintKey,
                 });
-                if (accounts.value.length === 0) return 0;
-                return accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+                return accounts.value.reduce((sum, account) => {
+                    const amount = account.account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+                    return sum + amount;
+                }, 0);
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 this.logger.warn(`Creator balance RPC failed (attempt ${attempt}/3): ${msg}`);

@@ -226,10 +226,44 @@ export class EstablishedAnalyzerService {
             const creatorPct = ownership.creatorPct ?? 0;
             const isCTO = creator ? ownership.isCTO : false;
 
+            const requireDevZeroBalance = ['true', '1', 'yes', 'on'].includes(
+                String(this.configService.get('REQUIRE_DEV_ZERO_BALANCE', 'false'))
+                    .trim()
+                    .toLowerCase(),
+            );
+            const maxCreatorHoldPctForBuy = Math.max(
+                0,
+                Number.parseFloat(
+                    String(this.configService.get('MAX_CREATOR_HOLD_PCT_FOR_BUY', '0.1')),
+                ),
+            );
+            if (
+                requireDevZeroBalance &&
+                (!creator || !Number.isFinite(creatorPct) || creatorPct > maxCreatorHoldPctForBuy)
+            ) {
+                this.logger.warn(
+                    `[${tokenMint}] Established creator is not effectively empty (${creatorPct.toFixed(4)}%). Reject.`,
+                );
+                return { passed: false, reason: 'established_creator_not_zero', isCTO };
+            }
+
+
             const top10SumPct = filteredHolders
                 .slice(0, 10)
                 .reduce((sum: number, h: RugCheckApiHolder) => sum + (h.pct || 0), 0);
             const safetyIndex = 1 - top10SumPct / 100;
+            const maxTop10HolderPct = Math.max(
+                0,
+                Number.parseFloat(
+                    String(this.configService.get('MAX_TOP10_HOLDER_PCT', '20')),
+                ),
+            );
+            if (top10SumPct > maxTop10HolderPct) {
+                this.logger.warn(
+                    `[${tokenMint}] Established top 10 holders too concentrated (${top10SumPct.toFixed(2)}%). Reject.`,
+                );
+                return { passed: false, reason: 'established_high_concentration', isCTO };
+            }
 
             const defaultSafetyIndex = isCTO ? '0.20' : '0.65';
             const minSafetyIndex = Number.parseFloat(
@@ -287,13 +321,11 @@ export class EstablishedAnalyzerService {
                 return { passed: false, reason: 'established_danger_risks_detected', isCTO };
             }
 
-            if (creator && !isCTO) {
-                if (creatorPct > 5) {
+            if (creator && creatorPct > maxCreatorHoldPctForBuy) {
                     this.logger.warn(
                         `[${tokenMint}] 🛑 Established Creator holds too much (${creatorPct.toFixed(2)}%). Reject.`,
                     );
                     return { passed: false, reason: 'established_creator_holds_too_much', isCTO };
-                }
             }
 
             return {
@@ -366,8 +398,10 @@ export class EstablishedAnalyzerService {
                 const accounts = await this.connection.getParsedTokenAccountsByOwner(creatorKey, {
                     mint: mintKey,
                 });
-                if (accounts.value.length === 0) return 0;
-                return accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+                return accounts.value.reduce((sum, account) => {
+                    const amount = account.account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+                    return sum + amount;
+                }, 0);
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 this.logger.warn(

@@ -1,5 +1,26 @@
-import { PriceMonitorService, resolveMonitorSolPriceBasis } from './price-monitor.service';
+import {
+    PriceMonitorService,
+    detectCreatorDump,
+    resolveMonitorSolPriceBasis,
+} from './price-monitor.service';
 import { DexLimiter } from '../common/dex-limiter';
+
+describe('detectCreatorDump', () => {
+    it('detects an 89% developer dump', () => {
+        const result = detectCreatorDump(100, 11);
+
+        expect(result.detected).toBe(true);
+        expect(result.dumpPercent).toBeCloseTo(89, 8);
+    });
+
+    it('does not treat a real zero baseline as a dump', () => {
+        expect(detectCreatorDump(0, 0)).toEqual({ detected: false, dumpPercent: null });
+    });
+
+    it('does not treat an RPC failure as a zero baseline', () => {
+        expect(detectCreatorDump(null, null)).toEqual({ detected: false, dumpPercent: null });
+    });
+});
 
 describe('resolveMonitorSolPriceBasis', () => {
     it('keeps SOL-denominated trade prices as SOL basis', () => {
