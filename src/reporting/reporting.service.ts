@@ -1257,8 +1257,8 @@ export class ReportingService implements OnModuleInit {
             ? `\nTarget: TP ${options.targetTakeProfit}% | TSL ${options.targetTrailingDistance}% | SL ${options.targetStopLoss}%`
             : '';
         const header = isDryRun
-            ? '*MUST BUY SIGNAL - DRY RUN*'
-            : '*MUST BUY SIGNAL - EXECUTION ATTEMPTING*';
+            ? '*BUY CANDIDATE - DRY RUN*'
+            : '*BUY CANDIDATE - EXECUTION ATTEMPTING*';
         const modeLine = isDryRun
             ? 'Mode: `Signal only. Bot did not execute swap.`'
             : 'Mode: `Execution checks and swap attempt are running for this chat.`';

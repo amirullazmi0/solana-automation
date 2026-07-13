@@ -2995,6 +2995,41 @@ export class TradeService implements OnModuleInit {
             // the balance still shows the un-sold tokens, and a blind re-sell would
             // double-execute.
             if (broadcasted) {
+                const confirmedOnChainFailure = message.startsWith('Transaction failed:');
+                const retryableOnChainFailure =
+                    confirmedOnChainFailure &&
+                    (message.includes('6001') || /slippage/i.test(message));
+                if (retryableOnChainFailure && retryCount < maxRetries - 1) {
+                    const waitTime = Math.min(1000 * (retryCount + 1), 3000);
+                    this.logger.warn(
+                        `[Jupiter] ${side} was definitively rejected on-chain after broadcast. ` +
+                            `Refreshing quote and retrying in ${waitTime}ms (attempt ${retryCount + 2}/${maxRetries}).`,
+                    );
+                    await new Promise((res) => setTimeout(res, waitTime));
+                    return this.executeJupiterSwap(
+                        inputMint,
+                        outputMint,
+                        amount,
+                        side,
+                        buyAmountUSD,
+                        retryCount + 1,
+                        customSlippageBps,
+                        priorityFeeLamports,
+                        activeWallet,
+                        dryRun,
+                        route,
+                        errorClass,
+                    );
+                }
+                if (confirmedOnChainFailure) {
+                    return {
+                        success: false,
+                        entryPrice: 0,
+                        error: `swap_failed:${message}`,
+                        txHash: undefined,
+                        jitoTipLamports,
+                    };
+                }
                 this.logger.error(
                     `[Jupiter] ${side} failed AFTER broadcast (${errorClass}): ${message}. ` +
                         `Not re-sending in-call to avoid double-execution; returning signature ` +

@@ -728,6 +728,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             );
             const maxWaitTime = maxWaitMin * 60 * 1000;
             let localNotified = false;
+            let highSurgeConfirmationCount = 0;
 
             // Bersihkan notifiedTokens yang sudah > 6 jam
             const now = Date.now();
@@ -880,6 +881,43 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     // 🛡️ HARDENED ANTI-SPAM (V2)
                     const surge = result.metadata?.volumeSurge || 0;
                     const mcap = result.metadata?.mcap || 0;
+                    const highSurgeThreshold = Math.max(
+                        0,
+                        Number.parseFloat(
+                            String(this.configService.get('HIGH_SURGE_THRESHOLD', '10')),
+                        ),
+                    );
+                    const requiredHighSurgeConfirmations = Math.max(
+                        1,
+                        Number.parseInt(
+                            String(this.configService.get('HIGH_SURGE_CONFIRMATION_SCANS', '2')),
+                            10,
+                        ),
+                    );
+                    if (result.safe && surge >= highSurgeThreshold) {
+                        highSurgeConfirmationCount++;
+                        if (highSurgeConfirmationCount < requiredHighSurgeConfirmations) {
+                            await this.updateWatchlistByMint(tokenMint, {
+                                reason: 'high_surge_confirmation_pending',
+                            });
+                            this.logger.log(
+                                `[${tokenMint}] High surge confirmation ${highSurgeConfirmationCount}/${requiredHighSurgeConfirmations}; waiting for fresh market data.`,
+                            );
+                            await new Promise((res) =>
+                                setTimeout(
+                                    res,
+                                    Number.parseInt(
+                                        String(this.configService.get('SCANNER_RECHECK_DELAY_MS', '1000')),
+                                        10,
+                                    ),
+                                ),
+                            );
+                            continue;
+                        }
+                        highSurgeConfirmationCount = 0;
+                    } else if (surge < highSurgeThreshold || !result.safe) {
+                        highSurgeConfirmationCount = 0;
+                    }
                     const ageHours = result.metadata?.pairCreatedAt
                         ? (Date.now() - result.metadata.pairCreatedAt) / (1000 * 60 * 60)
                         : 0;

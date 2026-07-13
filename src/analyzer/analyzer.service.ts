@@ -994,6 +994,58 @@ export class AnalyzerService {
                 };
             }
 
+            const buySellRatioThreshold = Math.max(
+                1,
+                Number.parseFloat(
+                    String(this.configService.get('BUY_SELL_RATIO_THRESHOLD', '1.2')),
+                ),
+            );
+            if (sells5m > 0 && buys5m <= sells5m * buySellRatioThreshold) {
+                logMarketMetricReject('low_buyer_dominance');
+                return {
+                    passed: false,
+                    reason: 'low_buyer_dominance',
+                    marketCap,
+                    symbol,
+                    pairCreatedAt,
+                    socials,
+                    liquidity,
+                    volumeSurge,
+                    volScore,
+                    zScore,
+                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange15m: pair.priceChange?.m15 || 0,
+                    priceChange1h,
+                    isPumpFun,
+                    volume5m,
+                    buys5m,
+                    sells5m,
+                };
+            }
+
+            if ((pair.priceChange?.m5 || 0) <= 0) {
+                logMarketMetricReject('negative_short_term_momentum');
+                return {
+                    passed: false,
+                    reason: 'negative_short_term_momentum',
+                    marketCap,
+                    symbol,
+                    pairCreatedAt,
+                    socials,
+                    liquidity,
+                    volumeSurge,
+                    volScore,
+                    zScore,
+                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange15m: pair.priceChange?.m15 || 0,
+                    priceChange1h,
+                    isPumpFun,
+                    volume5m,
+                    buys5m,
+                    sells5m,
+                };
+            }
+
             if (velocity < minVelocity) {
                 logMarketMetricReject('low_velocity');
                 return {
