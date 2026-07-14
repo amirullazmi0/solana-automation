@@ -1,5 +1,7 @@
 import {
     TradeService,
+    capBuyPositionUsd,
+    evaluateBuySignalGuard,
     calculateCleanSwapSolAmount,
     calculateFinalBuySizeUsd,
     calculateRealizedSellPnl,
@@ -18,6 +20,47 @@ import {
 import { computeNetProfitUsd } from '../common/fee-utils';
 
 describe('TradeService calculation helpers', () => {
+
+    describe('buy sizing and signal guards', () => {
+        it('caps a DB position by absolute and wallet percentage limits', () => {
+            expect(capBuyPositionUsd(7, 5, 14, 35)).toBeCloseTo(4.9);
+            expect(capBuyPositionUsd(4, 5, 14, 35)).toBe(4);
+        });
+
+        it('rejects stale and chased buy signals', () => {
+            expect(
+                evaluateBuySignalGuard({
+                    signalObservedAt: 1000,
+                    now: 9001,
+                    maxSignalAgeMs: 8000,
+                    maxChasePct: 5,
+                }),
+            ).toBe('buy_signal_stale');
+            expect(
+                evaluateBuySignalGuard({
+                    signalPriceUsd: 100,
+                    quotePriceUsd: 105.01,
+                    now: 1000,
+                    maxSignalAgeMs: 8000,
+                    maxChasePct: 5,
+                }),
+            ).toContain('buy_price_chase');
+        });
+
+        it('allows a fresh quote inside the chase limit', () => {
+            expect(
+                evaluateBuySignalGuard({
+                    signalObservedAt: 1000,
+                    signalPriceUsd: 100,
+                    quotePriceUsd: 105,
+                    now: 8999,
+                    maxSignalAgeMs: 8000,
+                    maxChasePct: 5,
+                }),
+            ).toBeNull();
+        });
+    });
+
     describe('normalizePriceImpactPct', () => {
         it('converts fraction-style Jupiter values to percent', () => {
             expect(normalizePriceImpactPct('0.012')).toBeCloseTo(1.2);

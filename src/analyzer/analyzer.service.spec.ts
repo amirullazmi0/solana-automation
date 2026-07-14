@@ -33,6 +33,21 @@ describe('selectBestDexScreenerPair', () => {
         expect(selectBestDexScreenerPair([quiet, active])).toBe(active);
     });
 
+    it('requires the requested mint to be the base token', () => {
+        const wrongMint = pair({
+            dexId: 'wrong',
+            baseToken: { address: 'OTHER' },
+            liquidity: { usd: 50000 },
+        });
+        const matching = pair({
+            dexId: 'matching',
+            baseToken: { address: 'MINT' },
+            liquidity: { usd: 5000 },
+        });
+
+        expect(selectBestDexScreenerPair([wrongMint, matching], 'MINT')).toBe(matching);
+    });
+
     it('returns undefined when there is no Solana pair', () => {
         expect(selectBestDexScreenerPair([pair({ chainId: 'ethereum' })])).toBeUndefined();
         expect(selectBestDexScreenerPair(undefined)).toBeUndefined();

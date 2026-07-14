@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
 import { TradeService } from '../trade/trade.service';
 import { DexLimiter } from '../common/dex-limiter';
+import { selectBestDexScreenerPair } from '../common/dex-pair';
 import { AIService } from '../ai/ai.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 import { DexScreenerPair } from '../dto/analyzer.dto';
@@ -333,7 +334,7 @@ export class PriceMonitorService {
         return { severity, reasons, isFakePump: severity >= 70 };
     }
 
-    @Interval(2000)
+    @Interval(1000)
     async monitorPrices() {
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN', mode: 'LIVE' },
@@ -417,7 +418,7 @@ export class PriceMonitorService {
                     try {
                         if (this.processingTrades.has(trade.id)) return;
                         // FIX A4a: claim the slot synchronously, right after the has() check and
-                        // before any await, so an overlapping @Interval(2000) tick can't also
+                        // before any await, so an overlapping @Interval(1000) tick can't also
                         // pass has() for the same trade while this iteration is still awaiting.
                         this.processingTrades.add(trade.id);
                         try {
@@ -547,7 +548,7 @@ export class PriceMonitorService {
 
             const pairs = response.data.pairs ?? [];
             for (const mint of uniqueMints) {
-                const matchedPair = pairs.find((pair) => pair.baseToken?.address === mint);
+                const matchedPair = selectBestDexScreenerPair(pairs, mint);
                 if (!matchedPair) continue;
 
                 const signals = this.extractTradeFreshMarketSignals(matchedPair);
@@ -613,9 +614,7 @@ export class PriceMonitorService {
                 },
             );
 
-            const pair =
-                response.data.pairs?.find((entry) => entry.baseToken?.address === tokenMint) ??
-                response.data.pairs?.[0];
+            const pair = selectBestDexScreenerPair(response.data.pairs, tokenMint);
             if (!pair) {
                 return null;
             }
@@ -1098,6 +1097,22 @@ export class PriceMonitorService {
             return true;
         }
     }
+    private async persistExitTrigger(
+        tradeId: number,
+        currentPriceSol: number,
+        currentSolUsd: number,
+        profitPercent: number,
+    ): Promise<void> {
+        await this.prismaService.trade.updateMany({
+            where: { id: tradeId, exitTriggerPnlPercent: null },
+            data: {
+                exitTriggerPriceSol: currentPriceSol,
+                exitTriggerPriceUsd: currentPriceSol * currentSolUsd,
+                exitTriggerPnlPercent: profitPercent,
+            },
+        });
+    }
+
     private async evaluateTrade(
         trade: TradeWithTelegramChat,
         currentPrice: number,
@@ -1238,10 +1253,10 @@ export class PriceMonitorService {
                 );
                 if (creatorDump.detected) {
                     // A zero baseline means the creator had no tracked tokens; there is no dump to measure.
-                        this.logger.warn(
-                            `[Slot ${trade.slotNumber}] 🔥 EMERGENCY: Developer is dumping! PANIC SELL.`,
-                        );
-                        await this.tradeService.executeSell(trade.id, currentPrice, 'DEV_DUMP');
+                    this.logger.warn(
+                        `[Slot ${trade.slotNumber}] 🔥 EMERGENCY: Developer is dumping! PANIC SELL.`,
+                    );
+                    await this.tradeService.executeSell(trade.id, currentPrice, 'DEV_DUMP');
                     return;
                 }
             }
@@ -1361,7 +1376,12 @@ export class PriceMonitorService {
                 void this.prismaService.trade
                     .updateMany({
                         where: { id: trade.id, slTriggeredAt: null },
-                        data: { slTriggeredAt: new Date() },
+                        data: {
+                            slTriggeredAt: new Date(),
+                            exitTriggerPriceSol: currentPrice,
+                            exitTriggerPriceUsd: currentPrice * currentSolUsd,
+                            exitTriggerPnlPercent: profitPercent,
+                        },
                     })
                     .catch((err) => {
                         this.logger.warn(
@@ -1498,6 +1518,12 @@ export class PriceMonitorService {
             this.logger.log(
                 `[Slot ${trade.slotNumber}] 🎯 TARGET HIT! Taking 50% profit at ${profitPercent.toFixed(2)}%, keeping the rest on trailing stop.`,
             );
+            await this.persistExitTrigger(
+                trade.id,
+                currentPriceSol,
+                currentSolUsd,
+                profitPercent,
+            );
             await this.tradeService.executeSell(trade.id, currentPrice, 'PARTIAL_TAKE_PROFIT', 0.5);
             return;
         }
@@ -1531,7 +1557,13 @@ export class PriceMonitorService {
             }
 
             this.logger.log(
-                `[Slot ${trade.slotNumber}] ${reason} at ${currentPriceSol.toFixed(10)} SOL / $${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`,
+                `[Slot ${trade.slotNumber}] ${reason} at ${currentPriceSol.toFixed(10)} SOL / ${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`,
+            );
+            await this.persistExitTrigger(
+                trade.id,
+                currentPriceSol,
+                currentSolUsd,
+                profitPercent,
             );
             await this.tradeService.executeSell(trade.id, currentPrice, reason);
             return;
@@ -1544,20 +1576,12 @@ export class PriceMonitorService {
     private async checkBuyPressure(tokenMint: string): Promise<boolean> {
         try {
             const url = `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`;
-            interface DexPair {
-                txns?: {
-                    m5?: {
-                        buys?: number;
-                        sells?: number;
-                    };
-                };
-            }
-            const response = await DexLimiter.get<{ pairs: DexPair[] }>(url, {
+            const response = await DexLimiter.get<{ pairs: DexScreenerPair[] }>(url, {
                 httpsAgent: this.getHttpsAgent(),
                 timeout: 5000,
             });
 
-            const pair = response.data.pairs?.[0];
+            const pair = selectBestDexScreenerPair(response.data.pairs, tokenMint);
             if (!pair?.txns?.m5) return false;
 
             const buys = pair.txns.m5.buys || 0;

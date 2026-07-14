@@ -21,42 +21,9 @@ import {
     TokenMetadata,
 } from '../dto/analyzer.dto';
 
-function getPairLiquidityUsd(pair: DexScreenerPair): number {
-    const value = pair.liquidity?.usd ?? 0;
-    return Number.isFinite(value) && value > 0 ? value : 0;
-}
+export { selectBestDexScreenerPair } from '../common/dex-pair';
+import { selectBestDexScreenerPair } from '../common/dex-pair';
 
-function getPairVolume5m(pair: DexScreenerPair): number {
-    const value = pair.volume?.m5 ?? 0;
-    return Number.isFinite(value) && value > 0 ? value : 0;
-}
-
-function getPairTxns5m(pair: DexScreenerPair): number {
-    const buys = pair.txns?.m5?.buys ?? 0;
-    const sells = pair.txns?.m5?.sells ?? 0;
-    return Math.max(buys, 0) + Math.max(sells, 0);
-}
-
-export function selectBestDexScreenerPair(
-    pairs: DexScreenerPair[] | undefined,
-): DexScreenerPair | undefined {
-    const solanaPairs = (pairs || []).filter(
-        (pair) => pair.chainId?.toLowerCase() === 'solana',
-    );
-
-    return solanaPairs.sort((a, b) => {
-        const liquidityDelta = getPairLiquidityUsd(b) - getPairLiquidityUsd(a);
-        if (liquidityDelta !== 0) return liquidityDelta;
-
-        const volumeDelta = getPairVolume5m(b) - getPairVolume5m(a);
-        if (volumeDelta !== 0) return volumeDelta;
-
-        const txnDelta = getPairTxns5m(b) - getPairTxns5m(a);
-        if (txnDelta !== 0) return txnDelta;
-
-        return (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0);
-    })[0];
-}
 @Injectable()
 export class AnalyzerService {
     private readonly logger = new Logger(AnalyzerService.name);
@@ -200,15 +167,6 @@ export class AnalyzerService {
             reasons.push('vol-score>=0.5');
         }
 
-        const zScore = input.zScore ?? 0;
-        if (zScore >= 3) {
-            score += 8;
-            reasons.push('z-score>=3');
-        } else if (zScore >= 2) {
-            score += 4;
-            reasons.push('z-score>=2');
-        }
-
         const priceChange1hPct = input.priceChange1hPct ?? 0;
         const priceChange5mPct = input.priceChange5mPct ?? 0;
         const priceChange15mPct = input.priceChange15mPct ?? 0;
@@ -350,14 +308,18 @@ export class AnalyzerService {
                 volScore: traction.volScore,
                 zScore: traction.zScore,
                 priceChange1h: traction.priceChange1h,
+                priceChange5m: traction.priceChange5m,
+                priceUsd: traction.priceUsd,
+                buys5m: traction.buys5m,
+                sells5m: traction.sells5m,
                 isPumpFun: traction.isPumpFun,
                 hasWebsite: Boolean(traction.socials?.website?.trim()),
                 hasTwitter: Boolean(traction.socials?.twitter?.trim()),
                 hasTelegram: Boolean(traction.socials?.telegram?.trim()),
                 isDexPaidUpdated: Boolean(
                     traction.socials?.website?.trim() ||
-                        traction.socials?.twitter?.trim() ||
-                        traction.socials?.telegram?.trim(),
+                    traction.socials?.twitter?.trim() ||
+                    traction.socials?.telegram?.trim(),
                 ),
             };
 
@@ -380,17 +342,6 @@ export class AnalyzerService {
                     `[${tokenMint}] Low VoL Score: ${traction.volScore.toFixed(4)}. Supply not shocked enough.`,
                 );
                 return { safe: false, reason: 'low_vol_score', metadata: baseMetadata };
-            }
-
-            // 2. Z-Score Anomaly Check (Z > 2.5 is anomaly)
-            const minZScore = Number.parseFloat(
-                this.configService.get<string>('ANALYZER_MIN_Z_SCORE', '2.5'),
-            );
-            if (traction.zScore && traction.zScore < minZScore) {
-                this.logger.debug(
-                    `[${tokenMint}] Normal Volume (Z-Score: ${traction.zScore.toFixed(2)}). Waiting for anomaly...`,
-                );
-                return { safe: false, reason: 'no_volume_anomaly', metadata: baseMetadata };
             }
 
             // 2. RPC CHECK (Security) — With PumpFun tolerance
@@ -421,7 +372,11 @@ export class AnalyzerService {
             }
 
             const openAiKey = this.configService.get<string>('OPENAI_API_KEY') || '';
+            const aiEntryEnabled = ['true', '1', 'yes', 'on'].includes(
+                String(this.configService.get('ENABLE_AI_ENTRY_DECISION', 'false')).toLowerCase(),
+            );
             const shouldUseAi =
+                aiEntryEnabled &&
                 openAiKey.length > 0 &&
                 !openAiKey.includes('your-openai-api-key') &&
                 !openAiKey.includes('your_');
@@ -429,11 +384,13 @@ export class AnalyzerService {
                 this.configService.get<string>('AI_CONVICTION_THRESHOLD', '75.0'),
             );
             // Anti-rug creator profile is needed by the whale signal score and AI payload below.
-            let creatorProfile:
-                | Awaited<ReturnType<CreatorProfileService['evaluateCreator']>>
-                | null = null;
+            let creatorProfile: Awaited<
+                ReturnType<CreatorProfileService['evaluateCreator']>
+            > | null = null;
             if (rugResult.creator) {
-                creatorProfile = await this.creatorProfileService.evaluateCreator(rugResult.creator);
+                creatorProfile = await this.creatorProfileService.evaluateCreator(
+                    rugResult.creator,
+                );
 
                 if (creatorProfile.isBlacklisted || creatorProfile.riskScore >= 80) {
                     this.logger.warn(
@@ -455,6 +412,9 @@ export class AnalyzerService {
                 ? (Date.now() - traction.pairCreatedAt) / (1000 * 60 * 60)
                 : 0;
             const route = this.resolveRoute(ageHours);
+            const creatorExited = Boolean(rugResult.creatorExited);
+            const isCommunityTakeover =
+                creatorExited && Boolean(baseMetadata.hasTwitter || baseMetadata.hasTelegram);
             const whaleSignal = this.calculateWhaleSignalScore({
                 ageHours,
                 liquidityUsd: traction.liquidity || 0,
@@ -468,7 +428,7 @@ export class AnalyzerService {
                 hasWebsite: Boolean(traction.socials?.website?.trim()),
                 hasTwitter: Boolean(traction.socials?.twitter?.trim()),
                 hasTelegram: Boolean(traction.socials?.telegram?.trim()),
-                isCommunityTakeover: rugResult.isCTO,
+                isCommunityTakeover,
                 tokenName: traction.tokenName || traction.symbol || undefined,
                 creatorRiskScore: creatorProfile?.riskScore,
                 creatorRuggedTokens: creatorProfile?.ruggedTokens,
@@ -478,8 +438,9 @@ export class AnalyzerService {
                 ...baseMetadata,
                 creator: rugResult.creator,
                 topHolder: rugResult.topHolder,
-                isCTO: rugResult.isCTO,
-                isCommunityTakeover: rugResult.isCTO,
+                isCTO: isCommunityTakeover,
+                isCommunityTakeover,
+                creatorExited,
                 whaleSignalScore: whaleSignal.score,
                 route: route === 'WHALE_ROUTE' ? 'WHALE' : 'MICIN',
             };
@@ -505,7 +466,34 @@ export class AnalyzerService {
                     metadata: baseMetadata,
                 };
             }
-            if (route === 'WHALE_ROUTE' && !baseMetadata.hasTwitter && !baseMetadata.hasTelegram && whaleSignal.score < whaleSignalFloor) {
+            const micinSignalFloor = Number.parseFloat(
+                this.configService.get<string>('MICIN_SIGNAL_SCORE_FLOOR', '60'),
+            );
+            const micinMaxPriceChange5m = Number.parseFloat(
+                this.configService.get<string>('MICIN_MAX_PRICE_CHANGE_5M', '12'),
+            );
+            if (route === 'MICIN_ROUTE' && (traction.priceChange5m || 0) > micinMaxPriceChange5m) {
+                return {
+                    safe: false,
+                    reason: 'micin_price_chase',
+                    permanent: false,
+                    metadata: finalMetadata,
+                };
+            }
+            if (route === 'MICIN_ROUTE' && whaleSignal.score < micinSignalFloor) {
+                return {
+                    safe: false,
+                    reason: 'micin_signal_too_weak',
+                    permanent: false,
+                    metadata: finalMetadata,
+                };
+            }
+            if (
+                route === 'WHALE_ROUTE' &&
+                !baseMetadata.hasTwitter &&
+                !baseMetadata.hasTelegram &&
+                whaleSignal.score < whaleSignalFloor
+            ) {
                 this.logger.warn(
                     `[${tokenMint}] [ROUTE: ${route}] Whale signal gate blocked token. Score=${whaleSignal.score}, Floor=${whaleSignalFloor}, Socials=empty.`,
                 );
@@ -550,10 +538,10 @@ export class AnalyzerService {
                         hasTelegram: Boolean(traction.socials?.telegram?.trim()),
                         isDexPaidUpdated: Boolean(
                             traction.socials?.website?.trim() ||
-                                traction.socials?.twitter?.trim() ||
-                                traction.socials?.telegram?.trim(),
+                            traction.socials?.twitter?.trim() ||
+                            traction.socials?.telegram?.trim(),
                         ),
-                        isCommunityTakeover: rugResult.isCTO,
+                        isCommunityTakeover,
                         tokenName: traction.tokenName || traction.symbol || 'Unknown',
                         whaleSignalScore: whaleSignal.score,
                         route: finalMetadata.route,
@@ -605,8 +593,8 @@ export class AnalyzerService {
             hasTelegram: Boolean(traction.socials?.telegram?.trim()),
             isDexPaidUpdated: Boolean(
                 traction.socials?.website?.trim() ||
-                    traction.socials?.twitter?.trim() ||
-                    traction.socials?.telegram?.trim(),
+                traction.socials?.twitter?.trim() ||
+                traction.socials?.telegram?.trim(),
             ),
         };
     }
@@ -699,6 +687,7 @@ export class AnalyzerService {
         zScore?: number;
         priceChange1h?: number;
         priceChange5m?: number;
+        priceUsd?: number;
         priceChange15m?: number;
         isPumpFun?: boolean;
         volume5m?: number;
@@ -737,7 +726,7 @@ export class AnalyzerService {
                 },
             );
             const pairs = response.data.pairs || [];
-            const pair = selectBestDexScreenerPair(pairs);
+            const pair = selectBestDexScreenerPair(pairs, tokenMint);
             if (!pair) {
                 this.logger.debug(
                     `[${tokenMint}] Market pair selection failed: no_solana_pair pairsCount=${pairs.length}`,
@@ -746,6 +735,7 @@ export class AnalyzerService {
             }
 
             const liquidity = pair.liquidity?.usd || 0;
+            const priceUsd = Number.parseFloat(pair.priceUsd || '0') || 0;
             const volume5m = pair.volume?.m5 || 0;
             const volumeH1 = pair.volume?.h1 || 0;
             const txns5m = pair.txns?.m5 || {};
@@ -1074,6 +1064,7 @@ export class AnalyzerService {
                 symbol,
                 tokenName,
                 pairCreatedAt,
+                priceUsd,
                 volumeSurge,
                 volScore,
                 zScore,
@@ -1158,9 +1149,7 @@ export class AnalyzerService {
 
             const maxTop10Share = Math.max(
                 0,
-                Number.parseFloat(
-                    String(this.configService.get('MAX_TOP10_HOLDER_PCT', '20')),
-                ),
+                Number.parseFloat(String(this.configService.get('MAX_TOP10_HOLDER_PCT', '20'))),
             );
             if (top10Share > maxTop10Share) {
                 this.logger.warn(
@@ -1248,6 +1237,7 @@ export class AnalyzerService {
         top10HolderPct?: number;
         permanent?: boolean;
         isCTO?: boolean;
+        creatorExited?: boolean;
     }> {
         try {
             const response = await axios.get<RugCheckApiResponse>(
@@ -1299,6 +1289,7 @@ export class AnalyzerService {
             let ownership: CreatorOwnershipResult = {
                 creatorPct: null,
                 isCTO: false,
+                creatorExited: false,
                 reliable: true,
             };
             if (creator) {
@@ -1314,7 +1305,8 @@ export class AnalyzerService {
                 }
             }
             const creatorPct = ownership.creatorPct ?? 0;
-            const isCTO = creator ? ownership.isCTO : false;
+            const creatorExited = creator ? Boolean(ownership.creatorExited) : false;
+            const isCTO = false;
 
             const requireDevZeroBalance = ['true', '1', 'yes', 'on'].includes(
                 String(this.configService.get('REQUIRE_DEV_ZERO_BALANCE', 'false'))
@@ -1341,7 +1333,6 @@ export class AnalyzerService {
                     isCTO,
                 };
             }
-
 
             // Hitung safetyIndex menggunakan persentase (pct) langsung dari API
             const top10SumPct = filteredHolders
@@ -1434,16 +1425,16 @@ export class AnalyzerService {
             }
 
             if (creator && creatorPct > maxCreatorHoldPctForBuy) {
-                    this.logger.warn(
-                        `[${tokenMint}] 🛑 Creator holds too much (${creatorPct.toFixed(2)}%). Skip.`,
-                    );
-                    return {
-                        passed: false,
-                        reason: 'creator_holds_too_much',
-                        safetyIndex,
-                        permanent: true,
-                        isCTO,
-                    };
+                this.logger.warn(
+                    `[${tokenMint}] 🛑 Creator holds too much (${creatorPct.toFixed(2)}%). Skip.`,
+                );
+                return {
+                    passed: false,
+                    reason: 'creator_holds_too_much',
+                    safetyIndex,
+                    permanent: true,
+                    isCTO,
+                };
             }
 
             return {
@@ -1456,6 +1447,7 @@ export class AnalyzerService {
                 creatorHoldPct: creatorPct,
                 top10HolderPct: top10SumPct,
                 isCTO,
+                creatorExited,
             };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -1498,7 +1490,7 @@ export class AnalyzerService {
                 return { creatorPct: null, isCTO: false, reliable: false };
             }
             const creatorPct = (creatorBalance / totalSupply) * 100;
-            return { creatorPct, isCTO: creatorPct < 0.1, reliable: true };
+            return { creatorPct, isCTO: false, creatorExited: creatorPct < 0.1, reliable: true };
         } catch (error) {
             this.logger.error(
                 `Failed to get creator ownership: ${error instanceof Error ? error.message : String(error)}`,
@@ -1535,4 +1527,3 @@ export class AnalyzerService {
         return null;
     }
 }
-

@@ -17,9 +17,9 @@ import { ReportingService } from '../reporting/reporting.service';
 import { ModuleRef } from '@nestjs/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { DexLimiter } from '../common/dex-limiter';
+import { selectBestDexScreenerPair } from '../common/dex-pair';
 import { CreatorProfileService } from './creator-profile.service';
 import { ReboundResult } from '../dto/established-analyzer.dto';
-
 
 @Injectable()
 export class EstablishedAnalyzerService {
@@ -182,6 +182,7 @@ export class EstablishedAnalyzerService {
         topHolder?: string;
         reason?: string;
         isCTO?: boolean;
+        creatorExited?: boolean;
     }> {
         try {
             const response = await axios.get<RugCheckApiResponse>(
@@ -210,6 +211,7 @@ export class EstablishedAnalyzerService {
             let ownership: CreatorOwnershipResult = {
                 creatorPct: null,
                 isCTO: false,
+                creatorExited: false,
                 reliable: true,
             };
             if (creator) {
@@ -224,7 +226,8 @@ export class EstablishedAnalyzerService {
                 }
             }
             const creatorPct = ownership.creatorPct ?? 0;
-            const isCTO = creator ? ownership.isCTO : false;
+            const creatorExited = creator ? Boolean(ownership.creatorExited) : false;
+            const isCTO = false;
 
             const requireDevZeroBalance = ['true', '1', 'yes', 'on'].includes(
                 String(this.configService.get('REQUIRE_DEV_ZERO_BALANCE', 'false'))
@@ -247,16 +250,13 @@ export class EstablishedAnalyzerService {
                 return { passed: false, reason: 'established_creator_not_zero', isCTO };
             }
 
-
             const top10SumPct = filteredHolders
                 .slice(0, 10)
                 .reduce((sum: number, h: RugCheckApiHolder) => sum + (h.pct || 0), 0);
             const safetyIndex = 1 - top10SumPct / 100;
             const maxTop10HolderPct = Math.max(
                 0,
-                Number.parseFloat(
-                    String(this.configService.get('MAX_TOP10_HOLDER_PCT', '20')),
-                ),
+                Number.parseFloat(String(this.configService.get('MAX_TOP10_HOLDER_PCT', '20'))),
             );
             if (top10SumPct > maxTop10HolderPct) {
                 this.logger.warn(
@@ -322,10 +322,10 @@ export class EstablishedAnalyzerService {
             }
 
             if (creator && creatorPct > maxCreatorHoldPctForBuy) {
-                    this.logger.warn(
-                        `[${tokenMint}] 🛑 Established Creator holds too much (${creatorPct.toFixed(2)}%). Reject.`,
-                    );
-                    return { passed: false, reason: 'established_creator_holds_too_much', isCTO };
+                this.logger.warn(
+                    `[${tokenMint}] 🛑 Established Creator holds too much (${creatorPct.toFixed(2)}%). Reject.`,
+                );
+                return { passed: false, reason: 'established_creator_holds_too_much', isCTO };
             }
 
             return {
@@ -333,6 +333,7 @@ export class EstablishedAnalyzerService {
                 creator: response.data.creator,
                 topHolder: topHolders[0]?.address,
                 isCTO,
+                creatorExited,
             };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -350,10 +351,7 @@ export class EstablishedAnalyzerService {
             const creatorKey = new PublicKey(creatorAddress);
             const mintKey = new PublicKey(tokenMint);
 
-            const creatorBalance = await this.getCreatorTokenBalanceWithRetry(
-                creatorKey,
-                mintKey,
-            );
+            const creatorBalance = await this.getCreatorTokenBalanceWithRetry(creatorKey, mintKey);
             if (creatorBalance === null) {
                 this.creatorRpcFailureCount++;
                 this.logger.warn(
@@ -376,7 +374,7 @@ export class EstablishedAnalyzerService {
 
             if (totalSupply <= 0) return { creatorPct: null, isCTO: false, reliable: false };
             const creatorPct = (creatorBalance / totalSupply) * 100;
-            return { creatorPct, isCTO: creatorPct < 0.1, reliable: true };
+            return { creatorPct, isCTO: false, creatorExited: creatorPct < 0.1, reliable: true };
         } catch (error) {
             this.logger.error(
                 `Failed to get creator ownership: ${error instanceof Error ? error.message : String(error)}`,
@@ -404,9 +402,7 @@ export class EstablishedAnalyzerService {
                 }, 0);
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
-                this.logger.warn(
-                    `Creator balance RPC failed (attempt ${attempt}/3): ${msg}`,
-                );
+                this.logger.warn(`Creator balance RPC failed (attempt ${attempt}/3): ${msg}`);
                 if (attempt < 3) {
                     await new Promise((res) => setTimeout(res, 300 * attempt));
                 }
@@ -474,7 +470,7 @@ export class EstablishedAnalyzerService {
                 { timeout: 5000, httpsAgent: this.getHttpsAgent() },
             );
 
-            const pair = response.data?.pairs?.[0];
+            const pair = selectBestDexScreenerPair(response.data?.pairs, tokenMint);
             if (!pair) {
                 return { isEstablished: false, executed: false, reason: 'no_dex_pair' };
             }
@@ -576,6 +572,10 @@ export class EstablishedAnalyzerService {
                 `📈 CONFIRMED REBOUND SIGNALS for $${symbol} (${tokenMint})! Ready to strike. (isCTO: ${rugResult.isCTO})`,
             );
 
+            const twitter = pair.info?.socials?.find((s) => s.type === 'twitter')?.url;
+            const telegram = pair.info?.socials?.find((s) => s.type === 'telegram')?.url;
+            const isCommunityTakeover =
+                Boolean(rugResult.creatorExited) && Boolean(twitter || telegram);
             const metadata: TokenMetadata = {
                 liquidity,
                 marketCap,
@@ -583,14 +583,16 @@ export class EstablishedAnalyzerService {
                 pairCreatedAt: pair.pairCreatedAt,
                 symbol: `$${symbol}`,
                 socials: {
-                    twitter: pair.info?.socials?.find((s) => s.type === 'twitter')?.url,
-                    telegram: pair.info?.socials?.find((s) => s.type === 'telegram')?.url,
+                    twitter,
+                    telegram,
                     website: pair.info?.websites?.[0]?.url,
                 },
                 creator: rugResult.creator,
                 topHolder: rugResult.topHolder,
                 isPumpFun: isPumpFunToken,
-                isCTO: rugResult.isCTO,
+                isCTO: isCommunityTakeover,
+                isCommunityTakeover,
+                creatorExited: rugResult.creatorExited,
             };
 
             const activeChats = await this.prismaService.telegramChat.findMany({
@@ -638,13 +640,19 @@ export class EstablishedAnalyzerService {
                     chat.chatId,
                 );
 
-                const buyResult = await this.tradeService.attemptBuy(tokenMint, metadata, undefined, {
-                    customSlippageBps: 300, // Slippage 3%
-                    priorityFeeSol: 0.0001, // 0.0001 SOL Jito tip / Priority fee
-                    targetTakeProfit: 18.0, // TP 18% (antara 15% - 20%)
-                    targetTrailingDistance: 2.5, // Trailing stop 2.5% (antara 2% - 3%)
-                    targetStopLoss: 20.0, // Hard stop loss 20%
-                }, chat.chatId);
+                const buyResult = await this.tradeService.attemptBuy(
+                    tokenMint,
+                    metadata,
+                    undefined,
+                    {
+                        customSlippageBps: 300, // Slippage 3%
+                        priorityFeeSol: 0.0001, // 0.0001 SOL Jito tip / Priority fee
+                        targetTakeProfit: 18.0, // TP 18% (antara 15% - 20%)
+                        targetTrailingDistance: 2.5, // Trailing stop 2.5% (antara 2% - 3%)
+                        targetStopLoss: 20.0, // Hard stop loss 20%
+                    },
+                    chat.chatId,
+                );
 
                 this.logger.log(
                     `[AutoBuyTrace] result token=${tokenMint} chat=${chat.chatId} success=${buyResult.success} message=${buyResult.message}`,
@@ -662,7 +670,11 @@ export class EstablishedAnalyzerService {
             return {
                 isEstablished: true,
                 executed: liveBuyExecuted,
-                reason: liveBuyExecuted ? undefined : signalOnlySent ? 'signal_only' : 'auto_buy_failed',
+                reason: liveBuyExecuted
+                    ? undefined
+                    : signalOnlySent
+                      ? 'signal_only'
+                      : 'auto_buy_failed',
             };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);

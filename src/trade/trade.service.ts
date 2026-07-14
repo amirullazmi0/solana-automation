@@ -20,6 +20,7 @@ import { DexLimiter } from '../common/dex-limiter';
 import { JupiterLimiter, JupiterPriority } from '../common/jupiter-limiter';
 import { PendingSellStore } from '../common/pending-sell-store';
 import { computeNetProfitUsd } from '../common/fee-utils';
+import { selectBestDexScreenerPair } from '../common/dex-pair';
 import {
     RpcEndpointPool,
     RpcErrorClass,
@@ -37,12 +38,52 @@ import {
 } from '../common/withdraw-guard';
 import { TokenMetadata, TradeExecutionPayload } from '../dto/analyzer.dto';
 import { PrismaService } from '../prisma/prisma.service';
-import { BuyExecutionOptions, BuyRiskConfig, BuyRiskMetrics, TradeAuditFields } from '../dto/trade.dto';
+import {
+    BuyExecutionOptions,
+    BuyRiskConfig,
+    BuyRiskMetrics,
+    TradeAuditFields,
+} from '../dto/trade.dto';
 import { ReportingService } from '../reporting/reporting.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 
 export const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
+export function capBuyPositionUsd(
+    requestedUsd: number,
+    maxPositionUsd: number,
+    spendableAfterReserveUsd: number,
+    maxWalletPct: number,
+): number {
+    const walletCapUsd = Math.max(spendableAfterReserveUsd, 0) *
+        (Math.min(Math.max(maxWalletPct, 0), 100) / 100);
+    return Math.max(0, Math.min(requestedUsd, maxPositionUsd, walletCapUsd));
+}
+
+export function evaluateBuySignalGuard(input: {
+    signalObservedAt?: number;
+    signalPriceUsd?: number;
+    quotePriceUsd?: number;
+    now: number;
+    maxSignalAgeMs: number;
+    maxChasePct: number;
+}): string | null {
+    if (
+        input.signalObservedAt &&
+        input.now - input.signalObservedAt > input.maxSignalAgeMs
+    ) {
+        return 'buy_signal_stale';
+    }
+    if (
+        input.signalPriceUsd &&
+        input.signalPriceUsd > 0 &&
+        input.quotePriceUsd &&
+        input.quotePriceUsd > input.signalPriceUsd * (1 + input.maxChasePct / 100)
+    ) {
+        return `buy_price_chase: signal=${input.signalPriceUsd}, quote=${input.quotePriceUsd}, maxPct=${input.maxChasePct}`;
+    }
+    return null;
+}
 
 export class TokenDecimalsUnavailableError extends Error {
     constructor(public readonly mint: string) {
@@ -167,17 +208,17 @@ export type ScaleInTrailingStopInput = {
     fillEntryPriceSol: number;
 };
 
-export function mergeTradeScaleInPosition(
-    input: TradeScaleInMergeInput,
-): TradeScaleInMergeResult {
+export function mergeTradeScaleInPosition(input: TradeScaleInMergeInput): TradeScaleInMergeResult {
     const existingAmountInSol = Math.max(0, input.existingAmountInSol || 0);
     const fillAmountInSol = Math.max(0, input.fillAmountInSol || 0);
     const existingEntryPriceSol = Math.max(0, input.existingEntryPriceSol || 0);
     const fillEntryPriceSol = Math.max(0, input.fillEntryPriceSol || 0);
     const existingEntryValueUsd =
-        Number.isFinite(input.existingEntryValueUsd ?? Number.NaN) && (input.existingEntryValueUsd ?? 0) > 0
+        Number.isFinite(input.existingEntryValueUsd ?? Number.NaN) &&
+        (input.existingEntryValueUsd ?? 0) > 0
             ? Number(input.existingEntryValueUsd)
-            : existingAmountInSol * Math.max(0, input.existingSolPriceAtEntry ?? input.fillSolPriceUsd ?? 0);
+            : existingAmountInSol *
+              Math.max(0, input.existingSolPriceAtEntry ?? input.fillSolPriceUsd ?? 0);
     const fillEntryValueUsd = Math.max(0, input.fillEntryValueUsd || 0);
     const existingTokenAmount =
         existingEntryPriceSol > 0 ? existingAmountInSol / existingEntryPriceSol : 0;
@@ -192,13 +233,17 @@ export function mergeTradeScaleInPosition(
     const mergedAmountInSol = existingAmountInSol + fillAmountInSol;
     const mergedEntryValueUsd = existingEntryValueUsd + fillEntryValueUsd;
     const mergedEntryPriceSol =
-        totalTokenAmount > 0 ? mergedAmountInSol / totalTokenAmount : fillEntryPriceSol || existingEntryPriceSol;
+        totalTokenAmount > 0
+            ? mergedAmountInSol / totalTokenAmount
+            : fillEntryPriceSol || existingEntryPriceSol;
     const mergedSolPriceAtEntry =
         mergedAmountInSol > 0
             ? mergedEntryValueUsd / mergedAmountInSol
             : Math.max(0, input.fillSolPriceUsd || 0);
     const mergedHighestPriceSol = Math.max(
-        existingAmountInSol > 0 ? Math.max(0, input.existingHighestPriceSol ?? existingEntryPriceSol) : 0,
+        existingAmountInSol > 0
+            ? Math.max(0, input.existingHighestPriceSol ?? existingEntryPriceSol)
+            : 0,
         fillEntryPriceSol,
         mergedEntryPriceSol,
     );
@@ -264,9 +309,10 @@ export function resolveJitoMinPositionUsd(rawValue?: string | null, fallback = 7
 export function shouldUseJitoForSwap(input: JitoSwapDecisionInput): boolean {
     if (!input.useJitoConfigured) return false;
     if (input.retryCount !== 0) return false;
-    const minPositionUsd = Number.isFinite(input.jitoMinPositionUsd) && input.jitoMinPositionUsd > 0
-        ? input.jitoMinPositionUsd
-        : 7;
+    const minPositionUsd =
+        Number.isFinite(input.jitoMinPositionUsd) && input.jitoMinPositionUsd > 0
+            ? input.jitoMinPositionUsd
+            : 7;
     return input.swapNotionalUsd >= minPositionUsd;
 }
 
@@ -287,8 +333,12 @@ export function calculateRealizedSellPnl(params: {
     const entrySolPrice = Number(params.entrySolPrice ?? 0);
     const sellSolPrice = Number(params.sellSolPrice ?? 0);
     const solProfitPercent = solSpent > 0 ? ((solReceived - solSpent) / solSpent) * 100 : 0;
-    const usdSpent = solSpent * (Number.isFinite(entrySolPrice) && entrySolPrice > 0 ? entrySolPrice : sellSolPrice);
-    const usdReceived = solReceived * (Number.isFinite(sellSolPrice) && sellSolPrice > 0 ? sellSolPrice : entrySolPrice);
+    const usdSpent =
+        solSpent *
+        (Number.isFinite(entrySolPrice) && entrySolPrice > 0 ? entrySolPrice : sellSolPrice);
+    const usdReceived =
+        solReceived *
+        (Number.isFinite(sellSolPrice) && sellSolPrice > 0 ? sellSolPrice : entrySolPrice);
     const usdProfit = usdReceived - usdSpent;
     const usdProfitPercent = usdSpent > 0 ? (usdProfit / usdSpent) * 100 : solProfitPercent;
 
@@ -377,17 +427,32 @@ export function evaluateBuyRisk(
 function normalizeBuyFailureReason(rawReason: string): string {
     const text = String(rawReason || '').toLowerCase();
     if (text.includes('max_drawdown') || text.includes('max drawdown')) return 'risk_max_drawdown';
-    if (text.includes('daily_max_loss') || text.includes('daily max loss')) return 'risk_daily_max_loss';
+    if (text.includes('daily_max_loss') || text.includes('daily max loss'))
+        return 'risk_daily_max_loss';
     if (text.includes('consecutive')) return 'risk_max_consecutive_losses';
-    if (text.includes('disabled_until') || text.includes('disabled until')) return 'risk_disabled_until';
-    if (text.includes('slot_limit') || text.includes('slot_guard') || text.includes('slot guard')) return 'slot_guard';
+    if (text.includes('disabled_until') || text.includes('disabled until'))
+        return 'risk_disabled_until';
+    if (text.includes('slot_limit') || text.includes('slot_guard') || text.includes('slot guard'))
+        return 'slot_guard';
     if (text.includes('capital_guard') || text.includes('capital guard')) return 'capital_guard';
-    if (text.includes('insufficient_balance') || text.includes('balance_guard') || text.includes('insufficient sol balance') || text.includes('balance guard')) return 'balance_guard';
+    if (
+        text.includes('insufficient_balance') ||
+        text.includes('balance_guard') ||
+        text.includes('insufficient sol balance') ||
+        text.includes('balance guard')
+    )
+        return 'balance_guard';
     if (text.includes('invalid_price_or_amount')) return 'invalid_price_or_amount';
     if (text.includes('already_open_trade')) return 'already_open_trade';
     if (text.includes('cooldown')) return 'cooldown';
-    if (text.includes('price_impact_guard') || text.includes('price impact')) return 'price_impact_guard';
-    if (text.includes('quote') || text.includes('decimals_unavailable') || text.includes('cancelled_decimals_unavailable')) return 'jupiter_quote_failed';
+    if (text.includes('price_impact_guard') || text.includes('price impact'))
+        return 'price_impact_guard';
+    if (
+        text.includes('quote') ||
+        text.includes('decimals_unavailable') ||
+        text.includes('cancelled_decimals_unavailable')
+    )
+        return 'jupiter_quote_failed';
     if (text.includes('confirm')) return 'confirmation_failed';
     if (text.includes('swap')) return 'swap_failed';
     return rawReason || 'unknown_execution_failure';
@@ -395,18 +460,20 @@ function normalizeBuyFailureReason(rawReason: string): string {
 
 function normalizeBuyFailureStage(reason: string): 'PRE_SWAP' | 'QUOTE' | 'SWAP' | 'CONFIRMATION' {
     const normalized = normalizeBuyFailureReason(reason);
-    if ([
-        'risk_max_drawdown',
-        'risk_daily_max_loss',
-        'risk_max_consecutive_losses',
-        'risk_disabled_until',
-        'capital_guard',
-        'slot_guard',
-        'balance_guard',
-        'invalid_price_or_amount',
-        'already_open_trade',
-        'cooldown',
-    ].includes(normalized)) {
+    if (
+        [
+            'risk_max_drawdown',
+            'risk_daily_max_loss',
+            'risk_max_consecutive_losses',
+            'risk_disabled_until',
+            'capital_guard',
+            'slot_guard',
+            'balance_guard',
+            'invalid_price_or_amount',
+            'already_open_trade',
+            'cooldown',
+        ].includes(normalized)
+    ) {
         return 'PRE_SWAP';
     }
     if (['price_impact_guard', 'jupiter_quote_failed'].includes(normalized)) {
@@ -746,11 +813,7 @@ export class TradeService implements OnModuleInit {
         return 1;
     }
 
-    private applyFinalSize(
-        baseSizeUsd: number,
-        route?: TradeRoute,
-        aiMultiplier?: number,
-    ): number {
+    private applyFinalSize(baseSizeUsd: number, route?: TradeRoute, aiMultiplier?: number): number {
         const routeMultiplier = this.getRouteSizeMultiplier(route);
         return calculateFinalBuySizeUsd(baseSizeUsd, routeMultiplier, aiMultiplier);
     }
@@ -768,8 +831,13 @@ export class TradeService implements OnModuleInit {
         return parseChatIdList(this.configService.get<string>('WITHDRAW_ALLOWED_CHAT_IDS') || '');
     }
 
-    private denyWithdraw(chatId: string, reason: WithdrawGuardReason): { success: false; message: string } {
-        this.logger.warn(`[WithdrawGuard] Blocked withdraw attempt chat=${chatId} reason=${reason}`);
+    private denyWithdraw(
+        chatId: string,
+        reason: WithdrawGuardReason,
+    ): { success: false; message: string } {
+        this.logger.warn(
+            `[WithdrawGuard] Blocked withdraw attempt chat=${chatId} reason=${reason}`,
+        );
         const message =
             reason === 'withdrawals_disabled'
                 ? 'Withdrawals are disabled.'
@@ -789,7 +857,11 @@ export class TradeService implements OnModuleInit {
         const minReserveUsd = Math.max(this.getNumberConfig('MIN_RESERVE_USD', 1), 0);
         const maxReserveUsd = Math.max(this.getNumberConfig('MAX_RESERVE_USD', 10), minReserveUsd);
         const percentageReserve = balanceUsd * reserveRatio;
-        return Math.min(Math.max(percentageReserve, minReserveUsd), maxReserveUsd);
+        const configuredReserve = Math.max(
+            Number.isFinite(this.reserveAmount) ? this.reserveAmount : 0,
+            minReserveUsd,
+        );
+        return Math.min(Math.max(percentageReserve, configuredReserve), maxReserveUsd);
     }
 
     private getRouteMaxSlippageBps(route?: TradeRoute): number {
@@ -810,7 +882,8 @@ export class TradeService implements OnModuleInit {
             return this.getNumberConfig('WHALE_MAX_PRICE_IMPACT_PCT', 1.0);
         }
         return this.getNumberConfig('MAX_PRICE_IMPACT_PCT', 10);
-    }    private getStartOfDayUtc(): Date {
+    }
+    private getStartOfDayUtc(): Date {
         const d = new Date();
         d.setUTCHours(0, 0, 0, 0);
         return d;
@@ -830,21 +903,36 @@ export class TradeService implements OnModuleInit {
                 : dayStart;
         const chatWhere = telegramChatDbId ? { telegramChatId: telegramChatDbId } : {};
         const baseWhere = riskPnlStartAt
-            ? { status: 'CLOSED' as const, mode: 'LIVE' as const, updatedAt: { gte: riskPnlStartAt }, ...chatWhere }
+            ? {
+                  status: 'CLOSED' as const,
+                  mode: 'LIVE' as const,
+                  updatedAt: { gte: riskPnlStartAt },
+                  ...chatWhere,
+              }
             : { status: 'CLOSED' as const, mode: 'LIVE' as const, ...chatWhere };
         const consecutiveStartAt = resolveRiskLookbackStart(
             riskPnlStartAt,
             consecutiveLookbackHours,
         );
         const consecutiveWhere = consecutiveStartAt
-            ? { status: 'CLOSED' as const, mode: 'LIVE' as const, updatedAt: { gte: consecutiveStartAt }, ...chatWhere }
+            ? {
+                  status: 'CLOSED' as const,
+                  mode: 'LIVE' as const,
+                  updatedAt: { gte: consecutiveStartAt },
+                  ...chatWhere,
+              }
             : { status: 'CLOSED' as const, mode: 'LIVE' as const, ...chatWhere };
         const routeWhere = route ? { route } : {};
 
         const feeSelect = { profitUsd: true, totalFeesSol: true, solPriceAtEntry: true } as const;
         const [dailyRows, totalRows, recentClosed] = await Promise.all([
             this.prismaService.trade.findMany({
-                where: { status: 'CLOSED', mode: 'LIVE', updatedAt: { gte: effectiveDailyStart }, ...chatWhere },
+                where: {
+                    status: 'CLOSED',
+                    mode: 'LIVE',
+                    updatedAt: { gte: effectiveDailyStart },
+                    ...chatWhere,
+                },
                 select: feeSelect,
             }),
             this.prismaService.trade.findMany({ where: baseWhere, select: feeSelect }),
@@ -888,7 +976,9 @@ export class TradeService implements OnModuleInit {
 
         const parsedMs = Date.parse(raw);
         if (!Number.isFinite(parsedMs)) {
-            this.logger.warn(`[Risk] Ignoring invalid RISK_PNL_START_AT="${raw}". Use an ISO timestamp.`);
+            this.logger.warn(
+                `[Risk] Ignoring invalid RISK_PNL_START_AT="${raw}". Use an ISO timestamp.`,
+            );
             return null;
         }
 
@@ -931,7 +1021,9 @@ export class TradeService implements OnModuleInit {
 
         const fallbackIp = this.fallbackApiIps[hostname];
         if (fallbackIp) {
-            this.logger.warn(`[DNS] Falling back to temporary pinned IP for ${hostname}: ${fallbackIp}`);
+            this.logger.warn(
+                `[DNS] Falling back to temporary pinned IP for ${hostname}: ${fallbackIp}`,
+            );
             return fallbackIp;
         }
 
@@ -960,13 +1052,14 @@ export class TradeService implements OnModuleInit {
             ? await this.telegramWorkspace.getChatSettings(telegramChatId)
             : null;
         const isManualBuy = customAmountUSD !== undefined;
-        const effectiveDryRun = isManualBuy ? false : chatSettings?.dryRun ?? true;
+        const effectiveDryRun = isManualBuy ? false : (chatSettings?.dryRun ?? true);
         const effectiveTotalSlots = chatSettings?.totalSlots ?? this.totalSlots;
-        const effectivePositionSizeUSD =
-            chatSettings?.positionSizeUsd ?? this.positionSizeUSD;
-        const requestedSlippageBps = options?.customSlippageBps ?? (chatSettings
-            ? Math.max(1, Math.round(chatSettings.slippageOnSol * 10000))
-            : this.slippageBps);
+        const effectivePositionSizeUSD = chatSettings?.positionSizeUsd ?? this.positionSizeUSD;
+        const requestedSlippageBps =
+            options?.customSlippageBps ??
+            (chatSettings
+                ? Math.max(1, Math.round(chatSettings.slippageOnSol * 10000))
+                : this.slippageBps);
         const wallet = await this.getWallet(telegramChatId);
         const tradeChatDbId = chatRecord?.id;
         const targetChatId = chatRecord?.chatId;
@@ -999,8 +1092,7 @@ export class TradeService implements OnModuleInit {
                 const normalizedReason = normalizeBuyFailureReason(
                     params.reason || params.details || 'unknown_execution_failure',
                 );
-                const normalizedStage =
-                    params.stage || normalizeBuyFailureStage(normalizedReason);
+                const normalizedStage = params.stage || normalizeBuyFailureStage(normalizedReason);
 
                 await this.reportingService.sendTradeFailureAlert({
                     side: 'BUY',
@@ -1068,7 +1160,9 @@ export class TradeService implements OnModuleInit {
         if (recentTrade && !customAmountUSD && !existingOpenTrade) {
             // Jika manual buy (ada customAmount), abaikan cooldown
             if (recentTrade.status === 'OPEN') {
-                this.logger.warn(`[BuyTrace] Blocked by already-open trade token=${tokenMint} chat=${telegramChatId}`);
+                this.logger.warn(
+                    `[BuyTrace] Blocked by already-open trade token=${tokenMint} chat=${telegramChatId}`,
+                );
                 await notifyBuyFailure({
                     reason: 'already_open_trade',
                     details: `Already holding ${tokenMint}.`,
@@ -1090,7 +1184,9 @@ export class TradeService implements OnModuleInit {
 
             if (Date.now() < cooldownExpiredAt) {
                 const msg = `Token ${tokenMint} is in cooldown until ${new Date(cooldownExpiredAt).toISOString()} (Last outcome: ${isWin ? 'WIN' : 'LOSS'}, Cooldown: ${cooldownHours}h). Skip.`;
-                this.logger.warn(`[BuyTrace] Blocked by cooldown token=${tokenMint} chat=${telegramChatId}: ${msg}`);
+                this.logger.warn(
+                    `[BuyTrace] Blocked by cooldown token=${tokenMint} chat=${telegramChatId}: ${msg}`,
+                );
                 await notifyBuyFailure({
                     reason: 'cooldown',
                     details: msg,
@@ -1123,8 +1219,10 @@ export class TradeService implements OnModuleInit {
         }
 
         // Use custom amount if provided, otherwise use config
-        const buyAmountUSD =
-            customAmountUSD ?? this.applyFinalSize(effectivePositionSizeUSD, route, aiPositionSizeMultiplier);
+        const requestedBuyAmountUSD =
+            customAmountUSD ??
+            this.applyFinalSize(effectivePositionSizeUSD, route, aiPositionSizeMultiplier);
+        let buyAmountUSD = requestedBuyAmountUSD;
         // RISK CIRCUIT BREAKERS: block new buys on drawdown / daily loss / loss streak
         const riskApplyToManual =
             this.configService.get<string>('RISK_APPLY_TO_MANUAL', 'false') === 'true';
@@ -1212,6 +1310,39 @@ export class TradeService implements OnModuleInit {
 
         // Ambil harga SOL terbaru
         const solPrice = await this.getSolPrice();
+        try {
+            const sizingBalanceLamports = await this.connection.getBalance(wallet.publicKey);
+            const sizingBalanceUsd = (sizingBalanceLamports / 1_000_000_000) * solPrice;
+            const sizingReserveUsd = this.calculateDynamicReserveUsd(sizingBalanceUsd);
+            const spendableAfterReserveUsd = Math.max(sizingBalanceUsd - sizingReserveUsd, 0);
+            const maxPositionUsd = Math.max(
+                0,
+                this.getNumberConfig('MAX_POSITION_USD', this.positionSizeUSD),
+            );
+            const maxWalletPct = Math.min(
+                Math.max(this.getNumberConfig('MAX_POSITION_WALLET_PCT', 100), 0),
+                100,
+            );
+            const walletPositionCapUsd = spendableAfterReserveUsd * (maxWalletPct / 100);
+            buyAmountUSD = capBuyPositionUsd(
+                requestedBuyAmountUSD,
+                maxPositionUsd,
+                spendableAfterReserveUsd,
+                maxWalletPct,
+            );
+            this.logger.log(
+                `[BuyTrace] PositionCap token=${tokenMint} chat=${telegramChatId} requestedUsd=${requestedBuyAmountUSD.toFixed(2)} maxUsd=${maxPositionUsd.toFixed(2)} walletCapUsd=${walletPositionCapUsd.toFixed(2)} finalUsd=${buyAmountUSD.toFixed(2)}`,
+            );
+            if (!Number.isFinite(buyAmountUSD) || buyAmountUSD <= 0) {
+                const msg = 'Capital guard blocked buy. No spendable balance after reserve.';
+                await notifyBuyFailure({ reason: 'capital_guard', details: msg, amountUsd: 0 });
+                return { success: false, message: msg };
+            }
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await notifyBuyFailure({ reason: 'capital_guard', details: msg });
+            return { success: false, message: `Position sizing failed: ${msg}` };
+        }
         const amountInSol = buyAmountUSD / solPrice;
         const amountInLamports = Math.floor(amountInSol * 1_000_000_000);
         const priorityFeeLamports = options?.priorityFeeSol
@@ -1259,7 +1390,9 @@ export class TradeService implements OnModuleInit {
             const balanceAfterBuyUsd = balanceAfterBuy * solPrice;
             const openExposureUsd = openTrades.reduce((sum, trade) => {
                 const value = Number(trade.entryValueUsd);
-                return sum + (Number.isFinite(value) && value > 0 ? value : effectivePositionSizeUSD);
+                return (
+                    sum + (Number.isFinite(value) && value > 0 ? value : effectivePositionSizeUSD)
+                );
             }, 0);
             const committedCapitalUsd = openExposureUsd + buyAmountUSD;
             const spendableCapitalUsd = Math.max(balanceUsd - dynamicReserveUsd, 0);
@@ -1269,7 +1402,9 @@ export class TradeService implements OnModuleInit {
 
             if (committedCapitalUsd > spendableCapitalUsd) {
                 const msg = `Capital guard blocked buy. Wallet=$${balanceUsd.toFixed(2)}, Spendable=$${spendableCapitalUsd.toFixed(2)}, Reserve=$${dynamicReserveUsd.toFixed(2)}, CommittedAfterBuy=$${committedCapitalUsd.toFixed(2)}.`;
-                this.logger.warn(`[BuyTrace] Blocked by dynamic capital guard token=${tokenMint} chat=${telegramChatId} ${msg}`);
+                this.logger.warn(
+                    `[BuyTrace] Blocked by dynamic capital guard token=${tokenMint} chat=${telegramChatId} ${msg}`,
+                );
                 await notifyBuyFailure({
                     reason: 'capital_guard',
                     details: msg,
@@ -1281,7 +1416,9 @@ export class TradeService implements OnModuleInit {
             if (balanceAfterBuy < reserveSol || balanceSol < totalRequiredSol) {
                 const msg = `Insufficient SOL balance. Have: ${balanceSol.toFixed(4)} SOL ($${balanceUsd.toFixed(2)}), Need: ${totalRequiredSol.toFixed(4)} SOL (Position: ${executionPayload.amountSol.toFixed(4)} SOL, Dynamic Reserve: ${reserveSol.toFixed(4)} SOL / $${dynamicReserveUsd.toFixed(2)} + Fee cushion ${feeCushionSol.toFixed(4)} SOL). Balance after buy would be $${balanceAfterBuyUsd.toFixed(2)}. Aborting buy before swap to prevent wasted fees.`;
                 this.logger.warn(`[Slot ${slotToUse}] ${msg}`);
-                this.logger.warn(`[BuyTrace] Blocked by balance token=${tokenMint} chat=${telegramChatId} wallet=${wallet.publicKey.toBase58()} balanceSol=${balanceSol.toFixed(6)}`);
+                this.logger.warn(
+                    `[BuyTrace] Blocked by balance token=${tokenMint} chat=${telegramChatId} wallet=${wallet.publicKey.toBase58()} balanceSol=${balanceSol.toFixed(6)}`,
+                );
                 await notifyBuyFailure({
                     reason: 'balance_guard',
                     details: msg,
@@ -1293,7 +1430,9 @@ export class TradeService implements OnModuleInit {
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`[Slot ${slotToUse}] Capital protection check failed: ${msg}`);
-            this.logger.error(`[BuyTrace] Capital protection exception token=${tokenMint} chat=${telegramChatId}: ${msg}`);
+            this.logger.error(
+                `[BuyTrace] Capital protection exception token=${tokenMint} chat=${telegramChatId}: ${msg}`,
+            );
             await notifyBuyFailure({
                 reason: 'capital_guard',
                 details: msg,
@@ -1319,18 +1458,20 @@ export class TradeService implements OnModuleInit {
             totalFeesSol,
             jitoTipLamports,
         } = await this.executeJupiterSwap(
-                WRAPPED_SOL_MINT,
-                tokenMint,
-                amountInLamports,
-                'BUY',
-                buyAmountUSD,
-                0,
-                selectedSlippageBps,
-                priorityFeeLamports,
-                wallet,
-                effectiveDryRun,
-                route,
-            );
+            WRAPPED_SOL_MINT,
+            tokenMint,
+            amountInLamports,
+            'BUY',
+            buyAmountUSD,
+            0,
+            selectedSlippageBps,
+            priorityFeeLamports,
+            wallet,
+            effectiveDryRun,
+            route,
+            undefined,
+            options,
+        );
 
         // IDEMPOTENCY RECOVERY (finding: the shared post-broadcast guard orphans BUYs).
         //
@@ -1421,7 +1562,9 @@ export class TradeService implements OnModuleInit {
             const finalAmountInSol = actualSol || amountInSol;
             const entryValueUsd = finalAmountInSol * solPrice;
             const entryPriceSol =
-                actualTokens && actualTokens > 0 ? finalAmountInSol / actualTokens : entryPrice / solPrice;
+                actualTokens && actualTokens > 0
+                    ? finalAmountInSol / actualTokens
+                    : entryPrice / solPrice;
             const symbol = await this.fetchTokenSymbol(tokenMint);
             if (effectiveDryRun) {
                 this.logger.log(
@@ -1439,11 +1582,13 @@ export class TradeService implements OnModuleInit {
 
             if (metadata?.creator) {
                 const bal = await this.getTokenBalance(metadata.creator, tokenMint);
-                initialCreatorBalance = typeof bal === 'number' && Number.isFinite(bal) ? bal : null;
+                initialCreatorBalance =
+                    typeof bal === 'number' && Number.isFinite(bal) ? bal : null;
             }
             if (metadata?.topHolder) {
                 const bal = await this.getTokenBalance(metadata.topHolder, tokenMint);
-                initialTopHolderBalance = typeof bal === 'number' && Number.isFinite(bal) ? bal : null;
+                initialTopHolderBalance =
+                    typeof bal === 'number' && Number.isFinite(bal) ? bal : null;
             }
 
             const mergedScaleIn = existingOpenTrade
@@ -1501,6 +1646,12 @@ export class TradeService implements OnModuleInit {
                         symbol: existingOpenTrade.symbol || symbol,
                         slotNumber: existingOpenTrade.slotNumber,
                         entryPrice: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
+                        entryPriceSol: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
+                        entryPriceUsd:
+                            mergedScaleIn && mergedScaleIn.totalTokenAmount > 0
+                                ? mergedScaleIn.mergedEntryValueUsd /
+                                  mergedScaleIn.totalTokenAmount
+                                : entryPrice,
                         highestPrice: mergedScaleIn?.mergedHighestPriceSol ?? entryPriceSol,
                         trailingStopPrice: scaleInTrailingStopPrice,
                         status: 'OPEN',
@@ -1511,10 +1662,11 @@ export class TradeService implements OnModuleInit {
                         amountInSol: { increment: finalAmountInSol },
                         buyTxHash: existingOpenTrade.buyTxHash || txHash || null,
                         entryLiquidity:
-                            (existingOpenTrade.entryLiquidity ?? metadata?.liquidity) ?? 0,
+                            existingOpenTrade.entryLiquidity ?? metadata?.liquidity ?? 0,
                         entryMarketCap:
-                            (existingOpenTrade.entryMarketCap ?? metadata?.marketCap) ?? 0,
-                        creatorAddress: existingOpenTrade.creatorAddress ?? metadata?.creator ?? null,
+                            existingOpenTrade.entryMarketCap ?? metadata?.marketCap ?? 0,
+                        creatorAddress:
+                            existingOpenTrade.creatorAddress ?? metadata?.creator ?? null,
                         topHolderAddress:
                             existingOpenTrade.topHolderAddress ?? metadata?.topHolder ?? null,
                         initialCreatorBalance:
@@ -1523,10 +1675,10 @@ export class TradeService implements OnModuleInit {
                             existingOpenTrade.initialTopHolderBalance ?? initialTopHolderBalance,
                         targetTakeProfit:
                             existingOpenTrade.targetTakeProfit ?? options?.targetTakeProfit,
-                        targetStopLoss:
-                            existingOpenTrade.targetStopLoss ?? options?.targetStopLoss,
+                        targetStopLoss: existingOpenTrade.targetStopLoss ?? options?.targetStopLoss,
                         targetTrailingDistance:
-                            existingOpenTrade.targetTrailingDistance ?? options?.targetTrailingDistance,
+                            existingOpenTrade.targetTrailingDistance ??
+                            options?.targetTrailingDistance,
                         telegramChatId: tradeChatDbId || null,
                         // Folded into this SAME guarded updateMany (rather than a separate
                         // unguarded `where: { id }` write afterward) so there is no second
@@ -1586,6 +1738,8 @@ export class TradeService implements OnModuleInit {
                         symbol,
                         slotNumber: slotToUse,
                         entryPrice: entryPriceSol,
+                        entryPriceSol,
+                        entryPriceUsd: entryPrice,
                         highestPrice: entryPriceSol,
                         trailingStopPrice: 0, // PriceMonitor activates it once the position is in profit.
                         status: 'OPEN',
@@ -1623,7 +1777,9 @@ export class TradeService implements OnModuleInit {
                     `[Slot ${savedTrade.slotNumber}] Scale-in merged for ${symbol} (${tokenMint}) existingTradeId=${existingOpenTrade.id} tx=${txHash || 'n/a'} totalSol=${(mergedScaleIn?.mergedAmountInSol ?? finalAmountInSol).toFixed(6)} totalTokens=${(mergedScaleIn?.totalTokenAmount ?? 0).toFixed(6)} avgEntry=${(mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol).toFixed(10)} trailingStop=${scaleInTrailingStopPrice.toFixed(10)}`,
                 );
             }
-            this.logger.log(`[Slot ${savedTrade.slotNumber}] Successfully bought ${symbol} (${tokenMint})`);
+            this.logger.log(
+                `[Slot ${savedTrade.slotNumber}] Successfully bought ${symbol} (${tokenMint})`,
+            );
             this.logger.log(
                 `[BuyTrace] Success token=${tokenMint} chat=${telegramChatId} slot=${savedTrade.slotNumber} tx=${txHash || 'n/a'}`,
             );
@@ -1662,10 +1818,15 @@ export class TradeService implements OnModuleInit {
             }
 
             // PriceMonitorService otomatis akan mendeteksi trade baru dari DB
-            return { success: true, message: `Successfully bought ${symbol} at slot ${savedTrade.slotNumber}` };
+            return {
+                success: true,
+                message: `Successfully bought ${symbol} at slot ${savedTrade.slotNumber}`,
+            };
         }
 
-        this.logger.warn(`[BuyTrace] Swap failed token=${tokenMint} chat=${telegramChatId}: ${error || 'Unknown error'}`);
+        this.logger.warn(
+            `[BuyTrace] Swap failed token=${tokenMint} chat=${telegramChatId}: ${error || 'Unknown error'}`,
+        );
         await notifyBuyFailure({
             reason: error || 'swap_failed',
             details: error || 'Unknown error',
@@ -1712,7 +1873,7 @@ export class TradeService implements OnModuleInit {
             const tradeSettings = trade.telegramChatId
                 ? await this.telegramWorkspace.getChatSettingsByChatDbId(trade.telegramChatId)
                 : null;
-            tradeDryRun = forceLive ? false : tradeSettings?.dryRun ?? true;
+            tradeDryRun = forceLive ? false : (tradeSettings?.dryRun ?? true);
             const targetChat = trade.telegramChatId
                 ? await this.telegramWorkspace.getChatByDbId(trade.telegramChatId)
                 : null;
@@ -1774,7 +1935,8 @@ export class TradeService implements OnModuleInit {
                         );
                         if (recDetails && Math.abs(recDetails.tokenChange) > 0) {
                             const recTokens = Math.abs(recDetails.tokenChange);
-                            const recSol = recDetails.cleanSolAmount ?? Math.abs(recDetails.solChange);
+                            const recSol =
+                                recDetails.cleanSolAmount ?? Math.abs(recDetails.solChange);
                             const recPercentage = pending.percentage ?? percentage;
                             const recExitReason = pending.exitReason ?? exitReason;
                             this.logger.warn(
@@ -2010,7 +2172,8 @@ export class TradeService implements OnModuleInit {
                     this.configService.get<string>('STOP_LOSS_ALERT_AFTER_FAILURES', '3'),
                     10,
                 );
-                const threshold = Number.isFinite(alertThreshold) && alertThreshold > 0 ? alertThreshold : 3;
+                const threshold =
+                    Number.isFinite(alertThreshold) && alertThreshold > 0 ? alertThreshold : 3;
                 if (failures >= threshold) {
                     // eslint-disable-next-line no-console
                     console.error(
@@ -2033,7 +2196,9 @@ export class TradeService implements OnModuleInit {
                         });
                     } catch (alertErr) {
                         const msg = alertErr instanceof Error ? alertErr.message : String(alertErr);
-                        this.logger.error(`[Trade ${tradeId}] Failed to send stop-loss escalation alert: ${msg}`);
+                        this.logger.error(
+                            `[Trade ${tradeId}] Failed to send stop-loss escalation alert: ${msg}`,
+                        );
                     }
                 }
             }
@@ -2121,7 +2286,9 @@ export class TradeService implements OnModuleInit {
         );
 
         const fallbackSolPrice = safeSellSolPrice.solPrice || trade.solPriceAtEntry || 0;
-        const finalSolReceived = actualSol || (fallbackSolPrice > 0 ? (sellAmount * quotedExitPrice) / fallbackSolPrice : 0);
+        const finalSolReceived =
+            actualSol ||
+            (fallbackSolPrice > 0 ? (sellAmount * quotedExitPrice) / fallbackSolPrice : 0);
         const finalTokensSold = actualTokens || sellAmount;
         const entrySolValue = trade.amountInSol * percentage;
         const realizedPnl = calculateRealizedSellPnl({
@@ -2168,6 +2335,8 @@ export class TradeService implements OnModuleInit {
                 data: {
                     status: 'CLOSED',
                     exitPrice,
+                    exitPriceUsd: exitPrice,
+                    exitPriceSol: finalTokensSold > 0 ? finalSolReceived / finalTokensSold : null,
                     exitReason,
                     sellTxHash: txHash || null,
                 },
@@ -2208,9 +2377,7 @@ export class TradeService implements OnModuleInit {
             }
         } else {
             const partialTakeProfitAt =
-                exitReason === 'PARTIAL_TAKE_PROFIT'
-                    ? new Date()
-                    : trade.partialTakeProfitAt;
+                exitReason === 'PARTIAL_TAKE_PROFIT' ? new Date() : trade.partialTakeProfitAt;
             const runnerFloorPercent = Number.parseFloat(
                 this.configService.get<string>('RUNNER_BREAKEVEN_FLOOR_PERCENT') || '8',
             );
@@ -2261,7 +2428,9 @@ export class TradeService implements OnModuleInit {
                     amountInSol: { multiply: 1 - percentage },
                     entryValueUsd: { multiply: 1 - percentage },
                     partialTakeProfitAt,
-                    ...(runnerStopPrice !== undefined ? { trailingStopPrice: runnerStopPrice } : {}),
+                    ...(runnerStopPrice !== undefined
+                        ? { trailingStopPrice: runnerStopPrice }
+                        : {}),
                 },
             });
             dbUpdateOk = partialSellUpdate.count > 0;
@@ -2312,6 +2481,36 @@ export class TradeService implements OnModuleInit {
         }
         if (dbUpdateOk && totalFeesSol) {
             await this.incrementTradeFees(tradeId, totalFeesSol);
+        }
+
+        let netProfitUsd = estimatedProfitUsd;
+        let netProfitPercent = profit;
+        let cumulativeFeesSol = totalFeesSol || 0;
+        let cumulativeFeesUsd = cumulativeFeesSol * (trade.solPriceAtEntry || 0);
+        let triggerPnlPercent: number | undefined;
+        if (dbUpdateOk) {
+            const persisted = await this.prismaService.trade.findUnique({
+                where: { id: tradeId },
+                select: {
+                    profitUsd: true,
+                    totalFeesSol: true,
+                    solPriceAtEntry: true,
+                    entryValueUsd: true,
+                    exitTriggerPnlPercent: true,
+                },
+            });
+            if (persisted) {
+                netProfitUsd = computeNetProfitUsd(persisted);
+                cumulativeFeesSol = persisted.totalFeesSol || 0;
+                cumulativeFeesUsd = cumulativeFeesSol * (persisted.solPriceAtEntry || 0);
+                const netBasisUsd = trade.entryValueUsd || totalUsdSpent;
+                netProfitPercent = netBasisUsd > 0 ? (netProfitUsd / netBasisUsd) * 100 : profit;
+                triggerPnlPercent = persisted.exitTriggerPnlPercent ?? undefined;
+                await this.prismaService.trade.update({
+                    where: { id: tradeId },
+                    data: { netProfitUsd },
+                });
+            }
         }
 
         // 🧑‍💻 AUTO BLACKLIST ON DEV_DUMP/RUGPULL (Self-Learning)
@@ -2369,7 +2568,7 @@ export class TradeService implements OnModuleInit {
             await this.reportingService.sendSellAlert(
                 trade.tokenMint,
                 exitPrice,
-                profit,
+                netProfitPercent,
                 exitReason,
                 trade.symbol || undefined,
                 {
@@ -2382,6 +2581,12 @@ export class TradeService implements OnModuleInit {
                     solProfitPercent,
                     usdSpent: totalUsdSpent,
                     usdReceived: totalUsdReceived,
+                    triggerPnlPercent,
+                    grossFillPnlPercent: profit,
+                    feesSol: cumulativeFeesSol,
+                    feesUsd: cumulativeFeesUsd,
+                    netProfitUsd,
+                    netProfitPercent,
                 },
                 tradeDryRun,
                 targetChatId,
@@ -2439,7 +2644,7 @@ export class TradeService implements OnModuleInit {
 
         this.logger.warn(`[Trade ${tradeId}] Queueing sell retry ${retryCount}/3 in ${delayMs}ms.`);
         setTimeout(() => {
-                void this.executeSell(tradeId, currentPrice, exitReason, percentage);
+            void this.executeSell(tradeId, currentPrice, exitReason, percentage);
         }, delayMs);
     }
 
@@ -2472,7 +2677,7 @@ export class TradeService implements OnModuleInit {
             `[Trade ${tradeId}] Queueing price anomaly retry ${retryCount}/3 in 60000ms.`,
         );
         setTimeout(() => {
-                void this.executeSell(tradeId, currentPrice, exitReason, percentage);
+            void this.executeSell(tradeId, currentPrice, exitReason, percentage);
         }, 60_000);
     }
 
@@ -2512,7 +2717,11 @@ export class TradeService implements OnModuleInit {
             if (status) {
                 if (status.err) return 'LANDED_FAILED';
                 const conf = status.confirmationStatus;
-                if (conf === 'confirmed' || conf === 'finalized' || (status.confirmations ?? 0) > 0) {
+                if (
+                    conf === 'confirmed' ||
+                    conf === 'finalized' ||
+                    (status.confirmations ?? 0) > 0
+                ) {
                     return 'LANDED_OK';
                 }
                 // 'processed' only: still settling. Treat as landed once the window elapses
@@ -2552,6 +2761,7 @@ export class TradeService implements OnModuleInit {
         // market/execution retry cause from a rate-limit (429) retry, which has
         // nothing to do with actual market slippage.
         lastErrorClass?: RpcErrorClass,
+        buySignal?: Pick<BuyExecutionOptions, 'signalObservedAt' | 'signalPriceUsd'>,
     ): Promise<{
         success: boolean;
         entryPrice: number;
@@ -2571,6 +2781,17 @@ export class TradeService implements OnModuleInit {
             this.configService.get<string>('TRADE_MAX_RETRIES', '5'),
             10,
         );
+        if (side === 'BUY') {
+            const signalError = evaluateBuySignalGuard({
+                ...buySignal,
+                now: Date.now(),
+                maxSignalAgeMs: this.getNumberConfig('MAX_BUY_SIGNAL_AGE_MS', 8000),
+                maxChasePct: this.getNumberConfig('MAX_BUY_CHASE_PCT', 5),
+            });
+            if (signalError) {
+                return { success: false, entryPrice: 0, error: signalError };
+            }
+        }
         if (!wallet) {
             throw new Error('Live swap execution requires a chat wallet.');
         }
@@ -2692,6 +2913,16 @@ export class TradeService implements OnModuleInit {
             if (side === 'BUY') {
                 const usdValue = buyAmountUSD || this.positionSizeUSD;
                 price = usdValue / (quoteData.outAmount / Math.pow(10, decimals));
+                const signalError = evaluateBuySignalGuard({
+                    ...buySignal,
+                    quotePriceUsd: price,
+                    now: Date.now(),
+                    maxSignalAgeMs: this.getNumberConfig('MAX_BUY_SIGNAL_AGE_MS', 8000),
+                    maxChasePct: this.getNumberConfig('MAX_BUY_CHASE_PCT', 5),
+                });
+                if (signalError) {
+                    return { success: false, entryPrice: 0, error: signalError };
+                }
             } else {
                 // SELL: Price = (outAmount_sol * solPrice) / inAmount_token.
                 // Do not use the legacy $150 SOL fallback here; it can create fake USD profit.
@@ -2703,11 +2934,13 @@ export class TradeService implements OnModuleInit {
                 const solPrice = await this.getSolPriceOrNull('SELL');
                 const outAmountSol = quoteData.outAmount / 1_000_000_000;
                 const inAmountToken = amount / Math.pow(10, decimals);
-                const calculatedPrice = solPrice && inAmountToken > 0 ? (outAmountSol * solPrice) / inAmountToken : 0;
+                const calculatedPrice =
+                    solPrice && inAmountToken > 0 ? (outAmountSol * solPrice) / inAmountToken : 0;
                 const fallbackPrice = await this.getSellPriceFallback(inputMint);
-                price = calculatedPrice > 0 || fallbackPrice
-                    ? validateSellPrice(calculatedPrice, fallbackPrice, inputMint, this.logger)
-                    : 0.00000001;
+                price =
+                    calculatedPrice > 0 || fallbackPrice
+                        ? validateSellPrice(calculatedPrice, fallbackPrice, inputMint, this.logger)
+                        : 0.00000001;
             }
 
             // 🤖 DRY RUN MODE: Skip actual swap execution, just return simulated success with quote price
@@ -2758,7 +2991,9 @@ export class TradeService implements OnModuleInit {
                 feeConfig = 0; // Jito relies on bundle tip, not priority fee
                 this.logger.debug(`[Jupiter] 🚀 Using Jito MEV. Jupiter priority fee set to 0.`);
             } else if (useJitoConfigured && retryCount > 0) {
-                this.logger.warn('[Jupiter] Falling back to direct send on retry to avoid bundle expiry.');
+                this.logger.warn(
+                    '[Jupiter] Falling back to direct send on retry to avoid bundle expiry.',
+                );
             }
 
             // Routed through JupiterLimiter for the same reason as the quote call above.
@@ -2933,7 +3168,10 @@ export class TradeService implements OnModuleInit {
                     side,
                 );
                 if (actualSwap) {
-                    const solPrice = side === 'SELL' ? await this.getSolPriceOrNull('SELL') : await this.getSolPrice();
+                    const solPrice =
+                        side === 'SELL'
+                            ? await this.getSolPriceOrNull('SELL')
+                            : await this.getSolPrice();
                     totalFeesSol = actualSwap.totalFeesSol;
                     actualSol = actualSwap.cleanSolAmount ?? Math.abs(actualSwap.solChange);
                     actualTokens = Math.abs(actualSwap.tokenChange);
@@ -3019,6 +3257,7 @@ export class TradeService implements OnModuleInit {
                         dryRun,
                         route,
                         errorClass,
+                        buySignal,
                     );
                 }
                 if (confirmedOnChainFailure) {
@@ -3211,7 +3450,7 @@ export class TradeService implements OnModuleInit {
                 timeout: 3000,
                 httpsAgent: this.httpsAgent,
             });
-            const dexSymbol = response.data?.pairs?.[0]?.baseToken?.symbol;
+            const dexSymbol = selectBestDexScreenerPair(response.data?.pairs, tokenMint)?.baseToken?.symbol;
             if (dexSymbol) return `$${dexSymbol}`;
 
             return 'UNKNOWN';
@@ -3406,7 +3645,10 @@ export class TradeService implements OnModuleInit {
                 return { success: false, message: 'Chat wallet is required for manual sell.' };
             }
             const wallet = await this.getWallet(chatId);
-            const actualBalance = await this.getTokenBalance(wallet.publicKey.toBase58(), tokenMint);
+            const actualBalance = await this.getTokenBalance(
+                wallet.publicKey.toBase58(),
+                tokenMint,
+            );
             if (actualBalance === null || actualBalance <= 0)
                 return { success: false, message: 'Zero or invalid balance in wallet.' };
 
@@ -3439,7 +3681,11 @@ export class TradeService implements OnModuleInit {
             // failure with its signature discarded: the tx may still land. Surface the exact
             // signature so a re-sell is balance-checked (the wallet balance is re-read on the
             // next attempt at the top of this path) and the operator can reconcile on-chain.
-            if (typeof error === 'string' && error.startsWith('post_broadcast_unconfirmed') && txHash) {
+            if (
+                typeof error === 'string' &&
+                error.startsWith('post_broadcast_unconfirmed') &&
+                txHash
+            ) {
                 this.logger.warn(
                     `[ManualSell] UNCONFIRMED sell token=${tokenMint} tx=${txHash}. It may still ` +
                         `land; a retry re-reads the live balance before re-selling.`,
@@ -3508,9 +3754,7 @@ export class TradeService implements OnModuleInit {
         const spendableSol = Math.max(balanceSol - reserveSol, 0);
         const solPrice = amountMode === 'usd' ? await this.getSolPrice() : null;
         const transferSol =
-            amountMode === 'percent'
-                ? spendableSol * amountValue
-                : amountValue / (solPrice || 150);
+            amountMode === 'percent' ? spendableSol * amountValue : amountValue / (solPrice || 150);
 
         if (!Number.isFinite(transferSol) || transferSol <= 0) {
             return { success: false, message: 'Calculated transfer amount is invalid.' };
@@ -3673,19 +3917,16 @@ export class TradeService implements OnModuleInit {
         }
     }
 
-    async getWalletHoldingsForChat(chatId: string): Promise<
-        Array<{ mint: string; symbol: string; balance: number }>
-    > {
+    async getWalletHoldingsForChat(
+        chatId: string,
+    ): Promise<Array<{ mint: string; symbol: string; balance: number }>> {
         const wallet = await this.getWallet(chatId);
         const [onChainHoldings, chatRecord] = await Promise.all([
             this.getWalletHoldings(wallet.publicKey.toBase58()),
             this.telegramWorkspace.getChatById(chatId),
         ]);
 
-        const holdingsByMint = new Map<
-            string,
-            { mint: string; symbol: string; balance: number }
-        >();
+        const holdingsByMint = new Map<string, { mint: string; symbol: string; balance: number }>();
 
         for (const holding of onChainHoldings) {
             holdingsByMint.set(holding.mint, holding);
@@ -3706,9 +3947,12 @@ export class TradeService implements OnModuleInit {
 
                 let estimatedBalance = 0;
                 try {
-                    const currentPrice = await this.reportingService.fetchCurrentPrice(trade.tokenMint);
+                    const currentPrice = await this.reportingService.fetchCurrentPrice(
+                        trade.tokenMint,
+                    );
                     if (currentPrice && trade.entryPrice > 0) {
-                        const estimatedUsdValue = trade.amountInSol * (trade.solPriceAtEntry || currentPrice);
+                        const estimatedUsdValue =
+                            trade.amountInSol * (trade.solPriceAtEntry || currentPrice);
                         estimatedBalance = estimatedUsdValue / trade.entryPrice;
                     }
                 } catch {
@@ -3723,9 +3967,7 @@ export class TradeService implements OnModuleInit {
             }
         }
 
-        return Array.from(holdingsByMint.values()).sort((a, b) =>
-            a.symbol.localeCompare(b.symbol),
-        );
+        return Array.from(holdingsByMint.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
     }
 
     async getPortfolioForChat(chatId: string): Promise<
@@ -3747,7 +3989,8 @@ export class TradeService implements OnModuleInit {
             solPriceAtEntry?: number;
             currentSolPriceUsd?: number;
             source: 'ON_CHAIN';
-        }>> {
+        }>
+    > {
         const wallet = await this.getWallet(chatId);
         const walletAddress = wallet.publicKey.toBase58();
         const [onChainHoldings, chatRecord] = await Promise.all([
@@ -3821,7 +4064,10 @@ export class TradeService implements OnModuleInit {
             Array.from(holdingsByMint.values()).map(async (holding) => {
                 const meta = openTradeMetaByMint.get(holding.mint);
                 const currentPriceUsd = await this.reportingService.fetchCurrentPrice(holding.mint);
-                const valueUsd = currentPriceUsd && holding.balance > 0 ? currentPriceUsd * holding.balance : undefined;
+                const valueUsd =
+                    currentPriceUsd && holding.balance > 0
+                        ? currentPriceUsd * holding.balance
+                        : undefined;
                 const valueSol =
                     valueUsd !== undefined && currentSolPriceUsd > 0
                         ? valueUsd / currentSolPriceUsd
@@ -3835,7 +4081,9 @@ export class TradeService implements OnModuleInit {
                         ? valueSol - meta.entryValueSol
                         : undefined;
                 const pnlPercent =
-                    pnlSol !== undefined && meta?.entryValueSol !== undefined && meta.entryValueSol > 0
+                    pnlSol !== undefined &&
+                    meta?.entryValueSol !== undefined &&
+                    meta.entryValueSol > 0
                         ? (pnlSol / meta.entryValueSol) * 100
                         : undefined;
 
@@ -3846,7 +4094,9 @@ export class TradeService implements OnModuleInit {
                     entryPriceUsd: meta?.entryPriceUsd,
                     currentPriceUsd: currentPriceUsd || undefined,
                     entryPriceSol:
-                        meta?.entryPriceUsd !== undefined && meta?.solPriceAtEntry !== undefined && meta.solPriceAtEntry > 0
+                        meta?.entryPriceUsd !== undefined &&
+                        meta?.solPriceAtEntry !== undefined &&
+                        meta.solPriceAtEntry > 0
                             ? meta.entryPriceUsd / meta.solPriceAtEntry
                             : undefined,
                     currentPriceSol:
@@ -3906,4 +4156,3 @@ export class TradeService implements OnModuleInit {
         return { total, wins, losses, winRate };
     }
 }
-

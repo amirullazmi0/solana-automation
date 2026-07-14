@@ -28,4 +28,6 @@ export type BuyExecutionOptions = {
     route?: TradeRoute;
     positionSizeMultiplier?: number;
     aiDecisionSnapshotId?: number;
+    signalObservedAt?: number;
+    signalPriceUsd?: number;
 };

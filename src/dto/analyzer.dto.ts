@@ -13,6 +13,7 @@ export interface DexScreenerPair {
     dexId?: string;
     liquidity?: { usd?: number };
     fdv?: number;
+    priceUsd?: string;
     pairCreatedAt?: number;
     priceChange?: { m5?: number; m15?: number; h1?: number; h6?: number; h24?: number };
     volume?: { m5?: number; h1?: number; h24?: number };
@@ -38,9 +39,14 @@ export interface TokenMetadata {
     volScore?: number;
     zScore?: number;
     priceChange1h?: number;
+    priceChange5m?: number;
+    priceUsd?: number;
+    buys5m?: number;
+    sells5m?: number;
     isPumpFun?: boolean;
     isCTO?: boolean;
     isCommunityTakeover?: boolean;
+    creatorExited?: boolean;
     hasWebsite?: boolean;
     hasTwitter?: boolean;
     hasTelegram?: boolean;
@@ -114,6 +120,7 @@ export interface RugCheckApiResponse {
 export interface CreatorOwnershipResult {
     creatorPct: number | null;
     isCTO: boolean;
+    creatorExited?: boolean;
     reliable: boolean;
 }
 

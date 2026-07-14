@@ -140,6 +140,14 @@ model Trade {
   exitPrice               Float?
   exitReason              String?
   profitUsd               Float?
+  netProfitUsd            Float?
+  entryPriceUsd           Float?
+  entryPriceSol           Float?
+  exitPriceUsd            Float?
+  exitPriceSol            Float?
+  exitTriggerPriceUsd     Float?
+  exitTriggerPriceSol     Float?
+  exitTriggerPnlPercent   Float?
   entryLiquidity          Float?
   entryMarketCap          Float?
   solPriceAtEntry         Float?
@@ -215,6 +223,12 @@ model Watchlist {
   isCommunityTakeover Boolean?
   whaleSignalScore Float?
   pairCreatedAt DateTime?
+  entryConfirmStartedAt DateTime?
+  entryConfirmPriceUsd Float?
+  entryConfirmLiquidityUsd Float?
+  entryConfirmBuys5m Int?
+  entryConfirmSells5m Int?
+  entryConfirmCount Int @default(0)
   checkCount    Int             @default(0)
   lastCheckedAt DateTime        @default(now())
   createdAt     DateTime        @default(now())

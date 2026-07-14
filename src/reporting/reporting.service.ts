@@ -7,6 +7,7 @@ import axios from 'axios';
 import * as https from 'https';
 import * as TelegramBot from 'node-telegram-bot-api';
 import { DexLimiter } from '../common/dex-limiter';
+import { selectBestDexScreenerPair } from '../common/dex-pair';
 import { computeNetProfitUsd } from '../common/fee-utils';
 import { JupiterLimiter, JupiterPriority } from '../common/jupiter-limiter';
 import {
@@ -930,12 +931,12 @@ export class ReportingService implements OnModuleInit {
     private async fetchTokenSymbolFromDex(tokenMint: string): Promise<string> {
         try {
             const response = await DexLimiter.get<{
-                pairs: Array<{ baseToken?: { symbol?: string } }>;
+                pairs: Array<import('../dto/analyzer.dto').DexScreenerPair>;
             }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
                 timeout: 5000,
                 httpsAgent: this.httpsAgent,
             });
-            return response.data?.pairs?.[0]?.baseToken?.symbol || 'UNKNOWN';
+            return selectBestDexScreenerPair(response.data?.pairs, tokenMint)?.baseToken?.symbol || 'UNKNOWN';
         } catch {
             return 'UNKNOWN';
         }
@@ -1033,16 +1034,16 @@ export class ReportingService implements OnModuleInit {
                 }
             }
 
-            const dexResponse = await DexLimiter.get<{ pairs: Array<{ priceUsd?: string }> }>(
-                `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
-                {
-                    timeout: 5000,
-                    httpsAgent: this.httpsAgent,
-                },
-            ).catch(() => null);
+            const dexResponse = await DexLimiter.get<{
+                pairs: Array<import('../dto/analyzer.dto').DexScreenerPair>;
+            }>(`https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`, {
+                timeout: 5000,
+                httpsAgent: this.httpsAgent,
+            }).catch(() => null);
 
-            if (dexResponse?.data?.pairs?.[0]?.priceUsd) {
-                return parseFloat(dexResponse.data.pairs[0].priceUsd);
+            const pair = selectBestDexScreenerPair(dexResponse?.data?.pairs, tokenMint);
+            if (pair?.priceUsd) {
+                return parseFloat(pair.priceUsd);
             }
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -1177,6 +1178,12 @@ export class ReportingService implements OnModuleInit {
             solProfitPercent?: number;
             usdSpent?: number;
             usdReceived?: number;
+            triggerPnlPercent?: number;
+            grossFillPnlPercent?: number;
+            feesSol?: number;
+            feesUsd?: number;
+            netProfitUsd?: number;
+            netProfitPercent?: number;
         },
         isDryRun = true,
         targetChatId?: string,
@@ -1194,6 +1201,14 @@ export class ReportingService implements OnModuleInit {
                     ? `${details.solProfitPercent >= 0 ? '🟢' : '🔴'} *SOL Profit:* \`${details.solProfitPercent.toFixed(2)}%\`\n`
                     : '';
 
+            const auditDisplay =
+                details.netProfitUsd !== undefined
+                    ? `Trigger P&L: ${details.triggerPnlPercent?.toFixed(2) || 'N/A'}%\n` +
+                      `Gross Fill P&L: ${details.grossFillPnlPercent?.toFixed(2) || '0.00'}%\n` +
+                      `Fees: ${details.feesSol?.toFixed(6) || '0.000000'} SOL (${details.feesUsd?.toFixed(4) || '0.0000'})\n` +
+                      `Net P&L: ${details.netProfitUsd.toFixed(4)} (${details.netProfitPercent?.toFixed(2) || '0.00'}%)\n`
+                    : '';
+
             const usdSpentDisplay =
                 details.usdSpent !== undefined && details.usdReceived !== undefined
                     ? `📥 *USD Spent:* \`$${details.usdSpent.toFixed(2)}\`\n` +
@@ -1209,7 +1224,8 @@ export class ReportingService implements OnModuleInit {
                 `📥 *SOL Spent:* \`${details.solSpent?.toFixed(4) || '0.0000'} SOL\`\n` +
                 `📤 *SOL Received:* \`${details.solReceived?.toFixed(4) || '0.0000'} SOL\`\n` +
                 usdSpentDisplay +
-                solProfitDisplay;
+                solProfitDisplay +
+                auditDisplay;
         }
 
         const message =

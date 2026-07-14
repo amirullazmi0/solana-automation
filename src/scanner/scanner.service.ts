@@ -18,6 +18,52 @@ import {
     HeliusWebhookTransaction,
 } from './helius-webhook.dto';
 
+export type EntryConfirmationSnapshot = {
+    startedAt: number;
+    priceUsd: number;
+    liquidityUsd: number;
+    buys5m: number;
+    sells5m: number;
+};
+
+export type EntryConfirmationConfig = {
+    windowMs: number;
+    maxDropPct: number;
+    maxChasePct: number;
+    minLiquidityRatio: number;
+    minNewBuys: number;
+    buySellRatio: number;
+};
+
+export function evaluateEntryConfirmation(
+    baseline: EntryConfirmationSnapshot,
+    current: Omit<EntryConfirmationSnapshot, 'startedAt'>,
+    now: number,
+    config: EntryConfirmationConfig,
+): { decision: 'PENDING' | 'PASS' | 'RESET'; reason: string } {
+    if (now - baseline.startedAt < config.windowMs) {
+        return { decision: 'PENDING', reason: 'entry_confirmation_pending' };
+    }
+    const newBuys = current.buys5m - baseline.buys5m;
+    const newSells = current.sells5m - baseline.sells5m;
+    if (newBuys < 0 || newSells < 0) {
+        return { decision: 'RESET', reason: 'entry_confirmation_window_reset' };
+    }
+    if (current.priceUsd < baseline.priceUsd * (1 - config.maxDropPct / 100)) {
+        return { decision: 'RESET', reason: 'entry_confirmation_price_drop' };
+    }
+    if (current.priceUsd > baseline.priceUsd * (1 + config.maxChasePct / 100)) {
+        return { decision: 'RESET', reason: 'entry_confirmation_price_chase' };
+    }
+    if (current.liquidityUsd < baseline.liquidityUsd * config.minLiquidityRatio) {
+        return { decision: 'RESET', reason: 'entry_confirmation_liquidity_drop' };
+    }
+    if (newBuys < config.minNewBuys || newBuys <= newSells * config.buySellRatio) {
+        return { decision: 'RESET', reason: 'entry_confirmation_buyers_weak' };
+    }
+    return { decision: 'PASS', reason: 'entry_confirmation_passed' };
+}
+
 @Injectable()
 export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private readonly logger = new Logger(ScannerService.name);
@@ -179,9 +225,19 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         return 'unknown_execution_failure';
     }
 
-    private normalizeBuyFailureStage(message: string): 'PRE_SWAP' | 'QUOTE' | 'SWAP' | 'CONFIRMATION' {
+    private normalizeBuyFailureStage(
+        message: string,
+    ): 'PRE_SWAP' | 'QUOTE' | 'SWAP' | 'CONFIRMATION' {
         const reason = this.normalizeBuyFailureReason(message);
-        if (['risk_max_drawdown', 'risk_max_consecutive_losses', 'capital_guard', 'slot_guard', 'balance_guard'].includes(reason)) {
+        if (
+            [
+                'risk_max_drawdown',
+                'risk_max_consecutive_losses',
+                'capital_guard',
+                'slot_guard',
+                'balance_guard',
+            ].includes(reason)
+        ) {
             return 'PRE_SWAP';
         }
         if (['price_impact_guard', 'jupiter_quote_failed'].includes(reason)) {
@@ -267,7 +323,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         if (this.destroyed) return;
 
         this.pumpPortalReconnectAttempts += 1;
-        const delayMs = Math.min(60_000, 5_000 * 2 ** Math.min(this.pumpPortalReconnectAttempts - 1, 4));
+        const delayMs = Math.min(
+            60_000,
+            5_000 * 2 ** Math.min(this.pumpPortalReconnectAttempts - 1, 4),
+        );
         this.logger.warn(
             `🔌 PumpPortal WS ${reason}. Reconnecting in ${Math.round(delayMs / 1000)}s...`,
         );
@@ -728,7 +787,6 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             );
             const maxWaitTime = maxWaitMin * 60 * 1000;
             let localNotified = false;
-            let highSurgeConfirmationCount = 0;
 
             // Bersihkan notifiedTokens yang sudah > 6 jam
             const now = Date.now();
@@ -878,45 +936,95 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         });
                     }
 
-                    // 🛡️ HARDENED ANTI-SPAM (V2)
                     const surge = result.metadata?.volumeSurge || 0;
                     const mcap = result.metadata?.mcap || 0;
-                    const highSurgeThreshold = Math.max(
-                        0,
-                        Number.parseFloat(
-                            String(this.configService.get('HIGH_SURGE_THRESHOLD', '10')),
-                        ),
-                    );
-                    const requiredHighSurgeConfirmations = Math.max(
-                        1,
-                        Number.parseInt(
-                            String(this.configService.get('HIGH_SURGE_CONFIRMATION_SCANS', '2')),
-                            10,
-                        ),
-                    );
-                    if (result.safe && surge >= highSurgeThreshold) {
-                        highSurgeConfirmationCount++;
-                        if (highSurgeConfirmationCount < requiredHighSurgeConfirmations) {
-                            await this.updateWatchlistByMint(tokenMint, {
-                                reason: 'high_surge_confirmation_pending',
-                            });
-                            this.logger.log(
-                                `[${tokenMint}] High surge confirmation ${highSurgeConfirmationCount}/${requiredHighSurgeConfirmations}; waiting for fresh market data.`,
-                            );
-                            await new Promise((res) =>
-                                setTimeout(
-                                    res,
-                                    Number.parseInt(
-                                        String(this.configService.get('SCANNER_RECHECK_DELAY_MS', '1000')),
-                                        10,
-                                    ),
+                    if (result.safe && result.metadata?.route === 'MICIN') {
+                        const current = {
+                            priceUsd: result.metadata.priceUsd || 0,
+                            liquidityUsd: result.metadata.liquidity || 0,
+                            buys5m: result.metadata.buys5m || 0,
+                            sells5m: result.metadata.sells5m || 0,
+                        };
+                        const watchlist = await this.prismaService.watchlist.findUnique({
+                            where: { tokenMint },
+                        });
+                        const nowMs = Date.now();
+                        const baseline =
+                            watchlist?.entryConfirmStartedAt &&
+                            watchlist.entryConfirmPriceUsd &&
+                            watchlist.entryConfirmLiquidityUsd
+                                ? {
+                                      startedAt: watchlist.entryConfirmStartedAt.getTime(),
+                                      priceUsd: watchlist.entryConfirmPriceUsd,
+                                      liquidityUsd: watchlist.entryConfirmLiquidityUsd,
+                                      buys5m: watchlist.entryConfirmBuys5m || 0,
+                                      sells5m: watchlist.entryConfirmSells5m || 0,
+                                  }
+                                : null;
+                        const confirmationConfig: EntryConfirmationConfig = {
+                            windowMs: Number(
+                                this.configService.get('ENTRY_CONFIRMATION_WINDOW_MS', 4000),
+                            ),
+                            maxDropPct: Number(
+                                this.configService.get('ENTRY_CONFIRMATION_MAX_DROP_PCT', 1),
+                            ),
+                            maxChasePct: Number(
+                                this.configService.get('ENTRY_CONFIRMATION_MAX_CHASE_PCT', 8),
+                            ),
+                            minLiquidityRatio: Number(
+                                this.configService.get(
+                                    'ENTRY_CONFIRMATION_MIN_LIQUIDITY_RATIO',
+                                    0.97,
                                 ),
+                            ),
+                            minNewBuys: Number(
+                                this.configService.get('ENTRY_CONFIRMATION_MIN_NEW_BUYS', 5),
+                            ),
+                            buySellRatio: Number(
+                                this.configService.get('ENTRY_CONFIRMATION_BUY_SELL_RATIO', 1.25),
+                            ),
+                        };
+                        const confirmation = baseline
+                            ? evaluateEntryConfirmation(
+                                  baseline,
+                                  current,
+                                  nowMs,
+                                  confirmationConfig,
+                              )
+                            : { decision: 'RESET' as const, reason: 'entry_confirmation_pending' };
+
+                        if (confirmation.decision !== 'PASS') {
+                            const resetBaseline = !baseline || confirmation.decision === 'RESET';
+                            await this.updateWatchlistByMint(tokenMint, {
+                                reason: confirmation.reason,
+                                ...(resetBaseline
+                                    ? {
+                                          entryConfirmStartedAt: new Date(nowMs),
+                                          entryConfirmPriceUsd: current.priceUsd,
+                                          entryConfirmLiquidityUsd: current.liquidityUsd,
+                                          entryConfirmBuys5m: current.buys5m,
+                                          entryConfirmSells5m: current.sells5m,
+                                          entryConfirmCount: { increment: 1 },
+                                      }
+                                    : {}),
+                            });
+                            const elapsedMs = baseline ? nowMs - baseline.startedAt : 0;
+                            const waitMs = Math.max(
+                                250,
+                                Math.min(1000, confirmationConfig.windowMs - elapsedMs),
                             );
+                            await new Promise((res) => setTimeout(res, waitMs));
                             continue;
                         }
-                        highSurgeConfirmationCount = 0;
-                    } else if (surge < highSurgeThreshold || !result.safe) {
-                        highSurgeConfirmationCount = 0;
+
+                        await this.updateWatchlistByMint(tokenMint, {
+                            reason: null,
+                            entryConfirmStartedAt: null,
+                            entryConfirmPriceUsd: null,
+                            entryConfirmLiquidityUsd: null,
+                            entryConfirmBuys5m: null,
+                            entryConfirmSells5m: null,
+                        });
                     }
                     const ageHours = result.metadata?.pairCreatedAt
                         ? (Date.now() - result.metadata.pairCreatedAt) / (1000 * 60 * 60)
@@ -953,7 +1061,6 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         );
                     }
 
-
                     if (!result.safe && result.reason) {
                         await this.sendWatchlistStatusUpdateForResult(
                             tokenMint,
@@ -972,6 +1079,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
                         let liveBuyExecuted = false;
                         let signalOnlySent = false;
+                        const signalObservedAt = Date.now();
+                        const signalPriceUsd = result.metadata?.priceUsd;
 
                         for (const chat of activeChats) {
                             const chatDryRun = chat.settings?.dryRun ?? true;
@@ -1010,10 +1119,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                 undefined,
                                 {
                                     route: result.metadata?.route,
-                                    positionSizeMultiplier:
-                                        result.metadata?.positionSizeMultiplier,
-                                    aiDecisionSnapshotId:
-                                        result.metadata?.aiDecisionSnapshotId,
+                                    positionSizeMultiplier: result.metadata?.positionSizeMultiplier,
+                                    aiDecisionSnapshotId: result.metadata?.aiDecisionSnapshotId,
+                                    signalObservedAt,
+                                    signalPriceUsd,
                                 },
                                 chat.chatId,
                             );
