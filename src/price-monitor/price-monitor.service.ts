@@ -75,6 +75,22 @@ export function detectCreatorDump(
     };
 }
 
+export function requiresDeepStopConfirmation(
+    profitPercent: number,
+    stopLossPercent: number,
+    depthMultiplier: number,
+): boolean {
+    return (
+        Number.isFinite(profitPercent) &&
+        Number.isFinite(stopLossPercent) &&
+        stopLossPercent > 0 &&
+        Number.isFinite(depthMultiplier) &&
+        depthMultiplier > 1 &&
+        profitPercent <= -(stopLossPercent * depthMultiplier) &&
+        profitPercent > -55
+    );
+}
+
 export function resolveMonitorSolPriceBasis(params: {
     currentPriceUsd: number;
     currentSolUsd: number;
@@ -279,6 +295,7 @@ export class PriceMonitorService {
     // silently stops receiving fresh prices (stop-loss/trailing can't be evaluated)
     // is escalated instead of skipped forever with no trace.
     private readonly priceMissCounts = new Map<number, number>();
+    private readonly deepStopLossBreaches = new Map<number, number>();
 
     private calculateNoisePressure(signals: TradeFreshMarketSignals): {
         severity: number;
@@ -1359,7 +1376,38 @@ export class PriceMonitorService {
         }
 
         // Route-aware stop loss remains the hard floor after the dynamic hold zone is exhausted.
+        if (profitPercent > -effectiveStopLossPercent) {
+            this.deepStopLossBreaches.delete(trade.id);
+        }
         if (profitPercent <= -effectiveStopLossPercent) {
+            const deepDropMultiplier = this.getNumberConfig(
+                'STOP_LOSS_DEEP_DROP_MULTIPLIER',
+                2,
+            );
+            const deepDropConfirmMs = Math.max(
+                0,
+                this.getNumberConfig('STOP_LOSS_DEEP_DROP_CONFIRM_MS', 750),
+            );
+            if (
+                deepDropConfirmMs > 0 &&
+                requiresDeepStopConfirmation(
+                    profitPercent,
+                    effectiveStopLossPercent,
+                    deepDropMultiplier,
+                )
+            ) {
+                const firstSeenAt = this.deepStopLossBreaches.get(trade.id);
+                if (!firstSeenAt || Date.now() - firstSeenAt < deepDropConfirmMs) {
+                    if (!firstSeenAt) {
+                        this.deepStopLossBreaches.set(trade.id, Date.now());
+                    }
+                    this.logger.warn(
+                        `[Slot ${trade.slotNumber}] Deep stop-loss snapshot needs confirmation. tradeId=${trade.id} pnl=${profitPercent.toFixed(2)}% confirmMs=${deepDropConfirmMs}.`,
+                    );
+                    return;
+                }
+            }
+            this.deepStopLossBreaches.delete(trade.id);
             // Record the moment the hard STOP_LOSS floor was FIRST detected — independent of
             // whether a guard below (dynamic hold zone / early-exit guard) subsequently holds
             // the position and delays the actual sell. "Triggered" means detected, not executed.
@@ -1378,8 +1426,8 @@ export class PriceMonitorService {
                         where: { id: trade.id, slTriggeredAt: null },
                         data: {
                             slTriggeredAt: new Date(),
-                            exitTriggerPriceSol: currentPrice,
-                            exitTriggerPriceUsd: currentPrice * currentSolUsd,
+                            exitTriggerPriceSol: currentPriceSol,
+                            exitTriggerPriceUsd: currentPrice,
                             exitTriggerPnlPercent: profitPercent,
                         },
                     })

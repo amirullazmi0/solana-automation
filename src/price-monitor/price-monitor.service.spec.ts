@@ -2,6 +2,7 @@ import {
     PriceMonitorService,
     detectCreatorDump,
     resolveMonitorSolPriceBasis,
+    requiresDeepStopConfirmation,
 } from './price-monitor.service';
 import { DexLimiter } from '../common/dex-limiter';
 
@@ -21,6 +22,22 @@ describe('detectCreatorDump', () => {
         expect(detectCreatorDump(null, null)).toEqual({ detected: false, dumpPercent: null });
     });
 });
+
+
+describe('requiresDeepStopConfirmation', () => {
+    it('debounces an extreme DexScreener stop snapshot', () => {
+        expect(requiresDeepStopConfirmation(-47.22, 8, 2)).toBe(true);
+    });
+
+    it('keeps a normal stop-loss immediate', () => {
+        expect(requiresDeepStopConfirmation(-8.4, 8, 2)).toBe(false);
+    });
+
+    it('does not delay the existing panic-sell floor', () => {
+        expect(requiresDeepStopConfirmation(-60, 8, 2)).toBe(false);
+    });
+});
+
 
 describe('resolveMonitorSolPriceBasis', () => {
     it('keeps SOL-denominated trade prices as SOL basis', () => {

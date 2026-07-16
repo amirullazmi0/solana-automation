@@ -1,6 +1,7 @@
 import {
     TradeService,
     capBuyPositionUsd,
+    calculateMinimumExecutablePositionUsd,
     evaluateBuySignalGuard,
     calculateCleanSwapSolAmount,
     calculateFinalBuySizeUsd,
@@ -9,6 +10,7 @@ import {
     evaluateBuyRisk,
     normalizePriceImpactPct,
     resolveJitoMinPositionUsd,
+    resolveUsableSolPrice,
     mergeTradeScaleInPosition,
     resolveScaleInTrailingStopPrice,
     resolveSafeSellSolPrice,
@@ -20,8 +22,31 @@ import {
 import { computeNetProfitUsd } from '../common/fee-utils';
 
 describe('TradeService calculation helpers', () => {
+    describe('SOL price fallback safety', () => {
+        it('uses a fresh cached price when the live API is unavailable', () => {
+            expect(resolveUsableSolPrice(null, 77, 1_000, 31_000, 60_000)).toBe(77);
+        });
+
+        it('rejects an unavailable price when the cache is stale', () => {
+            expect(resolveUsableSolPrice(null, 77, 1_000, 62_000, 60_000)).toBeNull();
+        });
+
+        it('never invents the former hardcoded $150 fallback', () => {
+            expect(resolveUsableSolPrice(null, null, null, 10_000, 60_000)).toBeNull();
+        });
+    });
 
     describe('buy sizing and signal guards', () => {
+
+        it('raises the minimum position when fixed fees would exceed the fee budget', () => {
+            expect(calculateMinimumExecutablePositionUsd(3.5, 0.0013, 77, 3)).toBeCloseTo(
+                3.5,
+            );
+            expect(calculateMinimumExecutablePositionUsd(1, 0.0013, 100, 2)).toBeCloseTo(
+                6.5,
+            );
+        });
+
         it('caps a DB position by absolute and wallet percentage limits', () => {
             expect(capBuyPositionUsd(7, 5, 14, 35)).toBeCloseTo(4.9);
             expect(capBuyPositionUsd(4, 5, 14, 35)).toBe(4);

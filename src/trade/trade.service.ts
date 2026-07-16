@@ -49,6 +49,30 @@ import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service
 
 export const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
+export function resolveUsableSolPrice(
+    livePrice: number | null,
+    cachedPrice: number | null,
+    cachedAt: number | null,
+    now: number,
+    maxCacheAgeMs: number,
+): number | null {
+    if (typeof livePrice === 'number' && Number.isFinite(livePrice) && livePrice > 0) {
+        return livePrice;
+    }
+    if (
+        typeof cachedPrice === 'number' &&
+        Number.isFinite(cachedPrice) &&
+        cachedPrice > 0 &&
+        typeof cachedAt === 'number' &&
+        Number.isFinite(cachedAt) &&
+        now - cachedAt >= 0 &&
+        now - cachedAt <= Math.max(0, maxCacheAgeMs)
+    ) {
+        return cachedPrice;
+    }
+    return null;
+}
+
 export function capBuyPositionUsd(
     requestedUsd: number,
     maxPositionUsd: number,
@@ -58,6 +82,29 @@ export function capBuyPositionUsd(
     const walletCapUsd = Math.max(spendableAfterReserveUsd, 0) *
         (Math.min(Math.max(maxWalletPct, 0), 100) / 100);
     return Math.max(0, Math.min(requestedUsd, maxPositionUsd, walletCapUsd));
+}
+
+export function calculateMinimumExecutablePositionUsd(
+    configuredMinimumUsd: number,
+    estimatedRoundtripFeeSol: number,
+    solPriceUsd: number,
+    maxFeePercent: number,
+): number {
+    const configured = Math.max(0, configuredMinimumUsd);
+    if (
+        !Number.isFinite(estimatedRoundtripFeeSol) ||
+        estimatedRoundtripFeeSol <= 0 ||
+        !Number.isFinite(solPriceUsd) ||
+        solPriceUsd <= 0 ||
+        !Number.isFinite(maxFeePercent) ||
+        maxFeePercent <= 0
+    ) {
+        return configured;
+    }
+    return Math.max(
+        configured,
+        (estimatedRoundtripFeeSol * solPriceUsd) / (maxFeePercent / 100),
+    );
 }
 
 export function evaluateBuySignalGuard(input: {
@@ -435,6 +482,7 @@ function normalizeBuyFailureReason(rawReason: string): string {
     if (text.includes('slot_limit') || text.includes('slot_guard') || text.includes('slot guard'))
         return 'slot_guard';
     if (text.includes('capital_guard') || text.includes('capital guard')) return 'capital_guard';
+    if (text.includes('fee_floor_guard') || text.includes('fee floor')) return 'fee_floor_guard';
     if (
         text.includes('insufficient_balance') ||
         text.includes('balance_guard') ||
@@ -467,6 +515,7 @@ function normalizeBuyFailureStage(reason: string): 'PRE_SWAP' | 'QUOTE' | 'SWAP'
             'risk_max_consecutive_losses',
             'risk_disabled_until',
             'capital_guard',
+            'fee_floor_guard',
             'slot_guard',
             'balance_guard',
             'invalid_price_or_amount',
@@ -493,6 +542,8 @@ export class TradeService implements OnModuleInit {
     private readonly decimalsCache = new Map<string, number>();
     private readonly sellRetryCounts = new Map<number, number>();
     private readonly priceAnomalyCounts = new Map<number, number>();
+    private lastKnownSolPriceUsd: number | null = null;
+    private lastKnownSolPriceAt: number | null = null;
     // Consecutive SELL failures per trade, used to escalate a stop-loss that is
     // repeatedly failing while the position is still OPEN (proposal solana-stoploss-retry).
     private readonly consecutiveSellFailures = new Map<number, number>();
@@ -1222,7 +1273,10 @@ export class TradeService implements OnModuleInit {
         const requestedBuyAmountUSD =
             customAmountUSD ??
             this.applyFinalSize(effectivePositionSizeUSD, route, aiPositionSizeMultiplier);
-        let buyAmountUSD = requestedBuyAmountUSD;
+        let buyAmountUSD = Math.min(
+            requestedBuyAmountUSD,
+            Math.max(0, this.getNumberConfig('MAX_POSITION_USD', this.positionSizeUSD)),
+        );
         // RISK CIRCUIT BREAKERS: block new buys on drawdown / daily loss / loss streak
         const riskApplyToManual =
             this.configService.get<string>('RISK_APPLY_TO_MANUAL', 'false') === 'true';
@@ -1336,6 +1390,27 @@ export class TradeService implements OnModuleInit {
             if (!Number.isFinite(buyAmountUSD) || buyAmountUSD <= 0) {
                 const msg = 'Capital guard blocked buy. No spendable balance after reserve.';
                 await notifyBuyFailure({ reason: 'capital_guard', details: msg, amountUsd: 0 });
+                return { success: false, message: msg };
+            }
+
+            const minimumExecutableUsd = calculateMinimumExecutablePositionUsd(
+                this.getNumberConfig('MIN_EXECUTABLE_POSITION_USD', 3.5),
+                this.getNumberConfig('ESTIMATED_ROUNDTRIP_FEE_SOL', 0.0013),
+                solPrice,
+                this.getNumberConfig('MAX_ESTIMATED_ROUNDTRIP_FEE_PCT', 3),
+            );
+            if (buyAmountUSD < minimumExecutableUsd) {
+                const msg =
+                    `Fee floor blocked buy. Capped position=${buyAmountUSD.toFixed(2)}, ` +
+                    `minimum=${minimumExecutableUsd.toFixed(2)} based on estimated round-trip fees.`;
+                this.logger.warn(
+                    `[BuyTrace] FEE_FLOOR token=${tokenMint} chat=${telegramChatId} ${msg}`,
+                );
+                await notifyBuyFailure({
+                    reason: 'fee_floor_guard',
+                    details: msg,
+                    amountUsd: buyAmountUSD,
+                });
                 return { success: false, message: msg };
             }
         } catch (error) {
@@ -3571,7 +3646,37 @@ export class TradeService implements OnModuleInit {
     }
 
     async getSolPrice(): Promise<number> {
-        return (await this.getSolPriceOrNull()) ?? 150;
+        const livePrice = await this.getSolPriceOrNull();
+        const now = Date.now();
+        if (livePrice !== null) {
+            this.lastKnownSolPriceUsd = livePrice;
+            this.lastKnownSolPriceAt = now;
+            return livePrice;
+        }
+
+        const maxCacheAgeMs = Math.max(
+            0,
+            this.getNumberConfig('SOL_PRICE_CACHE_MAX_AGE_MS', 60_000),
+        );
+        const cachedPrice = resolveUsableSolPrice(
+            null,
+            this.lastKnownSolPriceUsd,
+            this.lastKnownSolPriceAt,
+            now,
+            maxCacheAgeMs,
+        );
+        if (cachedPrice !== null) {
+            this.logger.warn(
+                'SOL price API unavailable; using ' +
+                    ((now - (this.lastKnownSolPriceAt ?? now)) / 1000).toFixed(1) +
+                    's-old cached price USD ' +
+                    cachedPrice.toFixed(2) +
+                    '.',
+            );
+            return cachedPrice;
+        }
+
+        throw new Error('SOL price unavailable: no live price or fresh cached value');
     }
 
     private async getSolPriceOrNull(priority: JupiterPriority = 'BUY'): Promise<number | null> {

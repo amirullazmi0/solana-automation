@@ -216,6 +216,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         if (text.includes('max drawdown')) return 'risk_max_drawdown';
         if (text.includes('consecutive')) return 'risk_max_consecutive_losses';
         if (text.includes('capital guard')) return 'capital_guard';
+        if (text.includes('fee floor')) return 'fee_floor_guard';
         if (text.includes('slot')) return 'slot_guard';
         if (text.includes('balance')) return 'balance_guard';
         if (text.includes('price impact')) return 'price_impact_guard';
@@ -234,6 +235,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 'risk_max_drawdown',
                 'risk_max_consecutive_losses',
                 'capital_guard',
+                'fee_floor_guard',
                 'slot_guard',
                 'balance_guard',
             ].includes(reason)
