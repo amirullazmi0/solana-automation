@@ -9,6 +9,12 @@ type ConfigReader = {
 
 let cachedConfig: RuntimeConfig | null = null;
 
+export function parseRuntimeConfigText(raw: string): RuntimeConfig {
+    const normalized = raw.replace(/^\uFEFF/, '');
+    const parsed = JSON.parse(normalized) as RuntimeConfig;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+}
+
 function parseRuntimeConfig(): RuntimeConfig {
     if (cachedConfig) {
         return cachedConfig;
@@ -22,8 +28,7 @@ function parseRuntimeConfig(): RuntimeConfig {
 
     try {
         const raw = readFileSync(configPath, 'utf8');
-        const parsed = JSON.parse(raw) as RuntimeConfig;
-        cachedConfig = parsed && typeof parsed === 'object' ? parsed : {};
+        cachedConfig = parseRuntimeConfigText(raw);
     } catch {
         cachedConfig = {};
     }

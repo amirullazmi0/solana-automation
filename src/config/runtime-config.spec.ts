@@ -1,4 +1,4 @@
-import { validateConfig } from './runtime-config';
+import { parseRuntimeConfigText, validateConfig } from './runtime-config';
 
 const validConfig = {
     TOTAL_CAPITAL: 25,
@@ -12,6 +12,12 @@ const validConfig = {
 };
 
 describe('validateConfig', () => {
+    it('parses config files that contain a UTF-8 BOM', () => {
+        expect(parseRuntimeConfigText('\uFEFF{"STOP_LOSS_PERCENT":12}')).toEqual({
+            STOP_LOSS_PERCENT: 12,
+        });
+    });
+
     it('accepts valid trading config', () => {
         expect(validateConfig(validConfig)).toEqual([]);
     });
