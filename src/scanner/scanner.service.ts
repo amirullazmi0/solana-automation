@@ -352,7 +352,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
         // TTL 30 menit untuk koin dari WS (Lebih agresif dibanding polling)
         this.seenTokens.set(mint, now + 30 * 60 * 1000);
-        this.processNewToken(mint);
+        void this.processNewToken(mint).catch((error) => {
+            this.seenTokens.delete(mint);
+            const message = error instanceof Error ? error.message : String(error);
+            this.logger.error('[PumpPortal] Failed to process ' + mint + ': ' + message);
+        });
     }
 
     onModuleDestroy() {
@@ -449,7 +453,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         this.seenTokens.set(mint, now + 6 * 60 * 60 * 1000);
                         this.logger.log(`🔍 [Discovery] Potential Second-Wave Candidate: ${mint}`);
 
-                        this.processNewToken(mint);
+                        void this.processNewToken(mint).catch((error) => {
+                            this.seenTokens.delete(mint);
+                            const message = error instanceof Error ? error.message : String(error);
+                            this.logger.error('[Discovery] Failed to process ' + mint + ': ' + message);
+                        });
                     }
                 } catch (error) {
                     if (error instanceof Error) {
@@ -499,7 +507,15 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         // Jika koin sudah di-scan secara live, skip biar nggak double
                         if (this.activeMonitoring >= this.MAX_CONCURRENT) continue;
 
-                        this.processNewToken(item.tokenMint);
+                        void this.processNewToken(item.tokenMint).catch((error) => {
+                            const message = error instanceof Error ? error.message : String(error);
+                            this.logger.error(
+                                '[WatchlistRadar] Failed to process ' +
+                                    item.tokenMint +
+                                    ': ' +
+                                    message,
+                            );
+                        });
                         await new Promise((res) => setTimeout(res, 100)); // Stagger 100ms agar aman dari rate limit
                     }
 
