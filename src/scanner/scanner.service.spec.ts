@@ -43,6 +43,44 @@ describe('evaluateEntryConfirmation', () => {
         ).toEqual({ decision: 'PASS', reason: 'entry_confirmation_passed' });
     });
 
+    it('accepts exactly 60% more new buys than new sells', () => {
+        const strictConfig = { ...config, buySellRatio: 1.6 };
+        expect(
+            evaluateEntryConfirmation(
+                baseline,
+                { priceUsd: 101, liquidityUsd: 10000, buys5m: 108, sells5m: 55 },
+                5000,
+                strictConfig,
+            ),
+        ).toEqual({ decision: 'PASS', reason: 'entry_confirmation_passed' });
+        expect(
+            evaluateEntryConfirmation(
+                baseline,
+                { priceUsd: 101, liquidityUsd: 10000, buys5m: 107, sells5m: 55 },
+                5000,
+                strictConfig,
+            ),
+        ).toEqual({ decision: 'RESET', reason: 'entry_confirmation_buyers_weak' });
+    });
+
+    it('supports a 3000ms confirmation window', () => {
+        const fastConfig = { ...config, windowMs: 3000 };
+        const current = {
+            priceUsd: 101,
+            liquidityUsd: 10000,
+            buys5m: 110,
+            sells5m: 52,
+        };
+        expect(evaluateEntryConfirmation(baseline, current, 3999, fastConfig)).toEqual({
+            decision: 'PENDING',
+            reason: 'entry_confirmation_pending',
+        });
+        expect(evaluateEntryConfirmation(baseline, current, 4000, fastConfig)).toEqual({
+            decision: 'PASS',
+            reason: 'entry_confirmation_passed',
+        });
+    });
+
     it.each([
         [
             { priceUsd: 98.9, liquidityUsd: 10000, buys5m: 110, sells5m: 52 },

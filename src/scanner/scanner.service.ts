@@ -58,7 +58,7 @@ export function evaluateEntryConfirmation(
     if (current.liquidityUsd < baseline.liquidityUsd * config.minLiquidityRatio) {
         return { decision: 'RESET', reason: 'entry_confirmation_liquidity_drop' };
     }
-    if (newBuys < config.minNewBuys || newBuys <= newSells * config.buySellRatio) {
+    if (newBuys < config.minNewBuys || newBuys < newSells * config.buySellRatio) {
         return { decision: 'RESET', reason: 'entry_confirmation_buyers_weak' };
     }
     return { decision: 'PASS', reason: 'entry_confirmation_passed' };
