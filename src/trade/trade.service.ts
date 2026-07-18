@@ -79,8 +79,8 @@ export function capBuyPositionUsd(
     spendableAfterReserveUsd: number,
     maxWalletPct: number,
 ): number {
-    const walletCapUsd = Math.max(spendableAfterReserveUsd, 0) *
-        (Math.min(Math.max(maxWalletPct, 0), 100) / 100);
+    const walletCapUsd =
+        Math.max(spendableAfterReserveUsd, 0) * (Math.min(Math.max(maxWalletPct, 0), 100) / 100);
     return Math.max(0, Math.min(requestedUsd, maxPositionUsd, walletCapUsd));
 }
 
@@ -101,10 +101,7 @@ export function calculateMinimumExecutablePositionUsd(
     ) {
         return configured;
     }
-    return Math.max(
-        configured,
-        (estimatedRoundtripFeeSol * solPriceUsd) / (maxFeePercent / 100),
-    );
+    return Math.max(configured, (estimatedRoundtripFeeSol * solPriceUsd) / (maxFeePercent / 100));
 }
 
 export function evaluateBuySignalGuard(input: {
@@ -115,10 +112,7 @@ export function evaluateBuySignalGuard(input: {
     maxSignalAgeMs: number;
     maxChasePct: number;
 }): string | null {
-    if (
-        input.signalObservedAt &&
-        input.now - input.signalObservedAt > input.maxSignalAgeMs
-    ) {
+    if (input.signalObservedAt && input.now - input.signalObservedAt > input.maxSignalAgeMs) {
         return 'buy_signal_stale';
     }
     if (
@@ -130,6 +124,23 @@ export function evaluateBuySignalGuard(input: {
         return `buy_price_chase: signal=${input.signalPriceUsd}, quote=${input.quotePriceUsd}, maxPct=${input.maxChasePct}`;
     }
     return null;
+}
+
+export function calculateRoundtripLossPct(
+    inputLamports: string | number,
+    reverseOutputLamports: string | number,
+): number | null {
+    const input = Number(inputLamports);
+    const reverseOutput = Number(reverseOutputLamports);
+    if (
+        !Number.isFinite(input) ||
+        input <= 0 ||
+        !Number.isFinite(reverseOutput) ||
+        reverseOutput < 0
+    ) {
+        return null;
+    }
+    return ((input - reverseOutput) / input) * 100;
 }
 
 export class TokenDecimalsUnavailableError extends Error {
@@ -934,6 +945,25 @@ export class TradeService implements OnModuleInit {
         }
         return this.getNumberConfig('MAX_PRICE_IMPACT_PCT', 10);
     }
+
+    private getBooleanConfig(key: string, fallback: boolean): boolean {
+        const raw = this.configService.get<string | boolean>(key, fallback);
+        if (typeof raw === 'boolean') return raw;
+        const normalized = String(raw).trim().toLowerCase();
+        if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+        if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+        return fallback;
+    }
+
+    private getRouteMaxRoundtripLossPct(route?: TradeRoute): number {
+        if (route === 'MICIN') {
+            return this.getNumberConfig('MICIN_MAX_PREBUY_ROUNDTRIP_LOSS_PCT', 15);
+        }
+        if (route === 'WHALE') {
+            return this.getNumberConfig('WHALE_MAX_PREBUY_ROUNDTRIP_LOSS_PCT', 10);
+        }
+        return this.getNumberConfig('MAX_PREBUY_ROUNDTRIP_LOSS_PCT', 12);
+    }
     private getStartOfDayUtc(): Date {
         const d = new Date();
         d.setUTCHours(0, 0, 0, 0);
@@ -1081,6 +1111,279 @@ export class TradeService implements OnModuleInit {
         return null;
     }
 
+    private async saveTokenSafetyProbe(params: {
+        telegramChatId: number;
+        tokenMint: string;
+        walletAddress: string;
+        amountUsd: number;
+        verdict: 'PASSED' | 'BLOCKED' | 'INCONCLUSIVE';
+        reason?: string;
+        buyTxHash?: string;
+        sellTxHash?: string;
+    }): Promise<void> {
+        const cacheHours = Math.max(0, this.getNumberConfig('HONEYPOT_PROBE_CACHE_HOURS', 24));
+        const expiresAt =
+            params.verdict === 'PASSED' ? new Date(Date.now() + cacheHours * 60 * 60 * 1000) : null;
+        await this.prismaService.tokenSafetyProbe.upsert({
+            where: {
+                telegramChatId_tokenMint: {
+                    telegramChatId: params.telegramChatId,
+                    tokenMint: params.tokenMint,
+                },
+            },
+            update: {
+                walletAddress: params.walletAddress,
+                amountUsd: params.amountUsd,
+                verdict: params.verdict,
+                reason: params.reason,
+                buyTxHash: params.buyTxHash,
+                sellTxHash: params.sellTxHash,
+                expiresAt,
+            },
+            create: {
+                telegramChatId: params.telegramChatId,
+                tokenMint: params.tokenMint,
+                walletAddress: params.walletAddress,
+                amountUsd: params.amountUsd,
+                verdict: params.verdict,
+                reason: params.reason,
+                buyTxHash: params.buyTxHash,
+                sellTxHash: params.sellTxHash,
+                expiresAt,
+            },
+        });
+    }
+
+    private isDefinitiveProbeSellFailure(error?: string): boolean {
+        if (!error) return false;
+        const normalized = error.toLowerCase();
+        return (
+            normalized.startsWith('swap_failed:') ||
+            normalized.includes('no route') ||
+            normalized.includes('route not found') ||
+            normalized.includes('token is frozen') ||
+            normalized.includes('non-transferable') ||
+            normalized.includes('custom program error')
+        );
+    }
+
+    private async waitForProbeTokenBalance(
+        walletAddress: string,
+        tokenMint: string,
+        isExpectedBalance: (balance: number) => boolean,
+        attempts = 4,
+    ): Promise<number | null> {
+        let lastBalance: number | null = null;
+        for (let attempt = 1; attempt <= Math.max(1, attempts); attempt++) {
+            lastBalance = await this.getTokenBalance(walletAddress, tokenMint);
+            if (lastBalance !== null && isExpectedBalance(lastBalance)) {
+                return lastBalance;
+            }
+            if (attempt < attempts) {
+                await new Promise((resolve) => setTimeout(resolve, 500));
+            }
+        }
+        return lastBalance;
+    }
+
+    private async runConditionalHoneypotProbe(params: {
+        telegramChatDbId: number;
+        tokenMint: string;
+        wallet: Keypair;
+        positionUsd: number;
+        solPrice: number;
+        slippageBps: number;
+        route?: TradeRoute;
+    }): Promise<{ passed: boolean; attempted: boolean; reason?: string }> {
+        const enabled = this.getBooleanConfig('ENABLE_HONEYPOT_LIVE_PROBE', true);
+        const minimumPositionUsd = Math.max(
+            0,
+            this.getNumberConfig('HONEYPOT_PROBE_MIN_POSITION_USD', 20),
+        );
+        if (!enabled || params.positionUsd < minimumPositionUsd) {
+            return { passed: true, attempted: false };
+        }
+
+        const walletAddress = params.wallet.publicKey.toBase58();
+        const blockedProbe = await this.prismaService.tokenSafetyProbe.findFirst({
+            where: { tokenMint: params.tokenMint, verdict: 'BLOCKED' },
+            select: { reason: true },
+        });
+        if (blockedProbe) {
+            return {
+                passed: false,
+                attempted: false,
+                reason: blockedProbe.reason || 'honeypot_probe_blocked',
+            };
+        }
+
+        const cachedProbe = await this.prismaService.tokenSafetyProbe.findUnique({
+            where: {
+                telegramChatId_tokenMint: {
+                    telegramChatId: params.telegramChatDbId,
+                    tokenMint: params.tokenMint,
+                },
+            },
+        });
+        if (
+            cachedProbe?.verdict === 'PASSED' &&
+            cachedProbe.walletAddress === walletAddress &&
+            cachedProbe.expiresAt &&
+            cachedProbe.expiresAt.getTime() > Date.now()
+        ) {
+            return { passed: true, attempted: false };
+        }
+
+        const dustThreshold = Math.max(0, this.getNumberConfig('TRADE_DUST_THRESHOLD', 0.000001));
+        const balanceBefore = await this.getTokenBalance(walletAddress, params.tokenMint);
+        if (balanceBefore === null || balanceBefore > dustThreshold) {
+            const reason =
+                balanceBefore === null ? 'probe_balance_unavailable' : 'probe_existing_balance';
+            await this.saveTokenSafetyProbe({
+                telegramChatId: params.telegramChatDbId,
+                tokenMint: params.tokenMint,
+                walletAddress,
+                amountUsd: 0,
+                verdict: 'INCONCLUSIVE',
+                reason,
+            });
+            return { passed: false, attempted: false, reason };
+        }
+
+        const probeUsd = Math.max(0.01, this.getNumberConfig('HONEYPOT_PROBE_USD', 0.5));
+        const probeLamports = Math.floor((probeUsd / params.solPrice) * 1_000_000_000);
+        const buyResult = await this.executeJupiterSwap(
+            WRAPPED_SOL_MINT,
+            params.tokenMint,
+            probeLamports,
+            'BUY',
+            probeUsd,
+            0,
+            params.slippageBps,
+            undefined,
+            params.wallet,
+            false,
+            params.route,
+        );
+
+        let buyLanded = buyResult.success;
+        if (
+            !buyLanded &&
+            buyResult.error?.startsWith('post_broadcast_unconfirmed') &&
+            buyResult.txHash
+        ) {
+            const reconciledBuy = await this.getActualSwapDetails(
+                buyResult.txHash,
+                walletAddress,
+                params.tokenMint,
+                buyResult.jitoTipLamports ?? 0,
+                'BUY',
+            );
+            buyLanded = Boolean(reconciledBuy && reconciledBuy.tokenChange > 0);
+        }
+        if (!buyLanded) {
+            const reason = `probe_buy_inconclusive:${buyResult.error || 'unknown'}`;
+            await this.saveTokenSafetyProbe({
+                telegramChatId: params.telegramChatDbId,
+                tokenMint: params.tokenMint,
+                walletAddress,
+                amountUsd: probeUsd,
+                verdict: 'INCONCLUSIVE',
+                reason,
+                buyTxHash: buyResult.txHash,
+            });
+            return { passed: false, attempted: true, reason };
+        }
+
+        const tokenBalance = await this.waitForProbeTokenBalance(
+            walletAddress,
+            params.tokenMint,
+            (balance) => balance > dustThreshold,
+        );
+        if (tokenBalance === null || tokenBalance <= dustThreshold) {
+            const reason = 'probe_buy_balance_missing';
+            await this.saveTokenSafetyProbe({
+                telegramChatId: params.telegramChatDbId,
+                tokenMint: params.tokenMint,
+                walletAddress,
+                amountUsd: probeUsd,
+                verdict: 'INCONCLUSIVE',
+                reason,
+                buyTxHash: buyResult.txHash,
+            });
+            return { passed: false, attempted: true, reason };
+        }
+
+        const decimals = await this.getTokenDecimalsStrict(params.tokenMint);
+        const sellAmount = Math.floor(tokenBalance * Math.pow(10, decimals));
+        const sellResult = await this.executeJupiterSwap(
+            params.tokenMint,
+            WRAPPED_SOL_MINT,
+            sellAmount,
+            'SELL',
+            probeUsd,
+            0,
+            params.slippageBps,
+            undefined,
+            params.wallet,
+            false,
+            params.route,
+        );
+
+        let sellLanded = sellResult.success;
+        if (
+            !sellLanded &&
+            sellResult.error?.startsWith('post_broadcast_unconfirmed') &&
+            sellResult.txHash
+        ) {
+            const reconciledSell = await this.getActualSwapDetails(
+                sellResult.txHash,
+                walletAddress,
+                params.tokenMint,
+                sellResult.jitoTipLamports ?? 0,
+                'SELL',
+            );
+            sellLanded = Boolean(reconciledSell && reconciledSell.tokenChange < 0);
+        }
+
+        const balanceAfter = await this.waitForProbeTokenBalance(
+            walletAddress,
+            params.tokenMint,
+            (balance) => balance <= dustThreshold,
+        );
+        if (sellLanded && balanceAfter !== null && balanceAfter <= dustThreshold) {
+            await this.saveTokenSafetyProbe({
+                telegramChatId: params.telegramChatDbId,
+                tokenMint: params.tokenMint,
+                walletAddress,
+                amountUsd: probeUsd,
+                verdict: 'PASSED',
+                reason: 'probe_buy_sell_confirmed',
+                buyTxHash: buyResult.txHash,
+                sellTxHash: sellResult.txHash,
+            });
+            return { passed: true, attempted: true };
+        }
+
+        const definitiveFailure =
+            this.isDefinitiveProbeSellFailure(sellResult.error) ||
+            (sellLanded && balanceAfter !== null && balanceAfter > dustThreshold);
+        const reason = definitiveFailure
+            ? `honeypot_probe_sell_failed:${sellResult.error || 'token_balance_remains'}`
+            : `probe_sell_inconclusive:${sellResult.error || 'balance_unavailable'}`;
+        await this.saveTokenSafetyProbe({
+            telegramChatId: params.telegramChatDbId,
+            tokenMint: params.tokenMint,
+            walletAddress,
+            amountUsd: probeUsd,
+            verdict: definitiveFailure ? 'BLOCKED' : 'INCONCLUSIVE',
+            reason,
+            buyTxHash: buyResult.txHash,
+            sellTxHash: sellResult.txHash,
+        });
+        return { passed: false, attempted: true, reason };
+    }
+
     async attemptBuy(
         tokenMint: string,
         metadata?: TokenMetadata,
@@ -1187,6 +1490,7 @@ export class TradeService implements OnModuleInit {
                 route: true,
                 aiDecisionSnapshotId: true,
                 entryLiquidity: true,
+                entryPairAddress: true,
                 entryMarketCap: true,
                 creatorAddress: true,
                 topHolderAddress: true,
@@ -1519,6 +1823,44 @@ export class TradeService implements OnModuleInit {
             };
         }
 
+        let executionBuySignal = options;
+        if (!isManualBuy && !effectiveDryRun && tradeChatDbId) {
+            let probe: { passed: boolean; attempted: boolean; reason?: string };
+            try {
+                probe = await this.runConditionalHoneypotProbe({
+                    telegramChatDbId: tradeChatDbId,
+                    tokenMint,
+                    wallet,
+                    positionUsd: buyAmountUSD,
+                    solPrice,
+                    slippageBps: selectedSlippageBps,
+                    route,
+                });
+            } catch (error) {
+                const reason = error instanceof Error ? error.message : String(error);
+                await notifyBuyFailure({
+                    reason: 'honeypot_probe_error',
+                    details: reason,
+                    amountUsd: buyAmountUSD,
+                });
+                return { success: false, message: `honeypot_probe_error:${reason}` };
+            }
+            if (!probe.passed) {
+                const reason = probe.reason || 'honeypot_probe_failed';
+                await notifyBuyFailure({
+                    reason: 'honeypot_probe_failed',
+                    details: reason,
+                    amountUsd: buyAmountUSD,
+                });
+                return { success: false, message: reason };
+            }
+            if (probe.attempted) {
+                // The safety probe intentionally consumes time. Preserve the original
+                // price-chase baseline while resetting only the signal age for main execution.
+                executionBuySignal = { ...options, signalObservedAt: Date.now() };
+            }
+        }
+
         this.logger.log(
             `[Slot ${slotToUse}] Attempting to buy ${tokenMint} route=${route ?? 'GLOBAL'} with $${buyAmountUSD.toFixed(2)} (${amountInSol.toFixed(4)} SOL)`,
         );
@@ -1545,7 +1887,7 @@ export class TradeService implements OnModuleInit {
             effectiveDryRun,
             route,
             undefined,
-            options,
+            executionBuySignal,
         );
 
         // IDEMPOTENCY RECOVERY (finding: the shared post-broadcast guard orphans BUYs).
@@ -1724,8 +2066,7 @@ export class TradeService implements OnModuleInit {
                         entryPriceSol: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
                         entryPriceUsd:
                             mergedScaleIn && mergedScaleIn.totalTokenAmount > 0
-                                ? mergedScaleIn.mergedEntryValueUsd /
-                                  mergedScaleIn.totalTokenAmount
+                                ? mergedScaleIn.mergedEntryValueUsd / mergedScaleIn.totalTokenAmount
                                 : entryPrice,
                         highestPrice: mergedScaleIn?.mergedHighestPriceSol ?? entryPriceSol,
                         trailingStopPrice: scaleInTrailingStopPrice,
@@ -1738,6 +2079,8 @@ export class TradeService implements OnModuleInit {
                         buyTxHash: existingOpenTrade.buyTxHash || txHash || null,
                         entryLiquidity:
                             existingOpenTrade.entryLiquidity ?? metadata?.liquidity ?? 0,
+                        entryPairAddress:
+                            existingOpenTrade.entryPairAddress ?? metadata?.pairAddress ?? null,
                         entryMarketCap:
                             existingOpenTrade.entryMarketCap ?? metadata?.marketCap ?? 0,
                         creatorAddress:
@@ -1824,6 +2167,7 @@ export class TradeService implements OnModuleInit {
                         amountInSol: finalAmountInSol,
                         buyTxHash: txHash || null,
                         entryLiquidity: metadata?.liquidity || 0,
+                        entryPairAddress: metadata?.pairAddress || null,
                         entryMarketCap: metadata?.marketCap || 0,
                         creatorAddress: metadata?.creator,
                         topHolderAddress: metadata?.topHolder,
@@ -2588,8 +2932,11 @@ export class TradeService implements OnModuleInit {
             }
         }
 
-        // 🧑‍💻 AUTO BLACKLIST ON DEV_DUMP/RUGPULL (Self-Learning)
-        if (['DEV_DUMP', 'RUGPULL'].includes(exitReason) && trade.creatorAddress) {
+        // 🧑‍💻 AUTO BLACKLIST ON CREATOR/LIQUIDITY RUG SIGNALS (Self-Learning)
+        if (
+            ['DEV_DUMP', 'RUGPULL', 'LIQUIDITY_RUGPULL'].includes(exitReason) &&
+            trade.creatorAddress
+        ) {
             try {
                 const existingProfile = await this.prismaService.creatorProfile.findUnique({
                     where: { address: trade.creatorAddress },
@@ -2964,6 +3311,67 @@ export class TradeService implements OnModuleInit {
                         success: false,
                         entryPrice: 0,
                         error: `PRICE_IMPACT_GUARD: raw=${rawPriceImpactPct}, normalized=${priceImpact.toFixed(4)}%, max=${maxPriceImpact}%`,
+                    };
+                }
+            }
+            if (side === 'BUY' && this.getBooleanConfig('ENABLE_PREBUY_SELLABILITY_GUARD', true)) {
+                const minimumBoughtAmount = quoteData.otherAmountThreshold ?? quoteData.outAmount;
+                if (!minimumBoughtAmount || Number(minimumBoughtAmount) <= 0) {
+                    return {
+                        success: false,
+                        entryPrice: 0,
+                        error: 'sellability_guard_malformed_buy_quote',
+                    };
+                }
+
+                const reverseQuoteUrl =
+                    `${baseUrl}/swap/v1/quote?inputMint=${outputMint}` +
+                    `&outputMint=${inputMint}&amount=${minimumBoughtAmount}&slippageBps=${slippage}`;
+                try {
+                    const reverseQuoteResponse = await JupiterLimiter.get(
+                        reverseQuoteUrl,
+                        'BUY',
+                        config,
+                    );
+                    const reverseQuote = reverseQuoteResponse.data;
+                    const minimumRecoveredLamports =
+                        reverseQuote?.otherAmountThreshold ?? reverseQuote?.outAmount;
+                    const roundtripLossPct = calculateRoundtripLossPct(
+                        amount,
+                        minimumRecoveredLamports,
+                    );
+                    if (roundtripLossPct === null) {
+                        return {
+                            success: false,
+                            entryPrice: 0,
+                            error: 'sellability_guard_no_route',
+                        };
+                    }
+                    const maxRoundtripLossPct = this.getRouteMaxRoundtripLossPct(route);
+                    this.logger.log(
+                        `[Sellability] token=${outputMint} route=${route ?? 'GLOBAL'} worstCaseRoundtripLoss=${roundtripLossPct.toFixed(2)}% max=${maxRoundtripLossPct}%`,
+                    );
+                    if (roundtripLossPct > maxRoundtripLossPct) {
+                        return {
+                            success: false,
+                            entryPrice: 0,
+                            error:
+                                `sellability_guard_roundtrip_loss:${roundtripLossPct.toFixed(2)}` +
+                                `>max:${maxRoundtripLossPct}`,
+                        };
+                    }
+                } catch (reverseQuoteError) {
+                    const reason =
+                        reverseQuoteError instanceof Error
+                            ? reverseQuoteError.message
+                            : String(reverseQuoteError);
+                    this.logger.warn(
+                        `[Sellability] Reverse quote unavailable for ${outputMint}: ${reason}`,
+                    );
+                    return {
+                        success: false,
+                        entryPrice: 0,
+                        error: `sellability_guard_unavailable:${reason}`,
                     };
                 }
             }
@@ -3403,6 +3811,7 @@ export class TradeService implements OnModuleInit {
                     dryRun,
                     route,
                     errorClass,
+                    buySignal,
                 );
             }
             return { success: false, entryPrice: 0, error: message, txHash: undefined };
@@ -3525,7 +3934,8 @@ export class TradeService implements OnModuleInit {
                 timeout: 3000,
                 httpsAgent: this.httpsAgent,
             });
-            const dexSymbol = selectBestDexScreenerPair(response.data?.pairs, tokenMint)?.baseToken?.symbol;
+            const dexSymbol = selectBestDexScreenerPair(response.data?.pairs, tokenMint)?.baseToken
+                ?.symbol;
             if (dexSymbol) return `$${dexSymbol}`;
 
             return 'UNKNOWN';

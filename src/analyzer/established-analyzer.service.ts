@@ -20,6 +20,7 @@ import { DexLimiter } from '../common/dex-limiter';
 import { selectBestDexScreenerPair } from '../common/dex-pair';
 import { CreatorProfileService } from './creator-profile.service';
 import { ReboundResult } from '../dto/established-analyzer.dto';
+import { evaluateMintSafety } from '../common/token-mint-safety';
 
 @Injectable()
 export class EstablishedAnalyzerService {
@@ -119,7 +120,7 @@ export class EstablishedAnalyzerService {
     /**
      * Memeriksa keamanan on-chain (Anti-Rug Guard)
      */
-    private async checkOnChainAuthority(tokenMint: string, isPumpFun: boolean): Promise<boolean> {
+    private async checkOnChainAuthority(tokenMint: string): Promise<boolean> {
         const mintPublicKey = new PublicKey(tokenMint);
         const maxRetries = 3;
 
@@ -136,23 +137,12 @@ export class EstablishedAnalyzerService {
                     accountInfo.owner,
                 );
 
-                // mintAuthority HARUS null (Renounced / Kunci dibuang)
-                if (mintInfo.mintAuthority !== null) {
-                    this.logger.warn(`[${tokenMint}] 🛑 Mint authority still active. Reject.`);
-                    return false;
-                }
-
-                // freezeAuthority HARUS null (Disabled)
-                if (mintInfo.freezeAuthority !== null) {
-                    if (isPumpFun) {
-                        this.logger.debug(
-                            `[${tokenMint}] ⚠️ Freeze authority active but PumpFun token — TOLERATED.`,
-                        );
-                        return true;
-                    }
-                    this.logger.warn(
-                        `[${tokenMint}] 🛑 Freeze authority active (non-PumpFun). Reject.`,
-                    );
+                const maxTransferFeeBps = Number.parseFloat(
+                    String(this.configService.get('MAX_TOKEN_TRANSFER_FEE_BPS', '300')),
+                );
+                const safety = evaluateMintSafety(mintInfo, maxTransferFeeBps);
+                if (!safety.safe) {
+                    this.logger.warn(`[${tokenMint}] Unsafe mint configuration: ${safety.reason}.`);
                     return false;
                 }
 
@@ -199,12 +189,15 @@ export class EstablishedAnalyzerService {
             const knownAccounts = response.data.knownAccounts || {};
 
             // 🛡️ SAFETY & HOLDER INDEX (Anti-Rug)
-            const filteredHolders = topHolders.filter((h) => {
-                const known = knownAccounts[h.address] || knownAccounts[h.owner];
-                const isExcludedType = known && (known.type === 'AMM' || known.type === 'LOCKER');
-                const isSystemAccount = h.owner === '1111111111111111111111111111111';
-                return !isExcludedType && !isSystemAccount;
-            });
+            const filteredHolders = topHolders
+                .filter((h) => {
+                    const known = knownAccounts[h.address] || knownAccounts[h.owner];
+                    const isExcludedType =
+                        known && (known.type === 'AMM' || known.type === 'LOCKER');
+                    const isSystemAccount = h.owner === '1111111111111111111111111111111';
+                    return !isExcludedType && !isSystemAccount;
+                })
+                .sort((a, b) => (b.pct || 0) - (a.pct || 0));
 
             // 🧑‍💻 CREATOR BALANCE CHECK (Anti-Dump)
             const creator = response.data.creator;
@@ -250,6 +243,10 @@ export class EstablishedAnalyzerService {
                 return { passed: false, reason: 'established_creator_not_zero', isCTO };
             }
 
+            const singlePct = filteredHolders[0]?.pct || 0;
+            const top5SumPct = filteredHolders
+                .slice(0, 5)
+                .reduce((sum: number, h: RugCheckApiHolder) => sum + (h.pct || 0), 0);
             const top10SumPct = filteredHolders
                 .slice(0, 10)
                 .reduce((sum: number, h: RugCheckApiHolder) => sum + (h.pct || 0), 0);
@@ -258,7 +255,19 @@ export class EstablishedAnalyzerService {
                 0,
                 Number.parseFloat(String(this.configService.get('MAX_TOP10_HOLDER_PCT', '20'))),
             );
-            if (top10SumPct > maxTop10HolderPct) {
+            const maxSingleHolderPct = Math.max(
+                0,
+                Number.parseFloat(String(this.configService.get('MAX_SINGLE_HOLDER_PCT', '8'))),
+            );
+            const maxTop5HolderPct = Math.max(
+                0,
+                Number.parseFloat(String(this.configService.get('MAX_TOP5_HOLDER_PCT', '15'))),
+            );
+            if (
+                singlePct > maxSingleHolderPct ||
+                top5SumPct > maxTop5HolderPct ||
+                top10SumPct > maxTop10HolderPct
+            ) {
                 this.logger.warn(
                     `[${tokenMint}] Established top 10 holders too concentrated (${top10SumPct.toFixed(2)}%). Reject.`,
                 );
@@ -285,7 +294,10 @@ export class EstablishedAnalyzerService {
                     m.lpStatus === 'locked',
             );
 
-            if (!lpSafe && markets.length > 0 && !isPumpFun) {
+            if (markets.length === 0 && !isPumpFun) {
+                return { passed: false, reason: 'lp_status_unavailable', isCTO };
+            }
+            if (!lpSafe && markets.length > 0) {
                 this.logger.warn(`[${tokenMint}] 🛑 LP is NOT burned or locked. Reject.`);
                 return { passed: false, reason: 'lp_not_burned_or_locked', isCTO };
             }
@@ -331,7 +343,9 @@ export class EstablishedAnalyzerService {
             return {
                 passed: true,
                 creator: response.data.creator,
-                topHolder: topHolders[0]?.address,
+                topHolder: filteredHolders
+                    .map((holder) => holder.address || holder.owner)
+                    .find((address) => Boolean(address && address !== response.data.creator)),
                 isCTO,
                 creatorExited,
             };
@@ -464,6 +478,18 @@ export class EstablishedAnalyzerService {
      */
     public async analyzeAndExecuteRebound(tokenMint: string): Promise<ReboundResult> {
         try {
+            const blockedProbe = await this.prismaService.tokenSafetyProbe.findFirst({
+                where: { tokenMint, verdict: 'BLOCKED' },
+                select: { reason: true },
+            });
+            if (blockedProbe) {
+                return {
+                    isEstablished: true,
+                    executed: false,
+                    reason: blockedProbe.reason || 'honeypot_probe_blocked',
+                };
+            }
+
             // 1. Fetch data dari DexScreener
             const response = await DexLimiter.get<{ pairs: DexScreenerPair[] }>(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
@@ -532,7 +558,7 @@ export class EstablishedAnalyzerService {
                 tokenMint.toLowerCase().endsWith('pump') ||
                 pair.info?.websites?.some((w) => w.url.includes('pump.fun')) ||
                 false;
-            const isAuthoritySafe = await this.checkOnChainAuthority(tokenMint, isPumpFunToken);
+            const isAuthoritySafe = await this.checkOnChainAuthority(tokenMint);
             if (!isAuthoritySafe) {
                 return {
                     isEstablished: true,
@@ -578,6 +604,7 @@ export class EstablishedAnalyzerService {
                 Boolean(rugResult.creatorExited) && Boolean(twitter || telegram);
             const metadata: TokenMetadata = {
                 liquidity,
+                pairAddress: pair.pairAddress,
                 marketCap,
                 mcap: marketCap,
                 pairCreatedAt: pair.pairCreatedAt,

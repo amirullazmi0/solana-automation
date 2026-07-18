@@ -4,7 +4,59 @@ import {
     parseChatIdList,
     validateWithdrawAccess,
 } from '../common/withdraw-guard';
-import { ReportingService } from './reporting.service';
+import { buildStartupUpdateAnnouncement, ReportingService } from './reporting.service';
+
+describe('startup update announcement', () => {
+    it('builds a complete English update message with working menu actions', () => {
+        const announcement = buildStartupUpdateAnnouncement();
+
+        expect(announcement.message).toContain('MSOULMATION JUST GOT AN UPGRADE');
+        expect(announcement.message).toContain('🛡️');
+        expect(announcement.message).toContain('💧');
+        expect(announcement.message).toContain('🐋');
+        expect(announcement.message).toContain('wallet and chat trading settings remain unchanged');
+        expect(announcement.options.reply_markup).toEqual({
+            inline_keyboard: [
+                [
+                    { text: '📈 Portfolio', callback_data: 'startup:portfolio' },
+                    { text: '💰 Balance', callback_data: 'startup:balance' },
+                ],
+                [{ text: '⚙️ Settings', callback_data: 'startup:settings' }],
+            ],
+        });
+    });
+
+    it('broadcasts the update to every active chat', async () => {
+        const configService = { get: jest.fn((_key: string, fallback?: unknown) => fallback) };
+        const telegramWorkspace = {
+            getActiveChatIds: jest.fn().mockResolvedValue(['chat-1', 'chat-2']),
+        };
+        const service = new ReportingService(
+            configService as never,
+            {} as never,
+            {} as never,
+            telegramWorkspace as never,
+        );
+        const sendSpy = jest
+            .spyOn(
+                service as unknown as {
+                    sendMessageToChat: (...args: unknown[]) => Promise<void>;
+                },
+                'sendMessageToChat',
+            )
+            .mockResolvedValue(undefined);
+
+        await (
+            service as unknown as {
+                broadcastStartupUpdate: () => Promise<void>;
+            }
+        ).broadcastStartupUpdate();
+
+        expect(telegramWorkspace.getActiveChatIds).toHaveBeenCalledTimes(1);
+        expect(sendSpy).toHaveBeenCalledTimes(2);
+        expect(sendSpy.mock.calls.map((call) => call[0])).toEqual(['chat-1', 'chat-2']);
+    });
+});
 
 describe('withdraw guard helpers', () => {
     it('denies withdraw when chat id is not in allowlist', () => {

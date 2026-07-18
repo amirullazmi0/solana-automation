@@ -2,6 +2,7 @@ import {
     TradeService,
     capBuyPositionUsd,
     calculateMinimumExecutablePositionUsd,
+    calculateRoundtripLossPct,
     evaluateBuySignalGuard,
     calculateCleanSwapSolAmount,
     calculateFinalBuySizeUsd,
@@ -37,14 +38,15 @@ describe('TradeService calculation helpers', () => {
     });
 
     describe('buy sizing and signal guards', () => {
+        it('calculates worst-case pre-buy roundtrip loss', () => {
+            expect(calculateRoundtripLossPct(100_000_000, 88_000_000)).toBeCloseTo(12);
+            expect(calculateRoundtripLossPct(0, 1)).toBeNull();
+            expect(calculateRoundtripLossPct(100, -1)).toBeNull();
+        });
 
         it('raises the minimum position when fixed fees would exceed the fee budget', () => {
-            expect(calculateMinimumExecutablePositionUsd(3.5, 0.0013, 77, 3)).toBeCloseTo(
-                3.5,
-            );
-            expect(calculateMinimumExecutablePositionUsd(1, 0.0013, 100, 2)).toBeCloseTo(
-                6.5,
-            );
+            expect(calculateMinimumExecutablePositionUsd(3.5, 0.0013, 77, 3)).toBeCloseTo(3.5);
+            expect(calculateMinimumExecutablePositionUsd(1, 0.0013, 100, 2)).toBeCloseTo(6.5);
         });
 
         it('caps a DB position by absolute and wallet percentage limits', () => {
@@ -478,7 +480,10 @@ describe('TradeService post-broadcast idempotency (resolveSignatureFate)', () =>
     }
 
     const freshPending = () => ({ signature: 'sig-abc', recordedAt: Date.now() });
-    const stalePending = () => ({ signature: 'sig-abc', recordedAt: Date.now() - (TTL_MS + 5_000) });
+    const stalePending = () => ({
+        signature: 'sig-abc',
+        recordedAt: Date.now() - (TTL_MS + 5_000),
+    });
 
     it('LANDED_OK when the tx is confirmed with no error', async () => {
         const service = createService(async () => ({
@@ -558,7 +563,12 @@ describe('TradeService LANDED_OK reconciliation records the realized fill', () =
 
     function createSellService(opts: {
         fate: 'LANDED_OK' | 'NOT_FOUND';
-        pending: { signature: string; recordedAt: number; percentage?: number; exitReason?: string };
+        pending: {
+            signature: string;
+            recordedAt: number;
+            percentage?: number;
+            exitReason?: string;
+        };
         swapDetails: {
             solChange: number;
             tokenChange: number;
@@ -616,8 +626,18 @@ describe('TradeService LANDED_OK reconciliation records the realized fill', () =
     it('full exit: recovers the fill and records it via recordExecutedSell (no balance read)', async () => {
         const service = createSellService({
             fate: 'LANDED_OK',
-            pending: { signature: 'sig-x', recordedAt: Date.now(), percentage: 1.0, exitReason: 'STOP_LOSS' },
-            swapDetails: { solChange: -2, tokenChange: -1000, cleanSolAmount: 2, totalFeesSol: 0.01 },
+            pending: {
+                signature: 'sig-x',
+                recordedAt: Date.now(),
+                percentage: 1.0,
+                exitReason: 'STOP_LOSS',
+            },
+            swapDetails: {
+                solChange: -2,
+                tokenChange: -1000,
+                cleanSolAmount: 2,
+                totalFeesSol: 0.01,
+            },
         });
 
         // Current tick asks for a full sell; the pending record is the source of truth.
@@ -650,13 +670,22 @@ describe('TradeService LANDED_OK reconciliation records the realized fill', () =
                 percentage: 0.5,
                 exitReason: 'PARTIAL_TAKE_PROFIT',
             },
-            swapDetails: { solChange: -1, tokenChange: -500, cleanSolAmount: 1, totalFeesSol: 0.005 },
+            swapDetails: {
+                solChange: -1,
+                tokenChange: -500,
+                cleanSolAmount: 1,
+                totalFeesSol: 0.005,
+            },
         });
 
         await service.executeSell(1, 0.001, 'STOP_LOSS', 1.0, true);
 
         expect(service.recordExecutedSell).toHaveBeenCalledWith(
-            expect.objectContaining({ percentage: 0.5, exitReason: 'PARTIAL_TAKE_PROFIT', actualTokens: 500 }),
+            expect.objectContaining({
+                percentage: 0.5,
+                exitReason: 'PARTIAL_TAKE_PROFIT',
+                actualTokens: 500,
+            }),
         );
         expect(service.getTokenBalance).not.toHaveBeenCalled();
     });
@@ -664,7 +693,12 @@ describe('TradeService LANDED_OK reconciliation records the realized fill', () =
     it('NOT_FOUND still falls through to the balance-checked sell (no record of a phantom fill)', async () => {
         const service = createSellService({
             fate: 'NOT_FOUND',
-            pending: { signature: 'sig-gone', recordedAt: Date.now(), percentage: 1.0, exitReason: 'STOP_LOSS' },
+            pending: {
+                signature: 'sig-gone',
+                recordedAt: Date.now(),
+                percentage: 1.0,
+                exitReason: 'STOP_LOSS',
+            },
             swapDetails: null,
             fetchedBalance: 0, // never landed → balance authoritative → zero-balance close
         });
@@ -685,7 +719,12 @@ describe('TradeService LANDED_OK reconciliation records the realized fill', () =
     it('LANDED_OK but unrecoverable fill: alerts and bails, never falls through to re-sell', async () => {
         const service = createSellService({
             fate: 'LANDED_OK',
-            pending: { signature: 'sig-u', recordedAt: Date.now(), percentage: 1.0, exitReason: 'STOP_LOSS' },
+            pending: {
+                signature: 'sig-u',
+                recordedAt: Date.now(),
+                percentage: 1.0,
+                exitReason: 'STOP_LOSS',
+            },
             swapDetails: null, // landed but could not parse the fill
         });
 
@@ -697,7 +736,10 @@ describe('TradeService LANDED_OK reconciliation records the realized fill', () =
         // NOT sendTradeFailureAlert: that template's "EXECUTION FAILED" / "No live trade was
         // opened" copy would be false here -- the sell DID land on-chain.
         expect(service.reportingService.sendTradeReconciliationAlert).toHaveBeenCalledWith(
-            expect.objectContaining({ side: 'SELL', reason: expect.stringContaining('sell_landed_unrecovered') }),
+            expect.objectContaining({
+                side: 'SELL',
+                reason: expect.stringContaining('sell_landed_unrecovered'),
+            }),
         );
     });
 });

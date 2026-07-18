@@ -23,6 +23,7 @@ import {
 
 export { selectBestDexScreenerPair } from '../common/dex-pair';
 import { selectBestDexScreenerPair } from '../common/dex-pair';
+import { evaluateMintSafety } from '../common/token-mint-safety';
 
 @Injectable()
 export class AnalyzerService {
@@ -298,6 +299,7 @@ export class AnalyzerService {
 
             const baseMetadata: TokenMetadata = {
                 liquidity: traction.liquidity || 0,
+                pairAddress: traction.pairAddress,
                 marketCap: traction.marketCap || 0,
                 mcap: traction.marketCap,
                 pairCreatedAt: traction.pairCreatedAt,
@@ -344,9 +346,21 @@ export class AnalyzerService {
                 return { safe: false, reason: 'low_vol_score', metadata: baseMetadata };
             }
 
-            // 2. RPC CHECK (Security) — With PumpFun tolerance
-            const isPumpFunToken = tokenMint.toLowerCase().endsWith('pump');
-            const safetyRpc = await this.checkTokenSecurityRPC(tokenMint, isPumpFunToken);
+            const blockedProbe = await this.prismaService.tokenSafetyProbe.findFirst({
+                where: { tokenMint, verdict: 'BLOCKED' },
+                select: { reason: true },
+            });
+            if (blockedProbe) {
+                return {
+                    safe: false,
+                    reason: blockedProbe.reason || 'honeypot_probe_blocked',
+                    permanent: true,
+                    metadata: baseMetadata,
+                };
+            }
+
+            // 2. RPC CHECK (Security)
+            const safetyRpc = await this.checkTokenSecurityRPC(tokenMint);
             if (!safetyRpc.passed) {
                 this.logger.warn(
                     `[${tokenMint}] 🛑 Safety RPC check FAILED (Freeze/Mint authority). Skip.`,
@@ -580,6 +594,7 @@ export class AnalyzerService {
         const traction = await this.checkMarketTraction(tokenMint);
         return {
             liquidity: traction.liquidity || 0,
+            pairAddress: traction.pairAddress,
             marketCap: traction.marketCap || 0,
             mcap: traction.marketCap,
             pairCreatedAt: traction.pairCreatedAt,
@@ -620,7 +635,6 @@ export class AnalyzerService {
 
     private async checkTokenSecurityRPC(
         tokenMint: string,
-        isPumpFun = false,
     ): Promise<{ passed: boolean; permanent: boolean }> {
         const mintPublicKey = new PublicKey(tokenMint);
         const maxRetries = 3;
@@ -638,27 +652,16 @@ export class AnalyzerService {
                     accountInfo.owner,
                 );
 
-                // Mint authority HARUS null (tidak boleh cetak token baru)
-                if (mintInfo.mintAuthority !== null) {
-                    this.logger.warn(`[${tokenMint}] Mint authority still active. Reject.`);
+                const maxTransferFeeBps = Number.parseFloat(
+                    String(this.configService.get('MAX_TOKEN_TRANSFER_FEE_BPS', '300')),
+                );
+                const safety = evaluateMintSafety(mintInfo, maxTransferFeeBps);
+                if (!safety.safe) {
+                    this.logger.warn(`[${tokenMint}] Unsafe mint configuration: ${safety.reason}.`);
                     return { passed: false, permanent: true };
                 }
 
-                // Freeze authority: PumpFun tokens sering punya freeze auth sementara post-migration
-                if (mintInfo.freezeAuthority !== null) {
-                    if (isPumpFun) {
-                        this.logger.debug(
-                            `[${tokenMint}] ⚠️ Freeze authority active but PumpFun token — TOLERATED.`,
-                        );
-                        return { passed: true, permanent: false }; // PumpFun tolerance
-                    }
-                    this.logger.warn(
-                        `[${tokenMint}] Freeze authority active (non-PumpFun). Reject.`,
-                    );
-                    return { passed: false, permanent: true };
-                }
-
-                return { passed: true, permanent: false }; // Both null = safe
+                return { passed: true, permanent: false };
             } catch (e) {
                 const errName = e instanceof Error ? e.name || e.message : String(e);
                 this.logger.warn(
@@ -681,6 +684,7 @@ export class AnalyzerService {
         reason?: string;
         permanent?: boolean;
         symbol?: string;
+        pairAddress?: string;
         pairCreatedAt?: number;
         volumeSurge?: number;
         volScore?: number;
@@ -1058,6 +1062,7 @@ export class AnalyzerService {
             return {
                 passed: true,
                 liquidity,
+                pairAddress: pair.pairAddress,
                 marketCap,
                 velocity,
                 socials,
@@ -1142,18 +1147,36 @@ export class AnalyzerService {
 
     public checkHolderConcentration(rugCheckData: RugCheckResponse): boolean {
         try {
-            const top10Share = rugCheckData.holders
+            const eligibleHolders = rugCheckData.holders
                 .filter((holder: RugCheckHolder) => !holder.isInPool && !holder.isBurned)
+                .sort((a, b) => b.share - a.share);
+            const singleShare = eligibleHolders[0]?.share ?? 0;
+            const top5Share = eligibleHolders
+                .slice(0, 5)
+                .reduce((sum: number, holder: RugCheckHolder) => sum + holder.share, 0);
+            const top10Share = eligibleHolders
                 .slice(0, 10)
                 .reduce((sum: number, holder: RugCheckHolder) => sum + holder.share, 0);
 
+            const maxSingleShare = Math.max(
+                0,
+                Number.parseFloat(String(this.configService.get('MAX_SINGLE_HOLDER_PCT', '8'))),
+            );
+            const maxTop5Share = Math.max(
+                0,
+                Number.parseFloat(String(this.configService.get('MAX_TOP5_HOLDER_PCT', '15'))),
+            );
             const maxTop10Share = Math.max(
                 0,
                 Number.parseFloat(String(this.configService.get('MAX_TOP10_HOLDER_PCT', '20'))),
             );
-            if (top10Share > maxTop10Share) {
+            if (
+                singleShare > maxSingleShare ||
+                top5Share > maxTop5Share ||
+                top10Share > maxTop10Share
+            ) {
                 this.logger.warn(
-                    `❌ REJECTED: Top 10 Holders menguasai ${top10Share.toFixed(2)}% supply. Terlalu pekat!`,
+                    `❌ REJECTED: Holder concentration single=${singleShare.toFixed(2)}%, top5=${top5Share.toFixed(2)}%, top10=${top10Share.toFixed(2)}%.`,
                 );
                 return false;
             }
@@ -1255,12 +1278,15 @@ export class AnalyzerService {
             const knownAccounts = response.data.knownAccounts || {};
 
             // 🛡️ SAFETY & HOLDER INDEX (Anti-Rug) - Saring dompet AMM, lockers, dan alamat sistem
-            const filteredHolders = topHolders.filter((h) => {
-                const known = knownAccounts[h.address] || knownAccounts[h.owner];
-                const isExcludedType = known && (known.type === 'AMM' || known.type === 'LOCKER');
-                const isSystemAccount = h.owner === '1111111111111111111111111111111';
-                return !isExcludedType && !isSystemAccount;
-            });
+            const filteredHolders = topHolders
+                .filter((h) => {
+                    const known = knownAccounts[h.address] || knownAccounts[h.owner];
+                    const isExcludedType =
+                        known && (known.type === 'AMM' || known.type === 'LOCKER');
+                    const isSystemAccount = h.owner === '1111111111111111111111111111111';
+                    return !isExcludedType && !isSystemAccount;
+                })
+                .sort((a, b) => (b.pct || 0) - (a.pct || 0));
             const markets = response.data.markets || [];
             const risks = response.data.risks || [];
             const rugCheckData = this.toRugCheckResponse(
@@ -1366,8 +1392,18 @@ export class AnalyzerService {
                     m.lpType === 'locked' ||
                     m.lpStatus === 'locked',
             );
-            // PumpFun tokens tanpa market data di RugCheck = normal (LP di bonding curve)
-            if (!lpSafe && markets.length > 0 && !isPumpFunToken) {
+            if (markets.length === 0 && !isPumpFunToken) {
+                return {
+                    passed: false,
+                    reason: 'lp_status_unavailable',
+                    safetyIndex,
+                    permanent: false,
+                    isCTO,
+                };
+            }
+            // PumpFun without market data can still be on its bonding curve. Once RugCheck
+            // reports a market, every token must prove that LP is burned or locked.
+            if (!lpSafe && markets.length > 0) {
                 this.logger.warn(`[${tokenMint}] 🛑 LP NOT BURNED/LOCKED. Skip.`);
                 return {
                     passed: false,
@@ -1440,7 +1476,9 @@ export class AnalyzerService {
             return {
                 passed: true,
                 creator: response.data.creator,
-                topHolder: topHolders[0]?.address,
+                topHolder: filteredHolders
+                    .map((holder) => holder.address || holder.owner)
+                    .find((address) => Boolean(address && address !== response.data.creator)),
                 safetyIndex,
                 rugcheckScore: score,
                 dangerRisksCount: highRisks.length,

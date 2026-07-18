@@ -43,4 +43,25 @@ describe('validateConfig', () => {
         expect(errors).toContain('TRAILING_DISTANCE_PERCENT must be greater than 0.');
         expect(errors).toContain('MIN_MCAP must be lower than MAX_MCAP.');
     });
+
+    it('rejects unsafe holder, liquidity, whale, and probe thresholds', () => {
+        const errors = validateConfig({
+            ...validConfig,
+            MAX_SINGLE_HOLDER_PCT: 30,
+            MAX_TOP5_HOLDER_PCT: 20,
+            MAX_TOP10_HOLDER_PCT: 10,
+            LIQUIDITY_DROP_WARN_PERCENT: 60,
+            LIQUIDITY_DROP_EXIT_PERCENT: 30,
+            LIQUIDITY_DROP_PANIC_PERCENT: 20,
+            WHALE_DUMP_THRESHOLD_PERCENT: 60,
+            WHALE_DUMP_PANIC_PERCENT: 40,
+            HONEYPOT_PROBE_MIN_POSITION_USD: 0.25,
+            HONEYPOT_PROBE_USD: 0.5,
+        });
+
+        expect(errors.join(' ')).toContain('Holder limits');
+        expect(errors.join(' ')).toContain('Liquidity thresholds');
+        expect(errors.join(' ')).toContain('Whale thresholds');
+        expect(errors.join(' ')).toContain('HONEYPOT_PROBE_USD');
+    });
 });

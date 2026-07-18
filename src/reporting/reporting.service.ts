@@ -30,6 +30,37 @@ import { TradeService } from '../trade/trade.service';
 
 export { isWithdrawChatAllowed } from '../common/withdraw-guard';
 
+export function buildStartupUpdateAnnouncement(): {
+    message: string;
+    options: TelegramBot.SendMessageOptions;
+} {
+    return {
+        message:
+            `🚀 *MSOULMATION JUST GOT AN UPGRADE*\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `✨ A fresh update is now live.\n\n` +
+            `🛡️ *Stronger token safety checks*\n` +
+            `💧 *Live liquidity-collapse protection*\n` +
+            `🐋 *Smarter whale-dump detection*\n` +
+            `🔄 *Pre-buy sellability validation*\n` +
+            `⚡ *Sharper entry and exit protection*\n\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `✅ Your wallet and chat trading settings remain unchanged.\n` +
+            `📲 The upgraded protection is active now.`,
+        options: {
+            reply_markup: {
+                inline_keyboard: [
+                    [
+                        { text: '📈 Portfolio', callback_data: 'startup:portfolio' },
+                        { text: '💰 Balance', callback_data: 'startup:balance' },
+                    ],
+                    [{ text: '⚙️ Settings', callback_data: 'startup:settings' }],
+                ],
+            },
+        },
+    };
+}
+
 @Injectable()
 export class ReportingService implements OnModuleInit {
     private readonly logger = new Logger(ReportingService.name);
@@ -94,6 +125,45 @@ export class ReportingService implements OnModuleInit {
     onModuleInit() {
         if (this.bot) {
             this.setupBotListeners();
+            this.scheduleStartupUpdateBroadcast();
+        }
+    }
+
+    private scheduleStartupUpdateBroadcast(): void {
+        const enabledRaw = this.configService.get<string | boolean>(
+            'ENABLE_STARTUP_UPDATE_BROADCAST',
+            true,
+        );
+        const enabled =
+            typeof enabledRaw === 'boolean'
+                ? enabledRaw
+                : ['true', '1', 'yes', 'on'].includes(String(enabledRaw).trim().toLowerCase());
+        if (!enabled) return;
+
+        const configuredDelay = Number(
+            this.configService.get<string | number>('STARTUP_UPDATE_BROADCAST_DELAY_MS', 5000),
+        );
+        const delayMs = Number.isFinite(configuredDelay) ? Math.max(0, configuredDelay) : 5000;
+        const timer = setTimeout(() => {
+            void this.broadcastStartupUpdate().catch((error) => {
+                const message = error instanceof Error ? error.message : String(error);
+                this.logger.error(`Startup update broadcast failed: ${message}`);
+            });
+        }, delayMs);
+        timer.unref?.();
+    }
+
+    private async broadcastStartupUpdate(): Promise<void> {
+        const announcement = buildStartupUpdateAnnouncement();
+        const chatIds = await this.telegramWorkspace.getActiveChatIds();
+        if (chatIds.length === 0) {
+            this.logger.log('Startup update broadcast skipped: no active Telegram chats.');
+            return;
+        }
+
+        this.logger.log(`Broadcasting startup update to ${chatIds.length} active chat(s).`);
+        for (const chatId of chatIds) {
+            await this.sendMessageToChat(chatId, announcement.message, announcement.options);
         }
     }
 
@@ -397,6 +467,14 @@ export class ReportingService implements OnModuleInit {
             } else if (action === 'withdraw') {
                 const [mode, value] = payload.split('|');
                 await this.handleWithdrawCallback(mode, value, targetChatId);
+            } else if (action === 'startup') {
+                if (payload === 'portfolio') {
+                    await this.handlePortoRequest(targetChatId);
+                } else if (payload === 'balance') {
+                    await this.handleBalanceRequest(targetChatId);
+                } else if (payload === 'settings') {
+                    await this.handleSettingsRequest(targetChatId);
+                }
             }
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -936,7 +1014,10 @@ export class ReportingService implements OnModuleInit {
                 timeout: 5000,
                 httpsAgent: this.httpsAgent,
             });
-            return selectBestDexScreenerPair(response.data?.pairs, tokenMint)?.baseToken?.symbol || 'UNKNOWN';
+            return (
+                selectBestDexScreenerPair(response.data?.pairs, tokenMint)?.baseToken?.symbol ||
+                'UNKNOWN'
+            );
         } catch {
             return 'UNKNOWN';
         }

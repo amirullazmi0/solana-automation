@@ -26,6 +26,9 @@ interface TradeFreshMarketSignals {
     sells5mCount: number;
     volumeSurge: number;
     zScore: number;
+    pairAddress?: string;
+    entryPairMatched?: boolean;
+    liquidityAvailable?: boolean;
 }
 
 interface DexScreenerPairWithPriceUsd extends DexScreenerPair {
@@ -61,6 +64,12 @@ export function detectCreatorDump(
     currentCreatorBalance: unknown,
     thresholdPercent = 20,
 ): CreatorDumpCheckResult {
+    if (initialCreatorBalance === null || initialCreatorBalance === undefined) {
+        return { detected: false, dumpPercent: null };
+    }
+    if (currentCreatorBalance === null || currentCreatorBalance === undefined) {
+        return { detected: false, dumpPercent: null };
+    }
     const initial = Number(initialCreatorBalance);
     const current = Number(currentCreatorBalance);
     if (!Number.isFinite(initial) || initial <= 0 || !Number.isFinite(current)) {
@@ -73,6 +82,34 @@ export function detectCreatorDump(
         detected: current < initial * (1 - threshold),
         dumpPercent,
     };
+}
+
+export function calculateBalanceDropPercent(initial: unknown, current: unknown): number | null {
+    if (initial === null || initial === undefined || current === null || current === undefined) {
+        return null;
+    }
+    const initialValue = Number(initial);
+    const currentValue = Number(current);
+    if (
+        !Number.isFinite(initialValue) ||
+        initialValue <= 0 ||
+        !Number.isFinite(currentValue) ||
+        currentValue < 0
+    ) {
+        return null;
+    }
+    return Math.max(0, (1 - currentValue / initialValue) * 100);
+}
+
+export function hasSellerPressure(
+    buys: number,
+    sells: number,
+    minimumSells: number,
+    sellBuyRatio: number,
+): boolean {
+    if (!Number.isFinite(sells) || sells < Math.max(1, minimumSells)) return false;
+    const safeBuys = Number.isFinite(buys) ? Math.max(0, buys) : 0;
+    return sells >= Math.max(1, safeBuys * Math.max(1, sellBuyRatio));
 }
 
 export function requiresDeepStopConfirmation(
@@ -296,6 +333,8 @@ export class PriceMonitorService {
     // is escalated instead of skipped forever with no trace.
     private readonly priceMissCounts = new Map<number, number>();
     private readonly deepStopLossBreaches = new Map<number, number>();
+    private readonly liquidityDropBreaches = new Map<number, number>();
+    private readonly whaleDumpBreaches = new Map<number, number>();
 
     private calculateNoisePressure(signals: TradeFreshMarketSignals): {
         severity: number;
@@ -373,7 +412,10 @@ export class PriceMonitorService {
             this.priceMissCounts.size > 0 ||
             this.dynamicHoldZoneEnteredAt.size > 0 ||
             this.lastAlertTime.size > 0 ||
-            this.lastRiskAdjustmentAlertTime.size > 0
+            this.lastRiskAdjustmentAlertTime.size > 0 ||
+            this.deepStopLossBreaches.size > 0 ||
+            this.liquidityDropBreaches.size > 0 ||
+            this.whaleDumpBreaches.size > 0
         ) {
             const openTradeIds = new Set(openTrades.map((t) => t.id));
             for (const id of this.priceMissCounts.keys()) {
@@ -394,13 +436,21 @@ export class PriceMonitorService {
             for (const id of this.lastRiskAdjustmentAlertTime.keys()) {
                 if (!openTradeIds.has(id)) this.lastRiskAdjustmentAlertTime.delete(id);
             }
+            for (const id of this.deepStopLossBreaches.keys()) {
+                if (!openTradeIds.has(id)) this.deepStopLossBreaches.delete(id);
+            }
+            for (const id of this.liquidityDropBreaches.keys()) {
+                if (!openTradeIds.has(id)) this.liquidityDropBreaches.delete(id);
+            }
+            for (const id of this.whaleDumpBreaches.keys()) {
+                if (!openTradeIds.has(id)) this.whaleDumpBreaches.delete(id);
+            }
         }
 
         if (openTrades.length === 0) return;
 
         // 📦 BATCHING: Get all prices in one go
-        const mints = openTrades.map((t) => t.tokenMint);
-        const freshMarketDataMap = await this.getBatchFreshMarketData(mints);
+        const freshMarketDataMap = await this.getBatchFreshMarketData(openTrades);
 
         // FIX B3: fetch SOL/USD at most once per tick (not once per trade) — evaluateTrade
         // no longer hits the Jupiter price endpoint per-trade, per-tick. Fetched lazily (only
@@ -452,7 +502,7 @@ export class PriceMonitorService {
                                 }
                             }
 
-                            const freshMarketData = freshMarketDataMap.get(trade.tokenMint);
+                            const freshMarketData = freshMarketDataMap.get(trade.id);
                             const currentPrice = freshMarketData?.priceUsd ?? 0;
                             if (currentPrice <= 0) {
                                 // FIX B2: upgrade the silent skip to a visible, escalating signal.
@@ -546,12 +596,14 @@ export class PriceMonitorService {
     }
 
     private async getBatchFreshMarketData(
-        mints: string[],
-    ): Promise<Map<string, TradeFreshMarketSignals>> {
-        const result = new Map<string, TradeFreshMarketSignals>();
-        if (mints.length === 0) return result;
+        trades: Array<Pick<Trade, 'id' | 'tokenMint' | 'entryPairAddress'>>,
+    ): Promise<Map<number, TradeFreshMarketSignals>> {
+        const result = new Map<number, TradeFreshMarketSignals>();
+        if (trades.length === 0) return result;
 
-        const uniqueMints = [...new Set(mints)].filter((mint) => mint.trim().length > 0);
+        const uniqueMints = [...new Set(trades.map((trade) => trade.tokenMint))].filter(
+            (mint) => mint.trim().length > 0,
+        );
         if (uniqueMints.length === 0) return result;
 
         try {
@@ -564,13 +616,25 @@ export class PriceMonitorService {
             );
 
             const pairs = response.data.pairs ?? [];
-            for (const mint of uniqueMints) {
-                const matchedPair = selectBestDexScreenerPair(pairs, mint);
+            for (const trade of trades) {
+                const exactPair = trade.entryPairAddress
+                    ? pairs.find(
+                          (pair) =>
+                              pair.pairAddress?.toLowerCase() ===
+                                  trade.entryPairAddress?.toLowerCase() &&
+                              pair.baseToken?.address?.toLowerCase() ===
+                                  trade.tokenMint.toLowerCase(),
+                      )
+                    : undefined;
+                const matchedPair = exactPair || selectBestDexScreenerPair(pairs, trade.tokenMint);
                 if (!matchedPair) continue;
 
-                const signals = this.extractTradeFreshMarketSignals(matchedPair);
+                const signals = this.extractTradeFreshMarketSignals(
+                    matchedPair,
+                    Boolean(trade.entryPairAddress && exactPair),
+                );
                 if (signals) {
-                    result.set(mint, signals);
+                    result.set(trade.id, signals);
                 }
             }
         } catch (error) {
@@ -587,9 +651,14 @@ export class PriceMonitorService {
 
     private extractTradeFreshMarketSignals(
         pair: DexScreenerPairWithPriceUsd,
+        entryPairMatched = false,
     ): TradeFreshMarketSignals | null {
         const priceUsd = this.parsePriceUsd(pair.priceUsd);
         const liquidityUsd = pair.liquidity?.usd ?? 0;
+        const liquidityAvailable =
+            typeof pair.liquidity?.usd === 'number' &&
+            Number.isFinite(pair.liquidity.usd) &&
+            pair.liquidity.usd >= 0;
         const volume5mUsd = pair.volume?.m5 ?? 0;
         const volume1hUsd = pair.volume?.h1 ?? 0;
         const buys5mCount = pair.txns?.m5?.buys ?? 0;
@@ -616,6 +685,9 @@ export class PriceMonitorService {
             sells5mCount,
             volumeSurge,
             zScore,
+            pairAddress: pair.pairAddress,
+            entryPairMatched,
+            liquidityAvailable,
         };
     }
 
@@ -725,7 +797,14 @@ export class PriceMonitorService {
     }
 
     private isEmergencyExitReason(exitReason: string): boolean {
-        return ['PANIC_SELL', 'DEV_DUMP', 'RUGPULL', 'AI_HEALTH_CRITICAL'].includes(exitReason);
+        return [
+            'PANIC_SELL',
+            'DEV_DUMP',
+            'RUGPULL',
+            'LIQUIDITY_RUGPULL',
+            'WHALE_DUMP',
+            'AI_HEALTH_CRITICAL',
+        ].includes(exitReason);
     }
 
     private shouldGuardEarlyNonCriticalExit(
@@ -1180,6 +1259,9 @@ export class PriceMonitorService {
             sells5mCount: freshMarketSignals?.sells5mCount ?? 0,
             volumeSurge: freshMarketSignals?.volumeSurge ?? 0,
             zScore: freshMarketSignals?.zScore ?? 0,
+            pairAddress: freshMarketSignals?.pairAddress,
+            entryPairMatched: freshMarketSignals?.entryPairMatched ?? false,
+            liquidityAvailable: freshMarketSignals?.liquidityAvailable ?? false,
         };
         const noisePressure = this.calculateNoisePressure(normalizedFreshMarketSignals);
         const aiRecommendedTrailingDistance = this.aiService.getRecommendedTrailingDistance(
@@ -1244,6 +1326,80 @@ export class PriceMonitorService {
             );
         }
 
+        const liquidityGuardEnabled = this.getBooleanConfig('ENABLE_LIQUIDITY_RUG_GUARD', true);
+        const entryLiquidity = Number(trade.entryLiquidity);
+        if (
+            liquidityGuardEnabled &&
+            trade.entryPairAddress &&
+            normalizedFreshMarketSignals.entryPairMatched &&
+            normalizedFreshMarketSignals.liquidityAvailable &&
+            Number.isFinite(entryLiquidity) &&
+            entryLiquidity > 0
+        ) {
+            const liquidityDropPercent = Math.max(
+                0,
+                (1 - normalizedFreshMarketSignals.liquidityUsd / entryLiquidity) * 100,
+            );
+            const warnPercent = Math.max(
+                0,
+                this.getNumberConfig('LIQUIDITY_DROP_WARN_PERCENT', 25),
+            );
+            const exitPercent = Math.max(
+                warnPercent,
+                this.getNumberConfig('LIQUIDITY_DROP_EXIT_PERCENT', 35),
+            );
+            const panicPercent = Math.max(
+                exitPercent,
+                this.getNumberConfig('LIQUIDITY_DROP_PANIC_PERCENT', 60),
+            );
+            const sellerPressure = hasSellerPressure(
+                normalizedFreshMarketSignals.buys5mCount,
+                normalizedFreshMarketSignals.sells5mCount,
+                this.getNumberConfig('WHALE_DUMP_MIN_SELL_COUNT', 5),
+                this.getNumberConfig('WHALE_DUMP_SELL_BUY_RATIO', 1.2),
+            );
+
+            if (liquidityDropPercent >= panicPercent) {
+                this.logger.error(
+                    `[Slot ${trade.slotNumber}] LIQUIDITY COLLAPSE ${liquidityDropPercent.toFixed(2)}% on entry pair ${trade.entryPairAddress}. Emergency exit.`,
+                );
+                this.liquidityDropBreaches.delete(trade.id);
+                await this.tradeService.executeSell(trade.id, currentPrice, 'LIQUIDITY_RUGPULL');
+                return;
+            }
+
+            if (liquidityDropPercent >= exitPercent && sellerPressure) {
+                const ticks = (this.liquidityDropBreaches.get(trade.id) ?? 0) + 1;
+                this.liquidityDropBreaches.set(trade.id, ticks);
+                const requiredTicks = Math.max(
+                    1,
+                    Math.floor(this.getNumberConfig('LIQUIDITY_DROP_CONFIRM_TICKS', 2)),
+                );
+                if (ticks >= requiredTicks) {
+                    this.logger.error(
+                        `[Slot ${trade.slotNumber}] Confirmed liquidity dump ${liquidityDropPercent.toFixed(2)}% with seller pressure. Emergency exit.`,
+                    );
+                    this.liquidityDropBreaches.delete(trade.id);
+                    await this.tradeService.executeSell(
+                        trade.id,
+                        currentPrice,
+                        'LIQUIDITY_RUGPULL',
+                    );
+                    return;
+                }
+            } else {
+                this.liquidityDropBreaches.delete(trade.id);
+            }
+
+            if (liquidityDropPercent >= warnPercent) {
+                this.logger.warn(
+                    `[Slot ${trade.slotNumber}] Liquidity down ${liquidityDropPercent.toFixed(2)}% from entry. sellerPressure=${sellerPressure}.`,
+                );
+            }
+        } else {
+            this.liquidityDropBreaches.delete(trade.id);
+        }
+
         if (
             noisePressure.isFakePump &&
             profitPercent < 15 &&
@@ -1277,17 +1433,65 @@ export class PriceMonitorService {
                     return;
                 }
             }
-            // Top Whale Check (Leniency 15%)
             if (trade.topHolderAddress) {
                 const currentTopBalance = await this.tradeService.getTokenBalance(
                     trade.topHolderAddress,
                     trade.tokenMint,
                 );
-                if (typeof currentTopBalance === 'number' && trade.initialTopHolderBalance) {
-                    if (currentTopBalance < trade.initialTopHolderBalance * 0.85) {
-                        this.logger.warn(`[Slot ${trade.slotNumber}] 🐋 Whale is dumping!`);
-                        // We don't necessarily panic sell on one whale, but we mark it
+                const whaleDropPercent = calculateBalanceDropPercent(
+                    trade.initialTopHolderBalance,
+                    currentTopBalance,
+                );
+                const whaleExitEnabled = this.getBooleanConfig('ENABLE_WHALE_DUMP_EXIT', true);
+                if (whaleDropPercent !== null && whaleExitEnabled) {
+                    const thresholdPercent = Math.max(
+                        0,
+                        this.getNumberConfig('WHALE_DUMP_THRESHOLD_PERCENT', 20),
+                    );
+                    const panicPercent = Math.max(
+                        thresholdPercent,
+                        this.getNumberConfig('WHALE_DUMP_PANIC_PERCENT', 50),
+                    );
+                    const sellerPressure = hasSellerPressure(
+                        normalizedFreshMarketSignals.buys5mCount,
+                        normalizedFreshMarketSignals.sells5mCount,
+                        this.getNumberConfig('WHALE_DUMP_MIN_SELL_COUNT', 5),
+                        this.getNumberConfig('WHALE_DUMP_SELL_BUY_RATIO', 1.2),
+                    );
+
+                    if (whaleDropPercent >= thresholdPercent) {
+                        this.logger.warn(
+                            `[Slot ${trade.slotNumber}] 🐋 Whale balance down ${whaleDropPercent.toFixed(2)}%. sellerPressure=${sellerPressure}.`,
+                        );
                     }
+
+                    if (whaleDropPercent >= panicPercent && sellerPressure) {
+                        this.whaleDumpBreaches.delete(trade.id);
+                        await this.tradeService.executeSell(trade.id, currentPrice, 'WHALE_DUMP');
+                        return;
+                    }
+
+                    if (whaleDropPercent >= thresholdPercent && sellerPressure) {
+                        const ticks = (this.whaleDumpBreaches.get(trade.id) ?? 0) + 1;
+                        this.whaleDumpBreaches.set(trade.id, ticks);
+                        const requiredTicks = Math.max(
+                            1,
+                            Math.floor(this.getNumberConfig('WHALE_DUMP_CONFIRM_TICKS', 2)),
+                        );
+                        if (ticks >= requiredTicks) {
+                            this.whaleDumpBreaches.delete(trade.id);
+                            await this.tradeService.executeSell(
+                                trade.id,
+                                currentPrice,
+                                'WHALE_DUMP',
+                            );
+                            return;
+                        }
+                    } else {
+                        this.whaleDumpBreaches.delete(trade.id);
+                    }
+                } else {
+                    this.whaleDumpBreaches.delete(trade.id);
                 }
             }
         }
@@ -1380,10 +1584,7 @@ export class PriceMonitorService {
             this.deepStopLossBreaches.delete(trade.id);
         }
         if (profitPercent <= -effectiveStopLossPercent) {
-            const deepDropMultiplier = this.getNumberConfig(
-                'STOP_LOSS_DEEP_DROP_MULTIPLIER',
-                2,
-            );
+            const deepDropMultiplier = this.getNumberConfig('STOP_LOSS_DEEP_DROP_MULTIPLIER', 2);
             const deepDropConfirmMs = Math.max(
                 0,
                 this.getNumberConfig('STOP_LOSS_DEEP_DROP_CONFIRM_MS', 750),
@@ -1566,12 +1767,7 @@ export class PriceMonitorService {
             this.logger.log(
                 `[Slot ${trade.slotNumber}] 🎯 TARGET HIT! Taking 50% profit at ${profitPercent.toFixed(2)}%, keeping the rest on trailing stop.`,
             );
-            await this.persistExitTrigger(
-                trade.id,
-                currentPriceSol,
-                currentSolUsd,
-                profitPercent,
-            );
+            await this.persistExitTrigger(trade.id, currentPriceSol, currentSolUsd, profitPercent);
             await this.tradeService.executeSell(trade.id, currentPrice, 'PARTIAL_TAKE_PROFIT', 0.5);
             return;
         }
@@ -1607,12 +1803,7 @@ export class PriceMonitorService {
             this.logger.log(
                 `[Slot ${trade.slotNumber}] ${reason} at ${currentPriceSol.toFixed(10)} SOL / ${currentPrice.toFixed(8)} (Profit: ${profitPercent.toFixed(2)}%)`,
             );
-            await this.persistExitTrigger(
-                trade.id,
-                currentPriceSol,
-                currentSolUsd,
-                profitPercent,
-            );
+            await this.persistExitTrigger(trade.id, currentPriceSol, currentSolUsd, profitPercent);
             await this.tradeService.executeSell(trade.id, currentPrice, reason);
             return;
         }

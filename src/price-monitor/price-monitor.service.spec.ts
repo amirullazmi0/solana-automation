@@ -1,6 +1,8 @@
 import {
     PriceMonitorService,
+    calculateBalanceDropPercent,
     detectCreatorDump,
+    hasSellerPressure,
     resolveMonitorSolPriceBasis,
     requiresDeepStopConfirmation,
 } from './price-monitor.service';
@@ -23,6 +25,19 @@ describe('detectCreatorDump', () => {
     });
 });
 
+describe('market dump guards', () => {
+    it('calculates holder balance drops without treating invalid baselines as dumps', () => {
+        expect(calculateBalanceDropPercent(100, 50)).toBe(50);
+        expect(calculateBalanceDropPercent(0, 0)).toBeNull();
+        expect(calculateBalanceDropPercent(100, null)).toBeNull();
+    });
+
+    it('requires both minimum sells and configured seller dominance', () => {
+        expect(hasSellerPressure(10, 12, 5, 1.2)).toBe(true);
+        expect(hasSellerPressure(10, 11, 5, 1.2)).toBe(false);
+        expect(hasSellerPressure(0, 4, 5, 1.2)).toBe(false);
+    });
+});
 
 describe('requiresDeepStopConfirmation', () => {
     it('debounces an extreme DexScreener stop snapshot', () => {
@@ -37,7 +52,6 @@ describe('requiresDeepStopConfirmation', () => {
         expect(requiresDeepStopConfirmation(-60, 8, 2)).toBe(false);
     });
 });
-
 
 describe('resolveMonitorSolPriceBasis', () => {
     it('keeps SOL-denominated trade prices as SOL basis', () => {
@@ -785,6 +799,120 @@ describe('PriceMonitorService dynamic hold zone (FIX C1) forced exit on timeout'
         expect(executeSell).not.toHaveBeenCalled();
         // Falls through to the normal AI health check instead of an unconditional bypass.
         expect(evaluateTokenHealth).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('PriceMonitorService liquidity and whale emergency exits', () => {
+    function createGuardService(config: Record<string, unknown> = {}) {
+        const configService = {
+            get: jest.fn((key: string, fallback?: unknown) =>
+                Object.prototype.hasOwnProperty.call(config, key) ? config[key] : fallback,
+            ),
+        };
+        const executeSell = jest.fn().mockResolvedValue(true);
+        const getTokenBalance = jest.fn().mockResolvedValue(70);
+        const service = new PriceMonitorService(
+            configService as never,
+            { watchlist: { findUnique: jest.fn().mockResolvedValue(null) } } as never,
+            { executeSell, getTokenBalance } as never,
+            {} as never,
+            {} as never,
+            {
+                getRecommendedTrailingDistance: jest.fn().mockReturnValue(999),
+            } as never,
+        ) as unknown as EvaluateTradeTestable;
+        return { service, executeSell, getTokenBalance };
+    }
+
+    function guardTrade(overrides: Record<string, unknown> = {}) {
+        return {
+            id: 501,
+            slotNumber: 1,
+            tokenMint: 'MINT_GUARD',
+            symbol: 'GUARD',
+            route: 'MICIN',
+            targetStopLoss: 8,
+            targetTrailingDistance: null,
+            targetTakeProfit: null,
+            partialTakeProfitAt: null,
+            entryPrice: 0.00002,
+            highestPrice: 0.00002,
+            trailingStopPrice: 0,
+            solPriceAtEntry: 100,
+            entryValueUsd: 5,
+            totalFeesSol: 0,
+            createdAt: new Date(Date.now() - 30_000),
+            creatorAddress: null,
+            topHolderAddress: null,
+            initialCreatorBalance: null,
+            initialTopHolderBalance: null,
+            entryLiquidity: 10_000,
+            entryPairAddress: 'PAIR_A',
+            slTriggeredAt: null,
+            telegramChat: null,
+            ...overrides,
+        };
+    }
+
+    function guardSignals(overrides: Record<string, unknown> = {}) {
+        return {
+            priceUsd: 0.002,
+            volScore: 0,
+            priceChange1h: 0,
+            liquidityUsd: 6_000,
+            marketCapUsd: 50_000,
+            volume5mUsd: 1_000,
+            volume1hUsd: 10_000,
+            buys5mCount: 10,
+            sells5mCount: 12,
+            volumeSurge: 1.2,
+            zScore: 0,
+            pairAddress: 'PAIR_A',
+            entryPairMatched: true,
+            liquidityAvailable: true,
+            ...overrides,
+        };
+    }
+
+    it('immediately exits a 60% liquidity collapse on the exact entry pair', async () => {
+        const { service, executeSell } = createGuardService();
+        const trade = guardTrade();
+
+        await service.evaluateTrade(
+            trade,
+            0.002,
+            100,
+            guardSignals({ liquidityUsd: 4_000, buys5mCount: 20, sells5mCount: 1 }),
+        );
+
+        expect(executeSell).toHaveBeenCalledWith(trade.id, 0.002, 'LIQUIDITY_RUGPULL');
+    });
+
+    it('requires two seller-pressure ticks for a moderate liquidity drop', async () => {
+        const { service, executeSell } = createGuardService();
+        const trade = guardTrade();
+        const signals = guardSignals();
+
+        await service.evaluateTrade(trade, 0.002, 100, signals);
+        expect(executeSell).not.toHaveBeenCalled();
+        await service.evaluateTrade(trade, 0.002, 100, signals);
+        expect(executeSell).toHaveBeenCalledWith(trade.id, 0.002, 'LIQUIDITY_RUGPULL');
+    });
+
+    it('requires whale balance loss and seller pressure for two ticks', async () => {
+        const { service, executeSell } = createGuardService();
+        const trade = guardTrade({
+            entryLiquidity: null,
+            entryPairAddress: null,
+            topHolderAddress: 'WHALE_WALLET',
+            initialTopHolderBalance: 100,
+        });
+        const signals = guardSignals({ entryPairMatched: false });
+
+        await service.evaluateTrade(trade, 0.002, 100, signals);
+        expect(executeSell).not.toHaveBeenCalled();
+        await service.evaluateTrade(trade, 0.002, 100, signals);
+        expect(executeSell).toHaveBeenCalledWith(trade.id, 0.002, 'WHALE_DUMP');
     });
 });
 

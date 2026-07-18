@@ -22,6 +22,12 @@ enum TradeRoute {
   WHALE
 }
 
+enum TokenSafetyProbeVerdict {
+  PASSED
+  BLOCKED
+  INCONCLUSIVE
+}
+
 enum TelegramChatType {
   PRIVATE
   GROUP
@@ -61,6 +67,7 @@ model TelegramChat {
   settings    TelegramChatSetting?
   trades      Trade[]
   withdrawals TelegramWithdrawal[]
+  tokenSafetyProbes TokenSafetyProbe[]
 
   @@index([status, chatType])
   @@index([lastSeenAt])
@@ -149,6 +156,7 @@ model Trade {
   exitTriggerPriceSol     Float?
   exitTriggerPnlPercent   Float?
   entryLiquidity          Float?
+  entryPairAddress        String?
   entryMarketCap          Float?
   solPriceAtEntry         Float?
   entryValueUsd           Float?
@@ -183,6 +191,26 @@ model Trade {
   @@index([route, status, mode])
   @@index([tokenMint, createdAt])
   @@index([telegramChatId, status, mode])
+}
+
+model TokenSafetyProbe {
+  id               Int                     @id @default(autoincrement())
+  telegramChatId   Int
+  tokenMint        String
+  walletAddress    String
+  amountUsd        Float
+  verdict          TokenSafetyProbeVerdict
+  reason           String?
+  buyTxHash        String?
+  sellTxHash       String?
+  expiresAt        DateTime?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+  chat             TelegramChat            @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+
+  @@unique([telegramChatId, tokenMint])
+  @@index([tokenMint, verdict])
+  @@index([expiresAt])
 }
 
 model AiDecisionSnapshot {

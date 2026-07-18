@@ -11,6 +11,7 @@ export interface Website {
 export interface DexScreenerPair {
     chainId?: string;
     dexId?: string;
+    pairAddress?: string;
     liquidity?: { usd?: number };
     fdv?: number;
     priceUsd?: string;
@@ -30,6 +31,7 @@ export interface DexScreenerPair {
 
 export interface TokenMetadata {
     liquidity: number;
+    pairAddress?: string;
     marketCap: number;
     mcap?: number;
     pairCreatedAt?: number;
