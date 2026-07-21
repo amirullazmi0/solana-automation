@@ -43,12 +43,12 @@ describe('evaluateEntryConfirmation', () => {
         ).toEqual({ decision: 'PASS', reason: 'entry_confirmation_passed' });
     });
 
-    it('accepts exactly 60% more new buys than new sells', () => {
-        const strictConfig = { ...config, buySellRatio: 1.6 };
+    it('accepts an exact 60:40 share of new buys and sells', () => {
+        const strictConfig = { ...config, buySellRatio: 1.5 };
         expect(
             evaluateEntryConfirmation(
                 baseline,
-                { priceUsd: 101, liquidityUsd: 10000, buys5m: 108, sells5m: 55 },
+                { priceUsd: 101, liquidityUsd: 10000, buys5m: 106, sells5m: 54 },
                 5000,
                 strictConfig,
             ),
@@ -56,7 +56,7 @@ describe('evaluateEntryConfirmation', () => {
         expect(
             evaluateEntryConfirmation(
                 baseline,
-                { priceUsd: 101, liquidityUsd: 10000, buys5m: 107, sells5m: 55 },
+                { priceUsd: 101, liquidityUsd: 10000, buys5m: 105, sells5m: 54 },
                 5000,
                 strictConfig,
             ),

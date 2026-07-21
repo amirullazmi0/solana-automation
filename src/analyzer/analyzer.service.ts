@@ -721,6 +721,9 @@ export class AnalyzerService {
             const minConfidence = Number.parseFloat(
                 this.configService.get<string>('MIN_BUY_CONFIDENCE', '0.60'),
             );
+            const minPriceChange5m = Number.parseFloat(
+                this.configService.get<string>('MIN_PRICE_CHANGE_5M_PCT', '0'),
+            );
 
             const response = await DexLimiter.get<{ pairs: DexScreenerPair[] }>(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
@@ -852,6 +855,7 @@ export class AnalyzerService {
             const velocity = volume5m / (marketCap || 1);
             const isPumpFun = pair.info?.websites?.some((w) => w.url.includes('pump.fun')) || false;
             const priceChange1h = pair.priceChange?.h1 || 0;
+            const priceChange5m = pair.priceChange?.m5 || 0;
 
             if (marketCap < minMCap || marketCap > maxMCap) {
                 const isPerm = marketCap > maxMCap; // MCap kegedean baru permanent
@@ -994,7 +998,7 @@ export class AnalyzerService {
                     String(this.configService.get('BUY_SELL_RATIO_THRESHOLD', '1.2')),
                 ),
             );
-            if (sells5m > 0 && buys5m <= sells5m * buySellRatioThreshold) {
+            if (sells5m > 0 && buys5m < sells5m * buySellRatioThreshold) {
                 logMarketMetricReject('low_buyer_dominance');
                 return {
                     passed: false,
@@ -1017,7 +1021,7 @@ export class AnalyzerService {
                 };
             }
 
-            if ((pair.priceChange?.m5 || 0) <= 0) {
+            if (priceChange5m < minPriceChange5m) {
                 logMarketMetricReject('negative_short_term_momentum');
                 return {
                     passed: false,
@@ -1030,7 +1034,7 @@ export class AnalyzerService {
                     volumeSurge,
                     volScore,
                     zScore,
-                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange5m,
                     priceChange15m: pair.priceChange?.m15 || 0,
                     priceChange1h,
                     isPumpFun,

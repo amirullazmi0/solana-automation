@@ -469,8 +469,8 @@ export class EstablishedAnalyzerService {
         const buys = pairData.txns?.m5?.buys || 0;
         const sells = pairData.txns?.m5?.sells || 0;
 
-        // Kondisi: buys > (sells * buySellRatioThreshold) AND buys >= minBuys
-        return buys > sells * buySellRatioThreshold && buys >= minBuys;
+        // A threshold of 1.5 means buys must be at least 60% of total transactions.
+        return buys >= sells * buySellRatioThreshold && buys >= minBuys;
     }
 
     /**

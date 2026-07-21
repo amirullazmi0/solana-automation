@@ -64,4 +64,13 @@ describe('validateConfig', () => {
         expect(errors.join(' ')).toContain('Whale thresholds');
         expect(errors.join(' ')).toContain('HONEYPOT_PROBE_USD');
     });
+
+    it('rejects an unsafe short-term momentum floor', () => {
+        const errors = validateConfig({
+            ...validConfig,
+            MIN_PRICE_CHANGE_5M_PCT: -5.1,
+        });
+
+        expect(errors).toContain('MIN_PRICE_CHANGE_5M_PCT must be between -5 and 100.');
+    });
 });

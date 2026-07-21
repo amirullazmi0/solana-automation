@@ -109,6 +109,7 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     const whaleMinSellCount = readNumber(config, 'WHALE_DUMP_MIN_SELL_COUNT', 5);
     const probeMinPositionUsd = readNumber(config, 'HONEYPOT_PROBE_MIN_POSITION_USD', 20);
     const probeUsd = readNumber(config, 'HONEYPOT_PROBE_USD', 0.5);
+    const minPriceChange5mPct = readNumber(config, 'MIN_PRICE_CHANGE_5M_PCT', 0);
 
     if (stopLossPercent <= 0) {
         errors.push('STOP_LOSS_PERCENT must be greater than 0.');
@@ -157,6 +158,9 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     }
     if (probeUsd <= 0 || probeMinPositionUsd < probeUsd) {
         errors.push('HONEYPOT_PROBE_USD must be > 0 and <= HONEYPOT_PROBE_MIN_POSITION_USD.');
+    }
+    if (minPriceChange5mPct < -5 || minPriceChange5mPct > 100) {
+        errors.push('MIN_PRICE_CHANGE_5M_PCT must be between -5 and 100.');
     }
 
     const spendableCapital = totalCapital - reserveAmount;
