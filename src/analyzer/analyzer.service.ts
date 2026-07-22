@@ -831,25 +831,12 @@ export class AnalyzerService {
             const avgVol5m = volumeH1 / 12;
             const zScore = (volume5m - avgVol5m) / (avgVol5m * 0.5 || 1);
 
-            // 🚫 HONEYPOT DETECTION
+            // Zero sells is common during the first seconds of a launch. It is not proof of a
+            // honeypot; RPC/RugCheck and the pre-buy reverse quote enforce actual sellability.
             if (buys5m >= 10 && sells5m === 0) {
-                return {
-                    passed: false,
-                    reason: 'honeypot',
-                    permanent: true,
-                    liquidity,
-                    marketCap,
-                    symbol,
-                    pairCreatedAt,
-                    socials,
-                    volScore,
-                    zScore,
-                    priceChange5m: pair.priceChange?.m5 || 0,
-                    priceChange15m: pair.priceChange?.m15 || 0,
-                    priceChange1h: pair.priceChange?.h1 || 0,
-                    isPumpFun:
-                        pair.info?.websites?.some((w) => w.url.includes('pump.fun')) || false,
-                };
+                this.logger.debug(
+                    `[${tokenMint}] Early one-sided flow detected (${buys5m} buys / 0 sells); continuing to on-chain and reverse-quote safety checks.`,
+                );
             }
 
             const velocity = volume5m / (marketCap || 1);
