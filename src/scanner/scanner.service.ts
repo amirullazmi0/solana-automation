@@ -35,6 +35,10 @@ export type EntryConfirmationConfig = {
     buySellRatio: number;
 };
 
+export function getPumpPortalDiscoverySubscriptions(): Array<{ method: string }> {
+    return [{ method: 'subscribeMigration' }];
+}
+
 export function evaluateEntryConfirmation(
     baseline: EntryConfirmationSnapshot,
     current: Omit<EntryConfirmationSnapshot, 'startedAt'>,
@@ -70,9 +74,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private connection: Connection;
     private subscriptionId: number;
     private pumpPortalWs: WebSocket | null = null;
-    private readonly pumpPortalUrl = 'wss://pumpportal.fun/api/data';
+    private readonly pumpPortalUrl: string;
     private pumpPortalReconnectTimer: NodeJS.Timeout | null = null;
     private pumpPortalReconnectAttempts = 0;
+    private pumpPortalConnected = false;
+    private lastPumpPortalEventAt: Date | null = null;
     private destroyed = false;
     // Map<tokenMint, expiredAt> — koin dihapus otomatis setelah TTL biar bisa di-re-check nanti
     private readonly seenTokens = new Map<string, number>();
@@ -85,6 +91,12 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         string,
         { reason: string; permanent: boolean; notifiedAt: number }
     >();
+    private readonly analysisRejectionCounts = new Map<string, number>();
+    private readonly discoveryCounters = {
+        pumpPortalMigrations: 0,
+        pollingCandidates: 0,
+        webhookMints: 0,
+    };
     private readonly httpsAgent: https.Agent;
 
     // Cache for resolved IPs
@@ -107,6 +119,12 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             this.configService.get<string>('SCANNER_MAX_CONCURRENT', '100'),
             10,
         );
+        const pumpPortalApiKey = (
+            this.configService.get<string>('PUMPPORTAL_API_KEY') || ''
+        ).trim();
+        this.pumpPortalUrl = pumpPortalApiKey
+            ? `wss://pumpportal.fun/api/data?api-key=${encodeURIComponent(pumpPortalApiKey)}`
+            : 'wss://pumpportal.fun/api/data';
 
         // Inisialisasi DNS Hardening HTTPS Agent dengan keepAlive
         this.httpsAgent = new https.Agent({
@@ -290,17 +308,24 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
             this.pumpPortalWs.on('open', () => {
                 this.pumpPortalReconnectAttempts = 0;
+                this.pumpPortalConnected = true;
                 this.logger.log('🔌 Connected to PumpPortal WebSocket');
-                // Subscribe to migrations to Raydium
-                this.pumpPortalWs?.send(JSON.stringify({ method: 'subscribeRaydiumLiquidity' }));
+                for (const subscription of getPumpPortalDiscoverySubscriptions()) {
+                    this.pumpPortalWs?.send(JSON.stringify(subscription));
+                }
+                this.logger.log('📡 PumpPortal migration stream subscribed.');
             });
 
             this.pumpPortalWs.on('message', (data) => {
                 try {
                     const message = JSON.parse(data.toString());
                     if (message.mint) {
+                        this.discoveryCounters.pumpPortalMigrations++;
+                        this.lastPumpPortalEventAt = new Date();
                         this.logger.log(`[PumpPortal] 💎 New Migration: ${message.mint}`);
                         this.handleWsDiscovery(message.mint);
+                    } else if (message.error) {
+                        this.logger.warn(`[PumpPortal] Subscription error: ${message.error}`);
                     }
                 } catch (e) {
                     const msg = e instanceof Error ? e.message : String(e);
@@ -309,10 +334,12 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             });
 
             this.pumpPortalWs.on('close', () => {
+                this.pumpPortalConnected = false;
                 this.schedulePumpPortalReconnect('closed');
             });
 
             this.pumpPortalWs.on('error', (err) => {
+                this.pumpPortalConnected = false;
                 this.logger.error(`🔌 PumpPortal WS Error: ${err.message}`);
             });
         } catch (error) {
@@ -361,6 +388,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
     onModuleDestroy() {
         this.destroyed = true;
+        this.pumpPortalConnected = false;
         if (this.pumpPortalReconnectTimer) {
             clearTimeout(this.pumpPortalReconnectTimer);
             this.pumpPortalReconnectTimer = null;
@@ -451,6 +479,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
                         // TTL 6 jam untuk koin yang baru masuk (Anti-Spam — mencegah re-discovery loop)
                         this.seenTokens.set(mint, now + 6 * 60 * 60 * 1000);
+                        this.discoveryCounters.pollingCandidates++;
                         this.logger.log(`🔍 [Discovery] Potential Second-Wave Candidate: ${mint}`);
 
                         void this.processNewToken(mint).catch((error) => {
@@ -474,8 +503,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         // Heartbeat Log: Biar Amirull tahu bot masih hidup & nyari koin
         setInterval(
             () => {
+                const topRejects = this.getTopAnalysisRejections(3)
+                    .map((item) => `${item.reason}=${item.count}`)
+                    .join(', ');
                 this.logger.debug(
-                    `💓 [Heartbeat] Scanner Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT} | Seen: ${this.seenTokens.size} tokens`,
+                    `💓 [Heartbeat] Scanner Active: ${this.activeMonitoring}/${this.MAX_CONCURRENT} | Seen: ${this.seenTokens.size} tokens | Migrations: ${this.discoveryCounters.pumpPortalMigrations} | Poll: ${this.discoveryCounters.pollingCandidates} | Rejects: ${topRejects || 'none'}`,
                 );
             },
             Number.parseInt(
@@ -539,12 +571,33 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     // Map<tokenMint, notifiedAt> — koin nggak bakal di-notif lagi selama 6 jam biarpun masuk monitor lagi
     private readonly notifiedTokens = new Map<string, number>();
 
+    private recordAnalysisRejection(reason?: string): void {
+        const normalizedReason = (reason || 'unknown').trim().toLowerCase();
+        this.analysisRejectionCounts.set(
+            normalizedReason,
+            (this.analysisRejectionCounts.get(normalizedReason) || 0) + 1,
+        );
+    }
+
+    private getTopAnalysisRejections(limit = 5): Array<{ reason: string; count: number }> {
+        return [...this.analysisRejectionCounts.entries()]
+            .sort((left, right) => right[1] - left[1])
+            .slice(0, limit)
+            .map(([reason, count]) => ({ reason, count }));
+    }
+
     public getScannerStatus() {
         return {
             active: this.activeMonitoring,
             max: this.MAX_CONCURRENT,
             seen: this.seenTokens.size,
             notified: this.notifiedTokens.size,
+            discovery: {
+                ...this.discoveryCounters,
+                pumpPortalConnected: this.pumpPortalConnected,
+                lastPumpPortalEventAt: this.lastPumpPortalEventAt?.toISOString() || null,
+            },
+            topRejects: this.getTopAnalysisRejections(),
         };
     }
 
@@ -570,6 +623,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 });
             }
 
+            this.discoveryCounters.webhookMints += mints.length;
             this.logger.log(`[HeliusWebhook] Queued ${mints.length} mint(s): ${mints.join(', ')}`);
             return {
                 accepted: true,
@@ -928,6 +982,9 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     }
 
                     const result = await this.analyzerService.isTokenSafeToBuy(tokenMint);
+                    if (!result.safe) {
+                        this.recordAnalysisRejection(result.reason);
+                    }
 
                     // Update metadata di Watchlist
                     if (result.metadata) {
@@ -1012,6 +1069,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             : { decision: 'RESET' as const, reason: 'entry_confirmation_pending' };
 
                         if (confirmation.decision !== 'PASS') {
+                            this.recordAnalysisRejection(confirmation.reason);
                             const resetBaseline = !baseline || confirmation.decision === 'RESET';
                             await this.updateWatchlistByMint(tokenMint, {
                                 reason: confirmation.reason,

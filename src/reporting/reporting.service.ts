@@ -1024,21 +1024,27 @@ export class ReportingService implements OnModuleInit {
     }
 
     async handleStatusRequest(targetChatId?: string) {
+        const scannerService = this.moduleRef.get(ScannerService, { strict: false });
+        const stats = scannerService.getScannerStatus();
         const openTrades = await this.prismaService.trade.findMany({
             where: { status: 'OPEN', mode: 'LIVE' },
         });
 
-        if (openTrades.length === 0) {
-            await this.sendMessage('*No open positions currently.*', {}, 0, targetChatId);
-            return;
-        }
-
-        const scannerService = this.moduleRef.get(ScannerService, { strict: false });
-        const stats = scannerService.getScannerStatus();
-
+        const topRejects = stats.topRejects
+            .map((item) => `${item.reason}: ${item.count}`)
+            .join(' | ');
         let statusMsg = `🤖 *BOT SYSTEM STATUS*\n`;
         statusMsg += `📡 *Scanner:* \`${stats.active}/${stats.max}\` monitor | \`${stats.seen}\` seen\n`;
+        statusMsg += `🔌 *PumpPortal:* ${stats.discovery.pumpPortalConnected ? 'connected' : 'disconnected'} | migrations: \`${stats.discovery.pumpPortalMigrations}\`\n`;
+        statusMsg += `🔎 *Discovery:* poll \`${stats.discovery.pollingCandidates}\` | webhook \`${stats.discovery.webhookMints}\`\n`;
+        statusMsg += `🚧 *Top rejects:* ${topRejects || 'none'}\n`;
         statusMsg += `━━━━━━━━━━━━━━━━━━\n\n`;
+
+        if (openTrades.length === 0) {
+            statusMsg += '*No open positions currently.*';
+            await this.sendMessage(statusMsg, {}, 0, targetChatId);
+            return;
+        }
 
         statusMsg += '📊 *Active Portfolio:*\n\n';
 

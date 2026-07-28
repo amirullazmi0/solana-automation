@@ -2,7 +2,14 @@ import {
     EntryConfirmationConfig,
     EntryConfirmationSnapshot,
     evaluateEntryConfirmation,
+    getPumpPortalDiscoverySubscriptions,
 } from './scanner.service';
+
+describe('PumpPortal discovery subscription', () => {
+    it('uses the current migration stream method', () => {
+        expect(getPumpPortalDiscoverySubscriptions()).toEqual([{ method: 'subscribeMigration' }]);
+    });
+});
 
 describe('evaluateEntryConfirmation', () => {
     const config: EntryConfirmationConfig = {
@@ -61,6 +68,23 @@ describe('evaluateEntryConfirmation', () => {
                 strictConfig,
             ),
         ).toEqual({ decision: 'RESET', reason: 'entry_confirmation_buyers_weak' });
+    });
+
+    it('accepts one fresh buy with no fresh sell after a longer feed window', () => {
+        const feedTolerantConfig = {
+            ...config,
+            windowMs: 6000,
+            minNewBuys: 1,
+            buySellRatio: 1.5,
+        };
+        expect(
+            evaluateEntryConfirmation(
+                baseline,
+                { priceUsd: 101, liquidityUsd: 10000, buys5m: 101, sells5m: 50 },
+                7000,
+                feedTolerantConfig,
+            ),
+        ).toEqual({ decision: 'PASS', reason: 'entry_confirmation_passed' });
     });
 
     it('supports a 3000ms confirmation window', () => {
