@@ -130,24 +130,6 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         this.httpsAgent = new https.Agent({
             family: 4,
             keepAlive: true,
-            lookup: async (hostname, options, cb) => {
-                try {
-                    const ip = await this.resolveDns(hostname);
-                    if (ip) {
-                        cb(null, ip, 4);
-                    } else {
-                        import('dns')
-                            .then(({ lookup: dnsLookup }) => {
-                                dnsLookup(hostname, options, cb);
-                            })
-                            .catch((err) => {
-                                cb(err, '', 4);
-                            });
-                    }
-                } catch (e) {
-                    cb(e as Error, '', 4);
-                }
-            },
         });
     }
 
@@ -273,15 +255,16 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         const wssEndpoint = this.configService.get<string>('WSS_ENDPOINT');
         const rpcEndpoint = this.getSolanaRpcUrl();
 
-        if (!wssEndpoint || !rpcEndpoint) {
-            this.logger.error('RPC or WSS endpoints not configured. Scanner will not start.');
-            return;
+        if (wssEndpoint) {
+            this.connection = new Connection(rpcEndpoint, {
+                wsEndpoint: wssEndpoint,
+                commitment: 'confirmed',
+            });
+        } else {
+            this.logger.warn(
+                'WSS_ENDPOINT is not configured. Continuing with PumpPortal, DexScreener polling, and watchlist radar.',
+            );
         }
-
-        this.connection = new Connection(rpcEndpoint, {
-            wsEndpoint: wssEndpoint,
-            commitment: 'confirmed',
-        });
 
         this.logger.log('🤖 Hybrid Pipeline: internal routing enabled (MICIN_ROUTE / WHALE_ROUTE)');
         this.initPumpPortalWS();
