@@ -124,6 +124,8 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     ];
     const aggressiveSafetyIndex = readNumber(config, 'AGGRESSIVE_RUGCHECK_MIN_SAFETY_INDEX', 0.65);
     const zeroLiquidityMaxRechecks = readNumber(config, 'ZERO_LIQUIDITY_MAX_RECHECKS', 15);
+    const noDexPairMaxRetries = readNumber(config, 'NO_DEX_PAIR_MAX_RETRIES', 3);
+    const noDexPairRetryBaseMs = readNumber(config, 'NO_DEX_PAIR_RETRY_BASE_MS', 250);
 
     if (stopLossPercent <= 0) {
         errors.push('STOP_LOSS_PERCENT must be greater than 0.');
@@ -200,6 +202,12 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     }
     if (!Number.isInteger(zeroLiquidityMaxRechecks) || zeroLiquidityMaxRechecks < 1) {
         errors.push('ZERO_LIQUIDITY_MAX_RECHECKS must be an integer >= 1.');
+    }
+    if (!Number.isInteger(noDexPairMaxRetries) || noDexPairMaxRetries < 1) {
+        errors.push('NO_DEX_PAIR_MAX_RETRIES must be an integer >= 1.');
+    }
+    if (!Number.isInteger(noDexPairRetryBaseMs) || noDexPairRetryBaseMs < 100) {
+        errors.push('NO_DEX_PAIR_RETRY_BASE_MS must be an integer >= 100.');
     }
 
     const spendableCapital = totalCapital - reserveAmount;

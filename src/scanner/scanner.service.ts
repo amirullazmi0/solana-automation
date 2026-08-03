@@ -1263,11 +1263,28 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             return;
                         }
                         if (result.reason === 'no_dex_pair') {
+                            const maxNoDexPairRetries = Math.max(
+                                1,
+                                Number.parseInt(
+                                    this.configService.get<string>('NO_DEX_PAIR_MAX_RETRIES', '3'),
+                                    10,
+                                ),
+                            );
+                            const noDexPairRetryBaseMs = Math.max(
+                                100,
+                                Number.parseInt(
+                                    this.configService.get<string>(
+                                        'NO_DEX_PAIR_RETRY_BASE_MS',
+                                        '250',
+                                    ),
+                                    10,
+                                ),
+                            );
                             const nextRetryCount =
                                 (this.noDexPairRetryCounts.get(tokenMint) ?? 0) + 1;
                             this.noDexPairRetryCounts.set(tokenMint, nextRetryCount);
 
-                            if (nextRetryCount >= 3) {
+                            if (nextRetryCount >= maxNoDexPairRetries) {
                                 this.logger.debug(
                                     `[${tokenMint}] Token ${tokenMint} skipped: no_dex_pair`,
                                 );
@@ -1278,9 +1295,12 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                 return;
                             }
 
-                            const retryBackoffMs = Math.min(250 * 2 ** (nextRetryCount - 1), 1000);
+                            const retryBackoffMs = Math.min(
+                                noDexPairRetryBaseMs * 2 ** (nextRetryCount - 1),
+                                15_000,
+                            );
                             this.logger.debug(
-                                `[${tokenMint}] ⏳ no_dex_pair retry ${nextRetryCount}/3. Backing off ${retryBackoffMs}ms.`,
+                                `[${tokenMint}] ⏳ no_dex_pair retry ${nextRetryCount}/${maxNoDexPairRetries}. Backing off ${retryBackoffMs}ms.`,
                             );
                             await new Promise((res) => setTimeout(res, retryBackoffMs));
                             continue;

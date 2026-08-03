@@ -73,9 +73,8 @@ describe('validateConfig', () => {
 
         expect(errors).toContain('MIN_PRICE_CHANGE_5M_PCT must be between -5 and 100.');
     });
-});
 
-    it('rejects invalid aggressive rebound and holder settings', () => {
+    it('rejects invalid aggressive rebound, holder, and DEX-pair retry settings', () => {
         const errors = validateConfig({
             ...validConfig,
             BEARISH_REBOUND_1H_FLOOR_PCT: -10,
@@ -86,6 +85,8 @@ describe('validateConfig', () => {
             AGGRESSIVE_MAX_TOP10_HOLDER_PCT: 10,
             AGGRESSIVE_RUGCHECK_MIN_SAFETY_INDEX: 1.1,
             ZERO_LIQUIDITY_MAX_RECHECKS: 0,
+            NO_DEX_PAIR_MAX_RETRIES: 0,
+            NO_DEX_PAIR_RETRY_BASE_MS: 99,
         });
 
         expect(errors.join(' ')).toContain('BEARISH_REBOUND_1H_FLOOR_PCT');
@@ -94,4 +95,7 @@ describe('validateConfig', () => {
         expect(errors.join(' ')).toContain('Aggressive holder limits');
         expect(errors.join(' ')).toContain('AGGRESSIVE_RUGCHECK_MIN_SAFETY_INDEX');
         expect(errors.join(' ')).toContain('ZERO_LIQUIDITY_MAX_RECHECKS');
+        expect(errors.join(' ')).toContain('NO_DEX_PAIR_MAX_RETRIES');
+        expect(errors.join(' ')).toContain('NO_DEX_PAIR_RETRY_BASE_MS');
     });
+});
