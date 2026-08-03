@@ -110,6 +110,20 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     const probeMinPositionUsd = readNumber(config, 'HONEYPOT_PROBE_MIN_POSITION_USD', 20);
     const probeUsd = readNumber(config, 'HONEYPOT_PROBE_USD', 0.5);
     const minPriceChange5mPct = readNumber(config, 'MIN_PRICE_CHANGE_5M_PCT', 0);
+    const bearishReboundFloorPct = readNumber(config, 'BEARISH_REBOUND_1H_FLOOR_PCT', -60);
+    const bearishReboundMin5mPct = readNumber(config, 'BEARISH_REBOUND_MIN_5M_PCT', 3);
+    const aggressiveHolderLiquidityUsd = readNumber(
+        config,
+        'AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD',
+        10000,
+    );
+    const aggressiveHolderLimits = [
+        readNumber(config, 'AGGRESSIVE_MAX_SINGLE_HOLDER_PCT', 12),
+        readNumber(config, 'AGGRESSIVE_MAX_TOP5_HOLDER_PCT', 28),
+        readNumber(config, 'AGGRESSIVE_MAX_TOP10_HOLDER_PCT', 35),
+    ];
+    const aggressiveSafetyIndex = readNumber(config, 'AGGRESSIVE_RUGCHECK_MIN_SAFETY_INDEX', 0.65);
+    const zeroLiquidityMaxRechecks = readNumber(config, 'ZERO_LIQUIDITY_MAX_RECHECKS', 15);
 
     if (stopLossPercent <= 0) {
         errors.push('STOP_LOSS_PERCENT must be greater than 0.');
@@ -161,6 +175,31 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     }
     if (minPriceChange5mPct < -5 || minPriceChange5mPct > 100) {
         errors.push('MIN_PRICE_CHANGE_5M_PCT must be between -5 and 100.');
+    }
+    if (bearishReboundFloorPct < -100 || bearishReboundFloorPct >= -15) {
+        errors.push('BEARISH_REBOUND_1H_FLOOR_PCT must be between -100 and below -15.');
+    }
+    if (bearishReboundMin5mPct < 0 || bearishReboundMin5mPct > 100) {
+        errors.push('BEARISH_REBOUND_MIN_5M_PCT must be between 0 and 100.');
+    }
+    if (aggressiveHolderLiquidityUsd < 0) {
+        errors.push('AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD must be >= 0.');
+    }
+    if (
+        aggressiveHolderLimits[0] <= 0 ||
+        aggressiveHolderLimits[0] > aggressiveHolderLimits[1] ||
+        aggressiveHolderLimits[1] > aggressiveHolderLimits[2] ||
+        aggressiveHolderLimits[2] > 100
+    ) {
+        errors.push(
+            'Aggressive holder limits must satisfy 0 < SINGLE <= TOP5 <= TOP10 <= 100.',
+        );
+    }
+    if (aggressiveSafetyIndex <= 0 || aggressiveSafetyIndex > 1) {
+        errors.push('AGGRESSIVE_RUGCHECK_MIN_SAFETY_INDEX must be between 0 and 1.');
+    }
+    if (!Number.isInteger(zeroLiquidityMaxRechecks) || zeroLiquidityMaxRechecks < 1) {
+        errors.push('ZERO_LIQUIDITY_MAX_RECHECKS must be an integer >= 1.');
     }
 
     const spendableCapital = totalCapital - reserveAmount;

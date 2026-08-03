@@ -74,3 +74,24 @@ describe('validateConfig', () => {
         expect(errors).toContain('MIN_PRICE_CHANGE_5M_PCT must be between -5 and 100.');
     });
 });
+
+    it('rejects invalid aggressive rebound and holder settings', () => {
+        const errors = validateConfig({
+            ...validConfig,
+            BEARISH_REBOUND_1H_FLOOR_PCT: -10,
+            BEARISH_REBOUND_MIN_5M_PCT: -1,
+            AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD: -1,
+            AGGRESSIVE_MAX_SINGLE_HOLDER_PCT: 30,
+            AGGRESSIVE_MAX_TOP5_HOLDER_PCT: 20,
+            AGGRESSIVE_MAX_TOP10_HOLDER_PCT: 10,
+            AGGRESSIVE_RUGCHECK_MIN_SAFETY_INDEX: 1.1,
+            ZERO_LIQUIDITY_MAX_RECHECKS: 0,
+        });
+
+        expect(errors.join(' ')).toContain('BEARISH_REBOUND_1H_FLOOR_PCT');
+        expect(errors.join(' ')).toContain('BEARISH_REBOUND_MIN_5M_PCT');
+        expect(errors.join(' ')).toContain('AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD');
+        expect(errors.join(' ')).toContain('Aggressive holder limits');
+        expect(errors.join(' ')).toContain('AGGRESSIVE_RUGCHECK_MIN_SAFETY_INDEX');
+        expect(errors.join(' ')).toContain('ZERO_LIQUIDITY_MAX_RECHECKS');
+    });

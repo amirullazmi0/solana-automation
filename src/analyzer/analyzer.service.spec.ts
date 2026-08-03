@@ -1,6 +1,10 @@
 import { DexScreenerPair } from '../dto/analyzer.dto';
 import { DexLimiter } from '../common/dex-limiter';
-import { AnalyzerService, selectBestDexScreenerPair } from './analyzer.service';
+import {
+    AnalyzerService,
+    evaluateBearishRebound,
+    selectBestDexScreenerPair,
+} from './analyzer.service';
 
 describe('selectBestDexScreenerPair', () => {
     const pair = (overrides: Partial<DexScreenerPair>): DexScreenerPair => ({
@@ -119,5 +123,55 @@ describe('AnalyzerService market-flow entry gate', () => {
 
         expect(result.passed).toBe(true);
         expect(result.reason).toBeUndefined();
+    });
+});
+
+describe('aggressive-high market gates', () => {
+    const reboundConfig = { hardFloorPct: -60, minRebound5mPct: 3 };
+
+    it('allows a recovering token without accepting a deep continuing drawdown', () => {
+        expect(evaluateBearishRebound(-48, 3.1, reboundConfig)).toEqual({
+            allowed: true,
+            permanent: false,
+        });
+        expect(evaluateBearishRebound(-48, 1, reboundConfig)).toEqual({
+            allowed: false,
+            permanent: false,
+        });
+        expect(evaluateBearishRebound(-61, 8, reboundConfig)).toEqual({
+            allowed: false,
+            permanent: true,
+        });
+    });
+
+    it('uses relaxed holder limits only above the liquidity floor', () => {
+        const values: Record<string, number> = {
+            MAX_SINGLE_HOLDER_PCT: 8,
+            MAX_TOP5_HOLDER_PCT: 15,
+            MAX_TOP10_HOLDER_PCT: 20,
+            AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD: 10_000,
+            AGGRESSIVE_MAX_SINGLE_HOLDER_PCT: 12,
+            AGGRESSIVE_MAX_TOP5_HOLDER_PCT: 28,
+            AGGRESSIVE_MAX_TOP10_HOLDER_PCT: 35,
+        };
+        const service = new AnalyzerService(
+            { get: jest.fn((key: string, fallback?: number) => values[key] ?? fallback) } as never,
+            {} as never,
+            {} as never,
+            {} as never,
+        );
+        const rugCheckData = {
+            score: 0,
+            dangerReasons: [],
+            holders: [
+                { share: 10, isInPool: false, isBurned: false },
+                { share: 7, isInPool: false, isBurned: false },
+                { share: 5, isInPool: false, isBurned: false },
+                { share: 4, isInPool: false, isBurned: false },
+            ],
+        };
+
+        expect(service.checkHolderConcentration(rugCheckData as never, 9_999)).toBe(false);
+        expect(service.checkHolderConcentration(rugCheckData as never, 10_000)).toBe(true);
     });
 });

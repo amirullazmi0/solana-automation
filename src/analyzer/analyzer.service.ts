@@ -25,6 +25,21 @@ export { selectBestDexScreenerPair } from '../common/dex-pair';
 import { selectBestDexScreenerPair } from '../common/dex-pair';
 import { evaluateMintSafety } from '../common/token-mint-safety';
 
+export type BearishReboundConfig = {
+    hardFloorPct: number;
+    minRebound5mPct: number;
+};
+
+export function evaluateBearishRebound(
+    priceChange1hPct: number,
+    priceChange5mPct: number,
+    config: BearishReboundConfig,
+): { allowed: boolean; permanent: boolean } {
+    if (priceChange1hPct >= -15) return { allowed: true, permanent: false };
+    if (priceChange1hPct < config.hardFloorPct) return { allowed: false, permanent: true };
+    return { allowed: priceChange5mPct >= config.minRebound5mPct, permanent: false };
+}
+
 @Injectable()
 export class AnalyzerService {
     private readonly logger = new Logger(AnalyzerService.name);
@@ -374,7 +389,7 @@ export class AnalyzerService {
             }
 
             // 3. RUGCHECK (Advanced Safety Index & LP Burn)
-            const rugResult = await this.checkRugCheckAPI(tokenMint);
+            const rugResult = await this.checkRugCheckAPI(tokenMint, traction.liquidity || 0);
             if (!rugResult.passed) {
                 this.logger.warn(`[${tokenMint}] 🛑 RugCheck FAILED: ${rugResult.reason}. Skip.`);
                 return {
@@ -724,6 +739,14 @@ export class AnalyzerService {
             const minPriceChange5m = Number.parseFloat(
                 this.configService.get<string>('MIN_PRICE_CHANGE_5M_PCT', '0'),
             );
+            const bearishReboundConfig: BearishReboundConfig = {
+                hardFloorPct: Number.parseFloat(
+                    this.configService.get<string>('BEARISH_REBOUND_1H_FLOOR_PCT', '-60'),
+                ),
+                minRebound5mPct: Number.parseFloat(
+                    this.configService.get<string>('BEARISH_REBOUND_MIN_5M_PCT', '3'),
+                ),
+            };
 
             const response = await DexLimiter.get<{ pairs: DexScreenerPair[] }>(
                 `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`,
@@ -919,12 +942,17 @@ export class AnalyzerService {
                     isPumpFun,
                 };
             }
-            if (priceChange1h < -15) {
+            const bearishDecision = evaluateBearishRebound(
+                priceChange1h,
+                priceChange5m,
+                bearishReboundConfig,
+            );
+            if (!bearishDecision.allowed) {
                 logMarketMetricReject('bearish_trend');
                 return {
                     passed: false,
                     reason: 'bearish_trend',
-                    permanent: true,
+                    permanent: bearishDecision.permanent,
                     marketCap,
                     symbol,
                     pairCreatedAt,
@@ -932,7 +960,7 @@ export class AnalyzerService {
                     liquidity,
                     volScore,
                     zScore,
-                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange5m,
                     priceChange15m: pair.priceChange?.m15 || 0,
                     priceChange1h,
                     isPumpFun,
@@ -1136,7 +1164,7 @@ export class AnalyzerService {
         });
     }
 
-    public checkHolderConcentration(rugCheckData: RugCheckResponse): boolean {
+    public checkHolderConcentration(rugCheckData: RugCheckResponse, liquidityUsd = 0): boolean {
         try {
             const eligibleHolders = rugCheckData.holders
                 .filter((holder: RugCheckHolder) => !holder.isInPool && !holder.isBurned)
@@ -1148,18 +1176,31 @@ export class AnalyzerService {
             const top10Share = eligibleHolders
                 .slice(0, 10)
                 .reduce((sum: number, holder: RugCheckHolder) => sum + holder.share, 0);
-
-            const maxSingleShare = Math.max(
+            const aggressiveLiquidityFloor = Math.max(
                 0,
-                Number.parseFloat(String(this.configService.get('MAX_SINGLE_HOLDER_PCT', '8'))),
+                Number.parseFloat(
+                    String(this.configService.get('AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD', '10000')),
+                ),
             );
-            const maxTop5Share = Math.max(
-                0,
-                Number.parseFloat(String(this.configService.get('MAX_TOP5_HOLDER_PCT', '15'))),
+            const useAggressiveLimits = liquidityUsd >= aggressiveLiquidityFloor;
+            const limit = (standardKey: string, aggressiveKey: string, fallback: number): number => {
+                const key = useAggressiveLimits ? aggressiveKey : standardKey;
+                return Math.max(0, Number.parseFloat(String(this.configService.get(key, fallback))));
+            };
+            const maxSingleShare = limit(
+                'MAX_SINGLE_HOLDER_PCT',
+                'AGGRESSIVE_MAX_SINGLE_HOLDER_PCT',
+                useAggressiveLimits ? 12 : 8,
             );
-            const maxTop10Share = Math.max(
-                0,
-                Number.parseFloat(String(this.configService.get('MAX_TOP10_HOLDER_PCT', '20'))),
+            const maxTop5Share = limit(
+                'MAX_TOP5_HOLDER_PCT',
+                'AGGRESSIVE_MAX_TOP5_HOLDER_PCT',
+                useAggressiveLimits ? 28 : 15,
+            );
+            const maxTop10Share = limit(
+                'MAX_TOP10_HOLDER_PCT',
+                'AGGRESSIVE_MAX_TOP10_HOLDER_PCT',
+                useAggressiveLimits ? 35 : 20,
             );
             if (
                 singleShare > maxSingleShare ||
@@ -1167,26 +1208,13 @@ export class AnalyzerService {
                 top10Share > maxTop10Share
             ) {
                 this.logger.warn(
-                    `❌ REJECTED: Holder concentration single=${singleShare.toFixed(2)}%, top5=${top5Share.toFixed(2)}%, top10=${top10Share.toFixed(2)}%.`,
+                    `Holder concentration rejected (liquidity=${liquidityUsd.toFixed(2)}): single=${singleShare.toFixed(2)}%, top5=${top5Share.toFixed(2)}%, top10=${top10Share.toFixed(2)}%.`,
                 );
                 return false;
             }
-
-            if (rugCheckData.score > 1000) {
-                this.logger.warn(
-                    `❌ REJECTED: RugCheck score ${rugCheckData.score} melewati batas 1000.`,
-                );
+            if (rugCheckData.score > 1000 || (rugCheckData.dangerReasons?.length || 0) > 0) {
                 return false;
             }
-
-            const dangerCount = rugCheckData.dangerReasons?.length || 0;
-            if (dangerCount > 0) {
-                this.logger.warn(
-                    `❌ REJECTED: RugCheck danger risks detected (${rugCheckData.dangerReasons?.join(', ')}).`,
-                );
-                return false;
-            }
-
             return true;
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -1239,7 +1267,7 @@ export class AnalyzerService {
         };
     }
 
-    private async checkRugCheckAPI(tokenMint: string): Promise<{
+    private async checkRugCheckAPI(tokenMint: string, liquidityUsd = 0): Promise<{
         passed: boolean;
         creator?: string;
         topHolder?: string;
@@ -1286,7 +1314,7 @@ export class AnalyzerService {
                 markets,
                 risks,
             );
-            if (!this.checkHolderConcentration(rugCheckData)) {
+            if (!this.checkHolderConcentration(rugCheckData, liquidityUsd)) {
                 return {
                     passed: false,
                     reason:
@@ -1357,9 +1385,19 @@ export class AnalyzerService {
                 .reduce((sum: number, h: RugCheckApiHolder) => sum + (h.pct || 0), 0);
             const safetyIndex = 1 - top10SumPct / 100;
 
+            const aggressiveLiquidityFloor = Number.parseFloat(
+                String(this.configService.get('AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD', '10000')),
+            );
+            const useAggressiveSafetyFloor =
+                Number.isFinite(aggressiveLiquidityFloor) && liquidityUsd >= aggressiveLiquidityFloor;
             const defaultSafetyIndex = isCTO ? '0.20' : '0.65';
             const minSafetyIndex = Number.parseFloat(
-                this.configService.get<string>('RUGCHECK_MIN_SAFETY_INDEX', defaultSafetyIndex),
+                this.configService.get<string>(
+                    useAggressiveSafetyFloor
+                        ? 'AGGRESSIVE_RUGCHECK_MIN_SAFETY_INDEX'
+                        : 'RUGCHECK_MIN_SAFETY_INDEX',
+                    useAggressiveSafetyFloor ? '0.65' : defaultSafetyIndex,
+                ),
             );
             if (safetyIndex < minSafetyIndex) {
                 this.logger.warn(

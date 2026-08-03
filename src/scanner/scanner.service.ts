@@ -97,6 +97,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         pollingCandidates: 0,
         webhookMints: 0,
     };
+    private readonly executionCounters = {
+        qualifiedCandidates: 0,
+        liveBuyAttempts: 0,
+        liveBuySuccesses: 0,
+    };
     private readonly httpsAgent: https.Agent;
 
     // Cache for resolved IPs
@@ -577,6 +582,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             notified: this.notifiedTokens.size,
             discovery: {
                 ...this.discoveryCounters,
+                ...this.executionCounters,
                 pumpPortalConnected: this.pumpPortalConnected,
                 lastPumpPortalEventAt: this.lastPumpPortalEventAt?.toISOString() || null,
             },
@@ -1130,6 +1136,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         );
                     }
                     if (result.safe) {
+                        this.executionCounters.qualifiedCandidates++;
                         const activeChats = await this.prismaService.telegramChat.findMany({
                             where: { status: 'ACTIVE' },
                             include: { settings: true, walletVault: true },
@@ -1172,6 +1179,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                 false,
                                 chat.chatId,
                             );
+                            this.executionCounters.liveBuyAttempts++;
                             const buyResult = await this.tradeService.attemptBuy(
                                 tokenMint,
                                 result.metadata,
@@ -1192,6 +1200,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
                             if (buyResult.success) {
                                 liveBuyExecuted = true;
+                                this.executionCounters.liveBuySuccesses++;
                             } else {
                                 this.logger.warn(
                                     `[${tokenMint}] Auto-buy failed for chat ${chat.chatId}: ${buyResult.message}`,
@@ -1233,6 +1242,26 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                     // biarkan status tetap PENDING agar dicek kembali oleh background radar nanti,
                     // dan teruskan pemantauan aktif di loop ini hanya jika itu adalah error API/Network.
                     if (!result.permanent && result.reason) {
+                        if (result.reason === 'zero_liquidity') {
+                            const maxZeroLiquidityChecks = Math.max(
+                                1,
+                                Number.parseInt(
+                                    this.configService.get<string>(
+                                        'ZERO_LIQUIDITY_MAX_RECHECKS',
+                                        '15',
+                                    ),
+                                    10,
+                                ),
+                            );
+                            if (currentItem.checkCount >= maxZeroLiquidityChecks) {
+                                await this.updateWatchlistByMint(tokenMint, {
+                                    status: 'FAILED',
+                                    reason: 'zero_liquidity',
+                                });
+                                this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
+                            }
+                            return;
+                        }
                         if (result.reason === 'no_dex_pair') {
                             const nextRetryCount =
                                 (this.noDexPairRetryCounts.get(tokenMint) ?? 0) + 1;

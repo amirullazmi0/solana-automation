@@ -1,6 +1,7 @@
 import {
     EntryConfirmationConfig,
     EntryConfirmationSnapshot,
+    ScannerService,
     evaluateEntryConfirmation,
     getPumpPortalDiscoverySubscriptions,
 } from './scanner.service';
@@ -131,5 +132,25 @@ describe('evaluateEntryConfirmation', () => {
             decision: 'RESET',
             reason,
         });
+    });
+});
+
+describe('scanner health telemetry', () => {
+    it('exposes qualified candidates and live buy counters', () => {
+        const scanner = new ScannerService(
+            { get: jest.fn((_key: string, fallback?: string | number) => fallback) } as never,
+            {} as never,
+            {} as never,
+            {} as never,
+            {} as never,
+        );
+
+        expect(scanner.getScannerStatus().discovery).toEqual(
+            expect.objectContaining({
+                qualifiedCandidates: 0,
+                liveBuyAttempts: 0,
+                liveBuySuccesses: 0,
+            }),
+        );
     });
 });
