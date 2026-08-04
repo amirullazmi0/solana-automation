@@ -102,6 +102,13 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         liveBuyAttempts: 0,
         liveBuySuccesses: 0,
     };
+    private watchlistRadarTimer: NodeJS.Timeout | null = null;
+    private watchlistRadarRunning = false;
+    private watchlistRadarRuns = 0;
+    private watchlistRadarLastStartedAt: Date | null = null;
+    private watchlistRadarLastCompletedAt: Date | null = null;
+    private watchlistRadarLastError: string | null = null;
+    private watchlistRadarLastPendingCount = 0;
     private readonly httpsAgent: https.Agent;
 
     // Cache for resolved IPs
@@ -377,6 +384,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     onModuleDestroy() {
         this.destroyed = true;
         this.pumpPortalConnected = false;
+        if (this.watchlistRadarTimer) {
+            clearTimeout(this.watchlistRadarTimer);
+            this.watchlistRadarTimer = null;
+        }
         if (this.pumpPortalReconnectTimer) {
             clearTimeout(this.pumpPortalReconnectTimer);
             this.pumpPortalReconnectTimer = null;
@@ -507,55 +518,76 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
     private startWatchlistMonitoring() {
         this.logger.log('Starting Persistent Watchlist Radar...');
-
-        // Re-check PENDING koin dari DB setiap 60 detik
-        setInterval(
-            async () => {
-                try {
-                    const pending = await this.prismaService.watchlist.findMany({
-                        where: {
-                            status: 'PENDING',
-                            // Hindari re-check koin yang baru dicek kurang dari 3 menit lalu (mencegah loop koin tertua)
-                            lastCheckedAt: { lt: new Date(Date.now() - 3 * 60 * 1000) },
-                        },
-                        orderBy: [{ pairCreatedAt: 'asc' }, { createdAt: 'asc' }],
-                        take: 20, // Ambil hingga 50 koin
-                        select: { tokenMint: true }, // Optimasi memory leak
-                    });
-
-                    for (const item of pending) {
-                        // Jika koin sudah di-scan secara live, skip biar nggak double
-                        if (this.activeMonitoring >= this.MAX_CONCURRENT) continue;
-
-                        void this.processNewToken(item.tokenMint).catch((error) => {
-                            const message = error instanceof Error ? error.message : String(error);
-                            this.logger.error(
-                                '[WatchlistRadar] Failed to process ' +
-                                    item.tokenMint +
-                                    ': ' +
-                                    message,
-                            );
-                        });
-                        await new Promise((res) => setTimeout(res, 100)); // Stagger 100ms agar aman dari rate limit
-                    }
-
-                    // Cleanup Watchlist: Hapus koin yang sudah > 24 jam dan gagal/pending
-                    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-                    await this.prismaService.watchlist.deleteMany({
-                        where: {
-                            createdAt: { lt: dayAgo },
-                            status: { in: ['FAILED', 'PENDING'] },
-                        },
-                    });
-                } catch (error) {
-                    const msg = error instanceof Error ? error.message : String(error);
-                    this.logger.error(`Watchlist Monitoring error: ${msg}`);
-                }
-            },
-            Number.parseInt(this.configService.get<string>('SCANNER_RADAR_INTERVAL', '20000'), 10),
-        );
+        this.scheduleWatchlistRadar(0);
     }
 
+    private scheduleWatchlistRadar(delayMs: number) {
+        if (this.destroyed) return;
+        if (this.watchlistRadarTimer) {
+            clearTimeout(this.watchlistRadarTimer);
+        }
+        this.watchlistRadarTimer = setTimeout(() => {
+            this.watchlistRadarTimer = null;
+            void this.runWatchlistRadar().finally(() => {
+                const intervalMs = Math.max(
+                    1_000,
+                    Number.parseInt(
+                        this.configService.get<string>('SCANNER_RADAR_INTERVAL', '20000'),
+                        10,
+                    ) || 20_000,
+                );
+                this.scheduleWatchlistRadar(intervalMs);
+            });
+        }, delayMs);
+    }
+
+    private async runWatchlistRadar() {
+        if (this.watchlistRadarRunning || this.destroyed) return;
+
+        this.watchlistRadarRunning = true;
+        this.watchlistRadarRuns += 1;
+        this.watchlistRadarLastStartedAt = new Date();
+        this.watchlistRadarLastError = null;
+        try {
+            const pending = await this.prismaService.watchlist.findMany({
+                where: {
+                    status: 'PENDING',
+                    lastCheckedAt: { lt: new Date(Date.now() - 3 * 60 * 1000) },
+                },
+                orderBy: [{ pairCreatedAt: 'asc' }, { createdAt: 'asc' }],
+                take: 20,
+                select: { tokenMint: true },
+            });
+            this.watchlistRadarLastPendingCount = pending.length;
+
+            for (const item of pending) {
+                if (this.activeMonitoring >= this.MAX_CONCURRENT) break;
+
+                void this.processNewToken(item.tokenMint).catch((error) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    this.logger.error(
+                        '[WatchlistRadar] Failed to process ' + item.tokenMint + ': ' + message,
+                    );
+                });
+                await new Promise((res) => setTimeout(res, 100));
+            }
+
+            const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+            await this.prismaService.watchlist.deleteMany({
+                where: {
+                    createdAt: { lt: dayAgo },
+                    status: { in: ['FAILED', 'PENDING'] },
+                },
+            });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.watchlistRadarLastError = msg;
+            this.logger.error(`Watchlist Monitoring error: ${msg}`);
+        } finally {
+            this.watchlistRadarLastCompletedAt = new Date();
+            this.watchlistRadarRunning = false;
+        }
+    }
     // Map<tokenMint, notifiedAt> — koin nggak bakal di-notif lagi selama 6 jam biarpun masuk monitor lagi
     private readonly notifiedTokens = new Map<string, number>();
 
@@ -585,6 +617,14 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 ...this.executionCounters,
                 pumpPortalConnected: this.pumpPortalConnected,
                 lastPumpPortalEventAt: this.lastPumpPortalEventAt?.toISOString() || null,
+            },
+            watchlistRadar: {
+                running: this.watchlistRadarRunning,
+                runs: this.watchlistRadarRuns,
+                lastStartedAt: this.watchlistRadarLastStartedAt?.toISOString() || null,
+                lastCompletedAt: this.watchlistRadarLastCompletedAt?.toISOString() || null,
+                lastError: this.watchlistRadarLastError,
+                pendingFound: this.watchlistRadarLastPendingCount,
             },
             topRejects: this.getTopAnalysisRejections(),
         };

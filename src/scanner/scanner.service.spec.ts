@@ -145,11 +145,20 @@ describe('scanner health telemetry', () => {
             {} as never,
         );
 
-        expect(scanner.getScannerStatus().discovery).toEqual(
+        const status = scanner.getScannerStatus();
+        expect(status.discovery).toEqual(
             expect.objectContaining({
                 qualifiedCandidates: 0,
                 liveBuyAttempts: 0,
                 liveBuySuccesses: 0,
+            }),
+        );
+        expect(status.watchlistRadar).toEqual(
+            expect.objectContaining({
+                running: false,
+                runs: 0,
+                lastError: null,
+                pendingFound: 0,
             }),
         );
     });
