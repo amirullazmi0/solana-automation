@@ -150,6 +150,12 @@ model Trade {
   netProfitUsd            Float?
   entryPriceUsd           Float?
   entryPriceSol           Float?
+  // Entry price as reported by the SAME feed PriceMonitorService polls (DexScreener), in SOL.
+  // entryPrice is the actual on-chain fill, which on a fast-moving token can sit several percent
+  // away from what DexScreener reports for tens of seconds. Measuring stop-loss/trailing against
+  // the fill while reading the feed produced instant phantom stop-losses. Nullable so pre-existing
+  // trades keep falling back to entryPrice. Accounting/PnL still uses entryPriceSol/entryPriceUsd.
+  monitorEntryPrice       Float?
   exitPriceUsd            Float?
   exitPriceSol            Float?
   exitTriggerPriceUsd     Float?

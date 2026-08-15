@@ -35,6 +35,8 @@ export interface TokenMetadata {
     marketCap: number;
     mcap?: number;
     pairCreatedAt?: number;
+    /** Only pair so far is the pump.fun bonding curve, whose liquidity DexScreener never reports. */
+    awaitingAmmPair?: boolean;
     symbol?: string;
     tokenName?: string;
     volumeSurge?: number;

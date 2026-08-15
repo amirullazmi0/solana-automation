@@ -5,6 +5,7 @@
 import {
     TradeService,
     capBuyPositionUsd,
+    resolveMonitorEntryPriceSol,
     calculateMinimumExecutablePositionUsd,
     calculateRoundtripLossPct,
     evaluateBuySignalGuard,
@@ -1034,5 +1035,40 @@ describe('getSolPrice caching', () => {
         const service = createSolPriceService({ SOL_PRICE_CACHE_MAX_AGE_MS: '60000' });
         service.getSolPriceOrNull = jest.fn().mockResolvedValue(null);
         await expect(service.getSolPrice()).rejects.toThrow('SOL price unavailable');
+    });
+});
+
+describe('resolveMonitorEntryPriceSol', () => {
+    // $fatdog, 2026-08-15: filled on-chain at $0.00007837 while DexScreener still said
+    // $0.00007198. Measuring the 8% stop against the fill tripped it 1.7s after entry on a
+    // position that was actually flat (it sold at $0.00007796, -0.54%).
+    const SOL_USD = 75.39;
+    const FILL_USD = 0.00007837;
+    const FEED_USD = 0.00007198;
+
+    it('uses the feed price so the stop is measured against the feed the monitor reads', () => {
+        const onChainSol = FILL_USD / SOL_USD;
+        const monitorSol = resolveMonitorEntryPriceSol(FEED_USD, SOL_USD, onChainSol);
+
+        expect(monitorSol).toBeCloseTo(FEED_USD / SOL_USD, 12);
+
+        const gapAgainstFill = ((FEED_USD - FILL_USD) / FILL_USD) * 100;
+        const gapAgainstFeed = ((FEED_USD / SOL_USD - monitorSol) / monitorSol) * 100;
+        expect(gapAgainstFill).toBeLessThan(-8); // would have tripped an 8% stop
+        expect(gapAgainstFeed).toBeCloseTo(0, 10); // no longer does
+    });
+
+    it('falls back to the on-chain fill when the feed price is missing or unusable', () => {
+        const onChainSol = FILL_USD / SOL_USD;
+        expect(resolveMonitorEntryPriceSol(undefined, SOL_USD, onChainSol)).toBe(onChainSol);
+        expect(resolveMonitorEntryPriceSol(0, SOL_USD, onChainSol)).toBe(onChainSol);
+        expect(resolveMonitorEntryPriceSol(-1, SOL_USD, onChainSol)).toBe(onChainSol);
+        expect(resolveMonitorEntryPriceSol(Number.NaN, SOL_USD, onChainSol)).toBe(onChainSol);
+    });
+
+    it('falls back to the on-chain fill when the SOL price is unusable', () => {
+        const onChainSol = FILL_USD / SOL_USD;
+        expect(resolveMonitorEntryPriceSol(FEED_USD, 0, onChainSol)).toBe(onChainSol);
+        expect(resolveMonitorEntryPriceSol(FEED_USD, Number.NaN, onChainSol)).toBe(onChainSol);
     });
 });

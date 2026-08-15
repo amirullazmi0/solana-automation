@@ -84,6 +84,31 @@ export function capBuyPositionUsd(
     return Math.max(0, Math.min(requestedUsd, maxPositionUsd, walletCapUsd));
 }
 
+/**
+ * The stop-loss/trailing reference must come from the same feed PriceMonitorService reads.
+ *
+ * A live example: $fatdog filled on-chain at $0.00007837 while DexScreener still reported
+ * $0.00007198 — an 8.16% gap that instantly tripped the 8% stop 1.7 seconds after entry. The
+ * position was actually flat; it sold at $0.00007796, a real loss of 0.54%, and that phantom
+ * loss then counted toward MAX_CONSECUTIVE_LOSSES and locked the risk breaker.
+ *
+ * Falls back to the on-chain fill when the feed price is unusable, which is the pre-existing
+ * behaviour.
+ */
+export function resolveMonitorEntryPriceSol(
+    feedPriceUsd: number | undefined,
+    solPriceUsd: number,
+    onChainEntryPriceSol: number,
+): number {
+    const feedPrice = Number(feedPriceUsd);
+    const solPrice = Number(solPriceUsd);
+    if (!Number.isFinite(feedPrice) || feedPrice <= 0) return onChainEntryPriceSol;
+    if (!Number.isFinite(solPrice) || solPrice <= 0) return onChainEntryPriceSol;
+
+    const feedPriceSol = feedPrice / solPrice;
+    return Number.isFinite(feedPriceSol) && feedPriceSol > 0 ? feedPriceSol : onChainEntryPriceSol;
+}
+
 export function calculateMinimumExecutablePositionUsd(
     configuredMinimumUsd: number,
     estimatedRoundtripFeeSol: number,
@@ -2060,6 +2085,10 @@ export class TradeService implements OnModuleInit {
                         slotNumber: existingOpenTrade.slotNumber,
                         entryPrice: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
                         entryPriceSol: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
+                        // A scale-in moves the averaged entry, so the monitor reference has to
+                        // move with it; leaving the original would measure the enlarged position
+                        // against a price it no longer has.
+                        monitorEntryPrice: mergedScaleIn?.mergedEntryPriceSol ?? entryPriceSol,
                         entryPriceUsd:
                             mergedScaleIn && mergedScaleIn.totalTokenAmount > 0
                                 ? mergedScaleIn.mergedEntryValueUsd / mergedScaleIn.totalTokenAmount
@@ -2154,6 +2183,11 @@ export class TradeService implements OnModuleInit {
                         entryPrice: entryPriceSol,
                         entryPriceSol,
                         entryPriceUsd: entryPrice,
+                        monitorEntryPrice: resolveMonitorEntryPriceSol(
+                            metadata?.priceUsd,
+                            solPrice,
+                            entryPriceSol,
+                        ),
                         highestPrice: entryPriceSol,
                         trailingStopPrice: 0, // PriceMonitor activates it once the position is in profit.
                         status: 'OPEN',

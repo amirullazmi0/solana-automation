@@ -1232,6 +1232,48 @@ describe('PriceMonitorService trailing alert cooldown (trade.id re-keying, verif
         expect(service.lastAlertTime.has(502)).toBe(true);
     });
 
+    it('measures the stop against the feed price at entry, not the on-chain fill', async () => {
+        // $fatdog, 2026-08-15: filled on-chain at a price 8.16% above what DexScreener reported,
+        // which tripped the 8% stop 1.7s after entry on a position that was actually flat.
+        const { service, executeSell } = createTrailingAlertService();
+        const feedEntrySol = 0.00002;
+        const onChainFillSol = feedEntrySol * 1.0816;
+        const trade = makeTrailingTrade({
+            entryPrice: onChainFillSol,
+            monitorEntryPrice: feedEntrySol,
+            highestPrice: feedEntrySol,
+            trailingStopPrice: 0,
+        });
+
+        // Feed still sits exactly at the entry it reported: a flat position, no exit warranted.
+        await service.evaluateTrade(trade, feedEntrySol * CURRENT_SOL_USD, CURRENT_SOL_USD, {
+            ...trailingSignals,
+            priceUsd: feedEntrySol * CURRENT_SOL_USD,
+        });
+
+        expect(executeSell).not.toHaveBeenCalled();
+    });
+
+    it('addresses the trailing alert to the chat that owns the position, not every active chat', async () => {
+        const { service, sendTrailingAlert } = createTrailingAlertService();
+        const trade = makeTrailingTrade({
+            id: 501,
+            telegramChat: { chatId: 'chat-owner' },
+        });
+
+        await service.evaluateTrade(trade, CURRENT_PRICE_USD, CURRENT_SOL_USD, trailingSignals);
+
+        // Without the chat id, ReportingService.sendMessage falls back to broadcasting to every
+        // active chat, so chats holding no position were told about someone else's trailing stop.
+        expect(sendTrailingAlert).toHaveBeenCalledWith(
+            'MINT_SHARED',
+            expect.any(Number),
+            CURRENT_PRICE_USD,
+            'SHARED',
+            'chat-owner',
+        );
+    });
+
     it('still cools down repeat trailing alerts for the same trade.id within the 5-minute window', async () => {
         const { service, sendTrailingAlert } = createTrailingAlertService();
         const trade = makeTrailingTrade({ id: 501 });

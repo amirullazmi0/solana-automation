@@ -1204,6 +1204,10 @@ export class ReportingService implements OnModuleInit {
         newStopPrice: number,
         currentPrice: number,
         symbol?: string,
+        // A trailing stop belongs to exactly one chat's position. Without this the alert fell
+        // through to sendMessage's broadcast default and every active chat was told about a
+        // position it does not hold.
+        targetChatId?: string,
     ) {
         const displaySymbol = symbol || 'UNKNOWN';
         const message =
@@ -1212,7 +1216,7 @@ export class ReportingService implements OnModuleInit {
             `💎 *Token:* ${displaySymbol}\n` +
             `🛑 *New Stop:* \`$${newStopPrice.toFixed(8)}\`\n` +
             `💹 *Price:* \`$${currentPrice.toFixed(8)}\``;
-        await this.sendMessage(message);
+        await this.sendMessage(message, {}, 0, targetChatId);
     }
 
     async sendRiskAdjustmentAlert(params: {

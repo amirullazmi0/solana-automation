@@ -1337,7 +1337,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             const nextZeroLiquidityRetry =
                                 (this.zeroLiquidityRetryCounts.get(tokenMint) ?? 0) + 1;
 
+                            // Only a token still waiting on its AMM pair is worth re-polling.
+                            // One that already has an AMM pair reporting a few dollars is dead,
+                            // and the ladder just burns DexScreener budget on it.
                             if (
+                                !result.metadata?.awaitingAmmPair ||
                                 zeroLiquidityAgeMs > maxActiveRetryAgeMs ||
                                 nextZeroLiquidityRetry >= maxZeroLiquidityRetries
                             ) {

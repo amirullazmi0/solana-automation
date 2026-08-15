@@ -319,6 +319,7 @@ export class AnalyzerService {
                 marketCap: traction.marketCap || 0,
                 mcap: traction.marketCap,
                 pairCreatedAt: traction.pairCreatedAt,
+                awaitingAmmPair: traction.awaitingAmmPair,
                 symbol: traction.symbol,
                 tokenName: traction.tokenName,
                 socials: traction.socials,
@@ -699,6 +700,7 @@ export class AnalyzerService {
         socials?: TokenMetadata['socials'];
         reason?: string;
         permanent?: boolean;
+        awaitingAmmPair?: boolean;
         symbol?: string;
         pairAddress?: string;
         pairCreatedAt?: number;
@@ -793,11 +795,20 @@ export class AnalyzerService {
             // 🛡️ HARD REJECT: Token tanpa liquidity = impossible to sell tanpa massive slippage
             if (!liquidity || liquidity < 1000) {
                 const isYoung = Date.now() - (pair.pairCreatedAt || 0) < 1000 * 60 * 60; // < 1 hour
+                // DexScreener never reports `liquidity` for a pump.fun bonding-curve pair, so a
+                // token whose only pair is still the curve reads as zero even while it trades
+                // heavily; its AMM pair simply is not indexed yet. That is worth waiting for.
+                // A token that already HAS an AMM pair and still shows a few dollars of
+                // liquidity is just dead, and retrying it only burns DexScreener budget.
+                const awaitingAmmPair =
+                    (pair.dexId || '').toLowerCase() === 'pumpfun' &&
+                    !Number.isFinite(pair.liquidity?.usd);
                 logMarketMetricReject('zero_liquidity');
                 return {
                     passed: false,
                     reason: 'zero_liquidity',
                     permanent: !isYoung, // Hanya permanent kalau koin sudah lama tapi likuiditas tetep 0
+                    awaitingAmmPair,
                     liquidity,
                     marketCap,
                     symbol,

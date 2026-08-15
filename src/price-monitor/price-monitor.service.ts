@@ -1077,7 +1077,7 @@ export class PriceMonitorService {
             const refreshedBasis = resolveMonitorSolPriceBasis({
                 currentPriceUsd: refreshedPrice,
                 currentSolUsd,
-                entryPrice: trade.entryPrice,
+                entryPrice: trade.monitorEntryPrice ?? trade.entryPrice,
                 highestPrice: trade.highestPrice,
                 trailingStopPrice: trade.trailingStopPrice,
                 solPriceAtEntry: trade.solPriceAtEntry,
@@ -1221,7 +1221,7 @@ export class PriceMonitorService {
         const priceBasis = resolveMonitorSolPriceBasis({
             currentPriceUsd: currentPrice,
             currentSolUsd,
-            entryPrice: trade.entryPrice,
+            entryPrice: trade.monitorEntryPrice ?? trade.entryPrice,
             highestPrice: trade.highestPrice,
             trailingStopPrice: trade.trailingStopPrice,
             solPriceAtEntry: trade.solPriceAtEntry,
@@ -1709,6 +1709,7 @@ export class PriceMonitorService {
                     newTrailingStop * currentSolUsd,
                     currentPrice,
                     trade.symbol || undefined,
+                    trade.telegramChat?.chatId,
                 );
                 this.lastAlertTime.set(trade.id, now);
             }
