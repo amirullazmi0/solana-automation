@@ -1865,16 +1865,7 @@ export class TradeService implements OnModuleInit {
             `[Slot ${slotToUse}] Attempting to buy ${tokenMint} route=${route ?? 'GLOBAL'} with $${buyAmountUSD.toFixed(2)} (${amountInSol.toFixed(4)} SOL)`,
         );
 
-        let {
-            success,
-            entryPrice,
-            error,
-            txHash,
-            actualSol,
-            actualTokens,
-            totalFeesSol,
-            jitoTipLamports,
-        } = await this.executeJupiterSwap(
+        const buySwapResult = await this.executeJupiterSwap(
             WRAPPED_SOL_MINT,
             tokenMint,
             amountInLamports,
@@ -1889,6 +1880,11 @@ export class TradeService implements OnModuleInit {
             undefined,
             executionBuySignal,
         );
+
+        // txHash and jitoTipLamports are read-only here; the rest are reassigned by the
+        // idempotency recovery below, so they stay `let`.
+        const { txHash, jitoTipLamports } = buySwapResult;
+        let { success, entryPrice, error, actualSol, actualTokens, totalFeesSol } = buySwapResult;
 
         // IDEMPOTENCY RECOVERY (finding: the shared post-broadcast guard orphans BUYs).
         //
@@ -2594,7 +2590,6 @@ export class TradeService implements OnModuleInit {
                 const threshold =
                     Number.isFinite(alertThreshold) && alertThreshold > 0 ? alertThreshold : 3;
                 if (failures >= threshold) {
-                    // eslint-disable-next-line no-console
                     console.error(
                         `[ACTIONABLE][STOP-LOSS] Trade ${tradeId} (${trade.symbol || trade.tokenMint}) ` +
                             `has FAILED to exit ${failures}x consecutively (reason=${exitReason}); position is STILL OPEN. ` +
@@ -4056,6 +4051,26 @@ export class TradeService implements OnModuleInit {
     }
 
     async getSolPrice(): Promise<number> {
+        // Serve a still-fresh cached price without touching Jupiter. PriceMonitorService
+        // evaluates every open position roughly twice a second and each evaluation needs the
+        // SOL price, so calling the API every time burned the shared Jupiter budget on purely
+        // informational reads — to the point where a protective SELL swap was itself getting
+        // 429'd. SOL_PRICE_CACHE_MAX_AGE_MS only ever applied after a failure, so it never
+        // prevented any of those calls.
+        const refreshIntervalMs = Math.max(
+            0,
+            this.getNumberConfig('SOL_PRICE_REFRESH_INTERVAL_MS', 2_000),
+        );
+        const cacheAgeMs =
+            this.lastKnownSolPriceAt === null ? null : Date.now() - this.lastKnownSolPriceAt;
+        if (
+            this.lastKnownSolPriceUsd !== null &&
+            cacheAgeMs !== null &&
+            cacheAgeMs < refreshIntervalMs
+        ) {
+            return this.lastKnownSolPriceUsd;
+        }
+
         const livePrice = await this.getSolPriceOrNull();
         const now = Date.now();
         if (livePrice !== null) {

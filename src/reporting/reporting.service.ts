@@ -20,8 +20,6 @@ import {
     TradeFailureAlertParams,
     WatchlistReasonMapping,
     WatchlistStatusUpdateParams,
-    WatchlistTelegramSeverity,
-    WatchlistTelegramStatus,
 } from '../dto/reporting.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';

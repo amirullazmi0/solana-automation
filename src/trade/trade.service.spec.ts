@@ -1,3 +1,7 @@
+// These suites build test doubles with `Object.create(TradeService.prototype)` and then assign
+// private collaborators onto them, which no public type can describe. `any` is the scaffolding,
+// never the code under test.
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import {
     TradeService,
     capBuyPositionUsd,
@@ -964,5 +968,71 @@ describe('TradeService scale-in resurrection guard (attemptBuy, concurrent-close
         expect(call.data.totalFeesSol).toEqual({ increment: 0.01 });
         expect(service.prismaService.trade.update).not.toHaveBeenCalled();
         expect(service.reportingService.sendTradeFailureAlert).not.toHaveBeenCalled();
+    });
+});
+
+describe('getSolPrice caching', () => {
+    type SolPriceTestService = {
+        logger: { warn: jest.Mock; error: jest.Mock; log: jest.Mock; debug: jest.Mock };
+        configService: { get: jest.Mock };
+        lastKnownSolPriceUsd: number | null;
+        lastKnownSolPriceAt: number | null;
+        getSolPriceOrNull: jest.Mock;
+        getSolPrice: () => Promise<number>;
+    };
+
+    function createSolPriceService(
+        configOverrides: Record<string, string> = {},
+    ): SolPriceTestService {
+        const service = Object.create(
+            TradeService.prototype,
+        ) as unknown as SolPriceTestService;
+        service.logger = { warn: jest.fn(), error: jest.fn(), log: jest.fn(), debug: jest.fn() };
+        service.configService = {
+            get: jest.fn((key: string, fallback?: string) => configOverrides[key] ?? fallback),
+        };
+        service.lastKnownSolPriceUsd = null;
+        service.lastKnownSolPriceAt = null;
+        service.getSolPriceOrNull = jest.fn().mockResolvedValue(200);
+        return service;
+    }
+
+    it('fetches from Jupiter when there is no cached price yet', async () => {
+        const service = createSolPriceService();
+        await expect(service.getSolPrice()).resolves.toBe(200);
+        expect(service.getSolPriceOrNull).toHaveBeenCalledTimes(1);
+    });
+
+    it('serves a still-fresh cached price without calling Jupiter again', async () => {
+        const service = createSolPriceService();
+        await service.getSolPrice();
+        await service.getSolPrice();
+        await service.getSolPrice();
+        // Without this, PriceMonitorService's ~2Hz evaluation loop hits Jupiter every tick and
+        // 429s the shared budget that protective SELL swaps also draw from.
+        expect(service.getSolPriceOrNull).toHaveBeenCalledTimes(1);
+    });
+
+    it('refetches once the refresh interval has elapsed', async () => {
+        const service = createSolPriceService({ SOL_PRICE_REFRESH_INTERVAL_MS: '2000' });
+        await service.getSolPrice();
+        service.lastKnownSolPriceAt = Date.now() - 2_500;
+        await service.getSolPrice();
+        expect(service.getSolPriceOrNull).toHaveBeenCalledTimes(2);
+    });
+
+    it('still falls back to a stale cached price when the API fails', async () => {
+        const service = createSolPriceService({ SOL_PRICE_CACHE_MAX_AGE_MS: '60000' });
+        await service.getSolPrice();
+        service.lastKnownSolPriceAt = Date.now() - 10_000;
+        service.getSolPriceOrNull = jest.fn().mockResolvedValue(null);
+        await expect(service.getSolPrice()).resolves.toBe(200);
+        expect(service.logger.warn).toHaveBeenCalled();
+    });
+
+    it('throws when neither a live nor a fresh-enough cached price exists', async () => {
+        const service = createSolPriceService({ SOL_PRICE_CACHE_MAX_AGE_MS: '60000' });
+        service.getSolPriceOrNull = jest.fn().mockResolvedValue(null);
+        await expect(service.getSolPrice()).rejects.toThrow('SOL price unavailable');
     });
 });
