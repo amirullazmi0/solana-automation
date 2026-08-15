@@ -99,9 +99,22 @@ export interface RugCheckKnownAccount {
     type: string;
 }
 
+export interface RugCheckMarketLp {
+    lpLocked?: number;
+    lpUnlocked?: number;
+    lpLockedPct?: number;
+    lpLockedUSD?: number;
+    lpTotalSupply?: number;
+}
+
 export interface RugCheckMarket {
-    lpType: string;
-    lpStatus: string;
+    pubkey?: string;
+    marketType?: string;
+    lp?: RugCheckMarketLp;
+    // Legacy flat flags. The current RugCheck v1 report does not send these; the lock state
+    // lives in `lp.lpLockedPct`. Kept optional so older/cached payloads still resolve.
+    lpType?: string;
+    lpStatus?: string;
 }
 
 export interface RugCheckRisk {

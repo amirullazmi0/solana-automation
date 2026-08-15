@@ -24,6 +24,7 @@ import {
 export { selectBestDexScreenerPair } from '../common/dex-pair';
 import { selectBestDexScreenerPair } from '../common/dex-pair';
 import { evaluateMintSafety } from '../common/token-mint-safety';
+import { DEFAULT_MIN_LP_LOCKED_PCT, isLpSafe, isMarketLpSafe, maxLpLockedPct } from '../common/lp-safety';
 
 export type BearishReboundConfig = {
     hardFloorPct: number;
@@ -1253,14 +1254,8 @@ export class AnalyzerService {
             meta: {
                 topHoldersPercentage,
                 totalHolders: normalizedHolders.length,
-                lpBurned: markets.some(
-                    (market: RugCheckMarket) =>
-                        market.lpType === 'burned' || market.lpStatus === 'burned',
-                ),
-                lpLocked: markets.some(
-                    (market: RugCheckMarket) =>
-                        market.lpType === 'locked' || market.lpStatus === 'locked',
-                ),
+                lpBurned: markets.some((market: RugCheckMarket) => market.lpType === 'burned'),
+                lpLocked: markets.some((market: RugCheckMarket) => isMarketLpSafe(market)),
             },
             holders: normalizedHolders,
             dangerReasons,
@@ -1414,13 +1409,10 @@ export class AnalyzerService {
 
             // 🔥 LP Safety Check: Accept burned OR locked (PumpFun uses locked mechanism)
             const isPumpFunToken = tokenMint.toLowerCase().endsWith('pump');
-            const lpSafe = markets.some(
-                (m: RugCheckMarket) =>
-                    m.lpType === 'burned' ||
-                    m.lpStatus === 'burned' ||
-                    m.lpType === 'locked' ||
-                    m.lpStatus === 'locked',
+            const minLpLockedPct = Number.parseFloat(
+                String(this.configService.get('MIN_LP_LOCKED_PCT', DEFAULT_MIN_LP_LOCKED_PCT)),
             );
+            const lpSafe = isLpSafe(markets, minLpLockedPct);
             if (markets.length === 0 && !isPumpFunToken) {
                 return {
                     passed: false,
@@ -1433,7 +1425,9 @@ export class AnalyzerService {
             // PumpFun without market data can still be on its bonding curve. Once RugCheck
             // reports a market, every token must prove that LP is burned or locked.
             if (!lpSafe && markets.length > 0) {
-                this.logger.warn(`[${tokenMint}] 🛑 LP NOT BURNED/LOCKED. Skip.`);
+                this.logger.warn(
+                    `[${tokenMint}] 🛑 LP NOT BURNED/LOCKED (maxLockedPct=${maxLpLockedPct(markets).toFixed(1)}%, min=${minLpLockedPct}%). Skip.`,
+                );
                 return {
                     passed: false,
                     reason: 'lp_not_burned',

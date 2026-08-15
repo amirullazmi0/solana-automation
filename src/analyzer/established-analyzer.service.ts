@@ -9,7 +9,6 @@ import {
     DexScreenerPair,
     RugCheckApiHolder,
     RugCheckApiResponse,
-    RugCheckMarket,
     TokenMetadata,
 } from '../dto/analyzer.dto';
 import { TradeService } from '../trade/trade.service';
@@ -21,6 +20,7 @@ import { selectBestDexScreenerPair } from '../common/dex-pair';
 import { CreatorProfileService } from './creator-profile.service';
 import { ReboundResult } from '../dto/established-analyzer.dto';
 import { evaluateMintSafety } from '../common/token-mint-safety';
+import { DEFAULT_MIN_LP_LOCKED_PCT, isLpSafe, maxLpLockedPct } from '../common/lp-safety';
 
 @Injectable()
 export class EstablishedAnalyzerService {
@@ -286,19 +286,18 @@ export class EstablishedAnalyzerService {
             }
 
             const markets = response.data.markets || [];
-            const lpSafe = markets.some(
-                (m: RugCheckMarket) =>
-                    m.lpType === 'burned' ||
-                    m.lpStatus === 'burned' ||
-                    m.lpType === 'locked' ||
-                    m.lpStatus === 'locked',
+            const minLpLockedPct = Number.parseFloat(
+                String(this.configService.get('MIN_LP_LOCKED_PCT', DEFAULT_MIN_LP_LOCKED_PCT)),
             );
+            const lpSafe = isLpSafe(markets, minLpLockedPct);
 
             if (markets.length === 0 && !isPumpFun) {
                 return { passed: false, reason: 'lp_status_unavailable', isCTO };
             }
             if (!lpSafe && markets.length > 0) {
-                this.logger.warn(`[${tokenMint}] 🛑 LP is NOT burned or locked. Reject.`);
+                this.logger.warn(
+                    `[${tokenMint}] 🛑 LP is NOT burned or locked (maxLockedPct=${maxLpLockedPct(markets).toFixed(1)}%, min=${minLpLockedPct}%). Reject.`,
+                );
                 return { passed: false, reason: 'lp_not_burned_or_locked', isCTO };
             }
 
