@@ -1,4 +1,4 @@
-import { parseRuntimeConfigText, validateConfig } from './runtime-config';
+import { loadRuntimeConfig, parseRuntimeConfigText, validateConfig } from './runtime-config';
 
 const validConfig = {
     TOTAL_CAPITAL: 25,
@@ -97,5 +97,34 @@ describe('validateConfig', () => {
         expect(errors.join(' ')).toContain('ZERO_LIQUIDITY_MAX_RECHECKS');
         expect(errors.join(' ')).toContain('NO_DEX_PAIR_MAX_RETRIES');
         expect(errors.join(' ')).toContain('NO_DEX_PAIR_RETRY_BASE_MS');
+    });
+});
+
+describe('zero-liquidity active retry settings', () => {
+    const base = { ...loadRuntimeConfig() };
+
+    it('accepts the shipped configuration', () => {
+        expect(validateConfig(base)).toEqual([]);
+    });
+
+    it('rejects a non-integer or zero retry count', () => {
+        expect(validateConfig({ ...base, ZERO_LIQUIDITY_MAX_RETRIES: 0 })).toContain(
+            'ZERO_LIQUIDITY_MAX_RETRIES must be an integer >= 1.',
+        );
+        expect(validateConfig({ ...base, ZERO_LIQUIDITY_MAX_RETRIES: 2.5 })).toContain(
+            'ZERO_LIQUIDITY_MAX_RETRIES must be an integer >= 1.',
+        );
+    });
+
+    it('rejects a base backoff that would hammer DexScreener', () => {
+        expect(validateConfig({ ...base, ZERO_LIQUIDITY_RETRY_BASE_MS: 100 })).toContain(
+            'ZERO_LIQUIDITY_RETRY_BASE_MS must be an integer >= 500.',
+        );
+    });
+
+    it('rejects a negative active-retry age window', () => {
+        expect(validateConfig({ ...base, ZERO_LIQUIDITY_ACTIVE_RETRY_MAX_AGE_MIN: -1 })).toContain(
+            'ZERO_LIQUIDITY_ACTIVE_RETRY_MAX_AGE_MIN must be >= 0.',
+        );
     });
 });

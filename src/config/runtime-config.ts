@@ -126,6 +126,13 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     const zeroLiquidityMaxRechecks = readNumber(config, 'ZERO_LIQUIDITY_MAX_RECHECKS', 15);
     const noDexPairMaxRetries = readNumber(config, 'NO_DEX_PAIR_MAX_RETRIES', 3);
     const noDexPairRetryBaseMs = readNumber(config, 'NO_DEX_PAIR_RETRY_BASE_MS', 250);
+    const zeroLiquidityMaxRetries = readNumber(config, 'ZERO_LIQUIDITY_MAX_RETRIES', 8);
+    const zeroLiquidityRetryBaseMs = readNumber(config, 'ZERO_LIQUIDITY_RETRY_BASE_MS', 2000);
+    const zeroLiquidityActiveRetryMaxAgeMin = readNumber(
+        config,
+        'ZERO_LIQUIDITY_ACTIVE_RETRY_MAX_AGE_MIN',
+        15,
+    );
 
     if (stopLossPercent <= 0) {
         errors.push('STOP_LOSS_PERCENT must be greater than 0.');
@@ -208,6 +215,15 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     }
     if (!Number.isInteger(noDexPairRetryBaseMs) || noDexPairRetryBaseMs < 100) {
         errors.push('NO_DEX_PAIR_RETRY_BASE_MS must be an integer >= 100.');
+    }
+    if (!Number.isInteger(zeroLiquidityMaxRetries) || zeroLiquidityMaxRetries < 1) {
+        errors.push('ZERO_LIQUIDITY_MAX_RETRIES must be an integer >= 1.');
+    }
+    if (!Number.isInteger(zeroLiquidityRetryBaseMs) || zeroLiquidityRetryBaseMs < 500) {
+        errors.push('ZERO_LIQUIDITY_RETRY_BASE_MS must be an integer >= 500.');
+    }
+    if (zeroLiquidityActiveRetryMaxAgeMin < 0) {
+        errors.push('ZERO_LIQUIDITY_ACTIVE_RETRY_MAX_AGE_MIN must be >= 0.');
     }
 
     const spendableCapital = totalCapital - reserveAmount;

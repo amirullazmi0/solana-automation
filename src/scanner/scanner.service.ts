@@ -87,6 +87,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     private readonly MAX_CONCURRENT: number;
     private readonly processingTokens = new Set<string>();
     private readonly noDexPairRetryCounts = new Map<string, number>();
+    private readonly zeroLiquidityRetryCounts = new Map<string, number>();
     private readonly watchlistStatusUpdateCache = new Map<
         string,
         { reason: string; permanent: boolean; notifiedAt: number }
@@ -1299,8 +1300,72 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                                     reason: 'zero_liquidity',
                                 });
                                 this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000);
+                                return;
                             }
-                            return;
+
+                            // DexScreener reports no `liquidity` at all for pump.fun bonding-curve
+                            // pairs, and it indexes a freshly migrated token's AMM pair 30-120s
+                            // after the migration event. Handing the token straight back to the
+                            // radar here blinded us for its ~3 minute revisit window — exactly the
+                            // window a migration candidate is worth entering. Retry in place while
+                            // the token is still young, the same way `no_dex_pair` already does.
+                            const zeroLiquidityAgeMs = result.metadata?.pairCreatedAt
+                                ? Date.now() - result.metadata.pairCreatedAt
+                                : 0;
+                            const maxActiveRetryAgeMs =
+                                Math.max(
+                                    0,
+                                    Number.parseFloat(
+                                        this.configService.get<string>(
+                                            'ZERO_LIQUIDITY_ACTIVE_RETRY_MAX_AGE_MIN',
+                                            '15',
+                                        ),
+                                    ),
+                                ) *
+                                60 *
+                                1000;
+                            const maxZeroLiquidityRetries = Math.max(
+                                1,
+                                Number.parseInt(
+                                    this.configService.get<string>(
+                                        'ZERO_LIQUIDITY_MAX_RETRIES',
+                                        '8',
+                                    ),
+                                    10,
+                                ),
+                            );
+                            const nextZeroLiquidityRetry =
+                                (this.zeroLiquidityRetryCounts.get(tokenMint) ?? 0) + 1;
+
+                            if (
+                                zeroLiquidityAgeMs > maxActiveRetryAgeMs ||
+                                nextZeroLiquidityRetry >= maxZeroLiquidityRetries
+                            ) {
+                                return;
+                            }
+
+                            this.zeroLiquidityRetryCounts.set(tokenMint, nextZeroLiquidityRetry);
+                            const zeroLiquidityBackoffMs = Math.min(
+                                Math.max(
+                                    500,
+                                    Number.parseInt(
+                                        this.configService.get<string>(
+                                            'ZERO_LIQUIDITY_RETRY_BASE_MS',
+                                            '2000',
+                                        ),
+                                        10,
+                                    ),
+                                ) *
+                                    2 ** (nextZeroLiquidityRetry - 1),
+                                20_000,
+                            );
+                            this.logger.debug(
+                                `[${tokenMint}] ⏳ zero_liquidity retry ${nextZeroLiquidityRetry}/${maxZeroLiquidityRetries} (age=${(zeroLiquidityAgeMs / 1000).toFixed(0)}s, likely awaiting AMM pair indexing). Backing off ${zeroLiquidityBackoffMs}ms.`,
+                            );
+                            await new Promise((res) =>
+                                setTimeout(res, zeroLiquidityBackoffMs),
+                            );
+                            continue;
                         }
                         if (result.reason === 'no_dex_pair') {
                             const maxNoDexPairRetries = Math.max(
@@ -1413,6 +1478,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             }
             this.processingTokens.delete(tokenMint);
             this.noDexPairRetryCounts.delete(tokenMint);
+            this.zeroLiquidityRetryCounts.delete(tokenMint);
             this.watchlistStatusUpdateCache.delete(tokenMint);
         }
     }
