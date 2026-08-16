@@ -25,6 +25,14 @@ export { selectBestDexScreenerPair } from '../common/dex-pair';
 import { selectBestDexScreenerPair } from '../common/dex-pair';
 import { evaluateMintSafety } from '../common/token-mint-safety';
 import { DEFAULT_MIN_LP_LOCKED_PCT, isLpSafe, isMarketLpSafe, maxLpLockedPct } from '../common/lp-safety';
+import {
+    DEFAULT_HOLDER_DATA_SETTLE_MINUTES,
+    DEFAULT_MAX_NORMALISED_RISK_SCORE,
+    exceedsRiskScore,
+    isHolderDataSettled,
+    resolveNormalisedRiskScore,
+    selectBlockingDangerRisks,
+} from '../common/rugcheck-risk';
 
 export type BearishReboundConfig = {
     hardFloorPct: number;
@@ -391,7 +399,11 @@ export class AnalyzerService {
             }
 
             // 3. RUGCHECK (Advanced Safety Index & LP Burn)
-            const rugResult = await this.checkRugCheckAPI(tokenMint, traction.liquidity || 0);
+            const rugResult = await this.checkRugCheckAPI(
+                tokenMint,
+                traction.liquidity || 0,
+                traction.pairCreatedAt ? Date.now() - traction.pairCreatedAt : undefined,
+            );
             if (!rugResult.passed) {
                 this.logger.warn(`[${tokenMint}] 🛑 RugCheck FAILED: ${rugResult.reason}. Skip.`);
                 return {
@@ -1224,7 +1236,18 @@ export class AnalyzerService {
                 );
                 return false;
             }
-            if (rugCheckData.score > 1000 || (rugCheckData.dangerReasons?.length || 0) > 0) {
+            const maxNormalisedScore = Number.parseFloat(
+                String(
+                    this.configService.get(
+                        'RUGCHECK_MAX_NORMALISED_SCORE',
+                        DEFAULT_MAX_NORMALISED_RISK_SCORE,
+                    ),
+                ),
+            );
+            if (
+                exceedsRiskScore(rugCheckData.scoreNormalised, maxNormalisedScore) ||
+                (rugCheckData.dangerReasons?.length || 0) > 0
+            ) {
                 return false;
             }
             return true;
@@ -1255,13 +1278,14 @@ export class AnalyzerService {
             .filter((holder: RugCheckHolder) => !holder.isInPool && !holder.isBurned)
             .slice(0, 10)
             .reduce((sum: number, holder: RugCheckHolder) => sum + holder.share, 0);
-        const dangerReasons = risks
-            .filter((risk: RugCheckRisk) => risk.level === 'danger')
-            .map((risk: RugCheckRisk) => risk.name);
+        const dangerReasons = selectBlockingDangerRisks(risks).map(
+            (risk: RugCheckRisk) => risk.name,
+        );
 
         return {
             mint: data.mint || '',
             score: data.score || 0,
+            scoreNormalised: resolveNormalisedRiskScore(data.score_normalised),
             meta: {
                 topHoldersPercentage,
                 totalHolders: normalizedHolders.length,
@@ -1273,7 +1297,11 @@ export class AnalyzerService {
         };
     }
 
-    private async checkRugCheckAPI(tokenMint: string, liquidityUsd = 0): Promise<{
+    private async checkRugCheckAPI(
+        tokenMint: string,
+        liquidityUsd = 0,
+        tokenAgeMs?: number,
+    ): Promise<{
         passed: boolean;
         creator?: string;
         topHolder?: string;
@@ -1320,17 +1348,39 @@ export class AnalyzerService {
                 markets,
                 risks,
             );
+            const holderMaxNormalisedScore = Number.parseFloat(
+                String(
+                    this.configService.get(
+                        'RUGCHECK_MAX_NORMALISED_SCORE',
+                        DEFAULT_MAX_NORMALISED_RISK_SCORE,
+                    ),
+                ),
+            );
+            const holderDataSettled = isHolderDataSettled(
+                tokenAgeMs,
+                Number.parseFloat(
+                    String(
+                        this.configService.get(
+                            'HOLDER_DATA_SETTLE_MINUTES',
+                            DEFAULT_HOLDER_DATA_SETTLE_MINUTES,
+                        ),
+                    ),
+                ),
+            );
             if (!this.checkHolderConcentration(rugCheckData, liquidityUsd)) {
                 return {
                     passed: false,
                     reason:
-                        rugCheckData.score > 1000
+                        exceedsRiskScore(rugCheckData.scoreNormalised, holderMaxNormalisedScore)
                             ? 'high_risk_score'
                             : rugCheckData.dangerReasons?.length
                               ? 'danger_risks_detected'
                               : 'high_concentration',
                     safetyIndex: 1 - rugCheckData.meta.topHoldersPercentage / 100,
-                    permanent: true,
+                    // RugCheck's holder table needs minutes to settle after a migration: the same
+                    // token read single=79.33% seconds in and 0.05% once the pool was labelled.
+                    // Rejecting on the early snapshot is fine; blacklisting on it is not.
+                    permanent: holderDataSettled,
                     isCTO: false,
                 };
             }
@@ -1449,9 +1499,19 @@ export class AnalyzerService {
             }
 
             const score = response.data.score || 0;
-            if (score > 1000) {
-                // Lebih ketat (1000) untuk meminimalkan kerugian
-                this.logger.warn(`[${tokenMint}] 🛑 High Risk Score: ${score}. Skip.`);
+            const scoreNormalised = resolveNormalisedRiskScore(response.data.score_normalised);
+            const maxNormalisedRiskScore = Number.parseFloat(
+                String(
+                    this.configService.get(
+                        'RUGCHECK_MAX_NORMALISED_SCORE',
+                        DEFAULT_MAX_NORMALISED_RISK_SCORE,
+                    ),
+                ),
+            );
+            if (exceedsRiskScore(scoreNormalised, maxNormalisedRiskScore)) {
+                this.logger.warn(
+                    `[${tokenMint}] 🛑 High Risk Score: normalised=${scoreNormalised}/${maxNormalisedRiskScore} (raw=${score}). Skip.`,
+                );
                 return {
                     passed: false,
                     reason: 'high_risk_score',
@@ -1480,7 +1540,9 @@ export class AnalyzerService {
                 };
             }
 
-            const highRisks = risks.filter((risk) => risk.level === 'danger');
+            // Liquidity is enforced by MIN_LIQUIDITY_USD, stricter and fresher than RugCheck's
+            // label, so it must not also act as a permanent RugCheck blacklist.
+            const highRisks = selectBlockingDangerRisks(risks);
             if (highRisks.length > 0) {
                 this.logger.warn(
                     `[${tokenMint}] 🛑 Danger risk detected (${highRisks.map((r) => r.name).join(', ')}). Skip.`,

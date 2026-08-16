@@ -87,6 +87,8 @@ export interface RugCheckResponse {
     };
     holders: RugCheckHolder[];
     dangerReasons?: string[];
+    /** RugCheck's bounded 0-100 rating. `score` is an unbounded raw sum and must not be thresholded. */
+    scoreNormalised?: number;
 }
 
 export interface RugCheckApiHolder {
@@ -127,6 +129,7 @@ export interface RugCheckRisk {
 export interface RugCheckApiResponse {
     mint?: string;
     score?: number;
+    score_normalised?: number;
     creator?: string;
     topHolders?: RugCheckApiHolder[];
     knownAccounts?: Record<string, RugCheckKnownAccount | undefined>;

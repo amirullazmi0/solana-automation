@@ -21,6 +21,12 @@ import { CreatorProfileService } from './creator-profile.service';
 import { ReboundResult } from '../dto/established-analyzer.dto';
 import { evaluateMintSafety } from '../common/token-mint-safety';
 import { DEFAULT_MIN_LP_LOCKED_PCT, isLpSafe, maxLpLockedPct } from '../common/lp-safety';
+import {
+    DEFAULT_MAX_NORMALISED_RISK_SCORE,
+    exceedsRiskScore,
+    resolveNormalisedRiskScore,
+    selectBlockingDangerRisks,
+} from '../common/rugcheck-risk';
 
 @Injectable()
 export class EstablishedAnalyzerService {
@@ -302,9 +308,18 @@ export class EstablishedAnalyzerService {
             }
 
             const score = response.data.score || 0;
-            if (score > 1000) {
+            const scoreNormalised = resolveNormalisedRiskScore(response.data.score_normalised);
+            const maxNormalisedRiskScore = Number.parseFloat(
+                String(
+                    this.configService.get(
+                        'RUGCHECK_MAX_NORMALISED_SCORE',
+                        DEFAULT_MAX_NORMALISED_RISK_SCORE,
+                    ),
+                ),
+            );
+            if (exceedsRiskScore(scoreNormalised, maxNormalisedRiskScore)) {
                 this.logger.warn(
-                    `[${tokenMint}] 🛑 Established High Risk Score: ${score}. Reject.`,
+                    `[${tokenMint}] 🛑 Established High Risk Score: normalised=${scoreNormalised}/${maxNormalisedRiskScore} (raw=${score}). Reject.`,
                 );
                 return { passed: false, reason: 'established_high_risk_score', isCTO };
             }
@@ -324,7 +339,8 @@ export class EstablishedAnalyzerService {
                 return { passed: false, reason: 'established_honeypot_detected', isCTO };
             }
 
-            const highRisks = risks.filter((risk) => risk.level === 'danger');
+            // Same carve-out as the standard analyzer: liquidity is our own gate, not a blacklist.
+            const highRisks = selectBlockingDangerRisks(risks);
             if (highRisks.length > 0) {
                 this.logger.warn(
                     `[${tokenMint}] 🛑 Established Danger risk detected (${highRisks.map((r) => r.name).join(', ')}). Reject.`,
