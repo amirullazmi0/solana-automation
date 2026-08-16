@@ -12,6 +12,7 @@ import {
     AIThresholdSnapshot,
     OpenAIChatCompletionResponse,
 } from '../dto/ai.dto';
+import { AiExitAdvice, AiExitAdviceMetrics, normalizeExitAdvice } from './exit-advice';
 
 interface CacheEntry {
     result: AIAnalysisResult;
@@ -168,6 +169,83 @@ export class AIService {
                 `[AI Brain] Trailing distance recommendation failed, using default config: ${message}`,
             );
             return this.getTrailingDistanceConfig();
+        }
+    }
+
+    /**
+     * Produces advisory exit guidance for an open position. Callers must invoke this OFF the
+     * execution path and read the cached answer when a trailing update or sell actually fires —
+     * see the design note in `exit-advice.ts` for why an awaited LLM call inside the stop-loss
+     * path cost -$4.03 across four production trades.
+     */
+    async evaluateExitAdvice(
+        tokenMint: string,
+        symbol: string,
+        metrics: AiExitAdviceMetrics,
+    ): Promise<AiExitAdvice | null> {
+        const apiKey = this.configService.get<string>('OPENAI_API_KEY');
+        if (!apiKey) return null;
+
+        const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
+        const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
+
+        const systemPrompt = `You advise the exit side of an already-open Solana memecoin position.
+You cannot open, add to, or hold a position past its stop. Your advice can only make the exit
+EARLIER or TIGHTER — never later or looser. If you are unsure, answer HOLD.
+
+Return JSON with exactly these fields:
+{
+  "bias": "HOLD" | "TIGHTEN" | "EXIT_NOW",
+  "trailingDistancePercent": <number between 0.5 and 50, the trail you would use now>,
+  "confidenceLevel": "high" | "medium" | "low",
+  "reasoning": "<brief indonesian explanation, max 2 sentences>"
+}
+
+Guidance:
+- EXIT_NOW is for deterioration the price alone has not shown yet: sell pressure overwhelming
+  buys, liquidity draining versus entry, or volume collapsing while price holds up.
+- TIGHTEN is for a position that is still fine but getting choppier.
+- Thin liquidity is the dominant risk. Positions entered under $12500 liquidity have historically
+  filled far below their trigger price, so prefer an earlier exit when liquidity is low or falling.
+- Answer "high" confidence only when the evidence is unambiguous.`;
+
+        try {
+            const response = await axios.post<OpenAIChatCompletionResponse>(
+                `${baseUrl}/chat/completions`,
+                {
+                    model,
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: JSON.stringify({ tokenMint, symbol, ...metrics }) },
+                    ],
+                    response_format: { type: 'json_object' },
+                    temperature: 0.1,
+                },
+                {
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json',
+                    },
+                    timeout: 8000,
+                },
+            );
+
+            const content = response.data.choices?.[0]?.message?.content;
+            if (!content) return null;
+
+            const advice = normalizeExitAdvice(
+                JSON.parse(content) as Partial<AiExitAdvice>,
+                Date.now(),
+            );
+            this.logger.log(
+                `[AI Exit] ${symbol || tokenMint} bias=${advice.bias} trail=${advice.trailingDistancePercent ?? 'n/a'} confidence=${advice.confidenceLevel} reason=${advice.reasoning}`,
+            );
+            return advice;
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            // Advisory only: a failure must leave the deterministic exit logic exactly as it was.
+            this.logger.warn(`[AI Exit] Advice failed for ${tokenMint}: ${msg}.`);
+            return null;
         }
     }
 

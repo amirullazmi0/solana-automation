@@ -13,6 +13,15 @@ import { AIService } from '../ai/ai.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 import { DexScreenerPair } from '../dto/analyzer.dto';
 import { AICutlossDefenseMetrics, AIHealthCheckMetrics, AIHealthCheckResult } from '../dto/ai.dto';
+import {
+    AiExitAdvice,
+    AiExitAdviceMetrics,
+    DEFAULT_EXIT_ADVICE_MAX_AGE_MS,
+    DEFAULT_EXIT_ADVICE_REFRESH_MS,
+    resolveAdvisedTrailingDistance,
+    shouldExitEarly,
+    shouldRefreshAdvice,
+} from '../ai/exit-advice';
 
 interface TradeFreshMarketSignals {
     priceUsd: number;
@@ -185,6 +194,10 @@ export class PriceMonitorService {
     private readonly dynamicHoldZoneMaxMs: number;
     private readonly stopLossGuardDepthFloorPercent: number;
     private readonly enableAiCutlossDefense: boolean;
+    private readonly enableAiExitAdvisor: boolean;
+    private readonly aiExitAdvisorRefreshMs: number;
+    private readonly aiExitAdvisorMaxAgeMs: number;
+    private readonly aiExitAdvisorMinConfidence: 'high' | 'medium' | 'low';
     private readonly devDumpThresholdRatio: number;
     private readonly aiCutlossMaxExtensionPercent: number;
     private readonly aiCutlossHardFloorPercent: number;
@@ -262,6 +275,19 @@ export class PriceMonitorService {
             this.getNumberConfig('STOP_LOSS_GUARD_DEPTH_FLOOR_PERCENT', 30),
         );
         this.enableAiCutlossDefense = this.getBooleanConfig('ENABLE_AI_CUTLOSS_DEFENSE', false);
+        this.enableAiExitAdvisor = this.getBooleanConfig('ENABLE_AI_EXIT_ADVISOR', false);
+        this.aiExitAdvisorRefreshMs = Math.max(
+            2000,
+            this.getNumberConfig('AI_EXIT_ADVISOR_REFRESH_MS', DEFAULT_EXIT_ADVICE_REFRESH_MS),
+        );
+        this.aiExitAdvisorMaxAgeMs = Math.max(
+            this.aiExitAdvisorRefreshMs,
+            this.getNumberConfig('AI_EXIT_ADVISOR_MAX_AGE_MS', DEFAULT_EXIT_ADVICE_MAX_AGE_MS),
+        );
+        this.aiExitAdvisorMinConfidence = this.getConfidenceConfig(
+            'AI_EXIT_ADVISOR_MIN_CONFIDENCE',
+            'high',
+        );
         this.devDumpThresholdRatio = Math.min(
             1,
             Math.max(0, this.getNumberConfig('DEV_DUMP_THRESHOLD_PERCENT', 20) / 100),
@@ -304,6 +330,43 @@ export class PriceMonitorService {
     ): 'high' | 'medium' | 'low' {
         const raw = String(this.configService.get<string>(key, fallback)).trim().toLowerCase();
         return raw === 'high' || raw === 'medium' || raw === 'low' ? raw : fallback;
+    }
+
+    /**
+     * Latest advisory exit opinion per trade. Written by a background refresh, read synchronously
+     * by the trailing and stop-loss paths so consulting it never costs a network round trip.
+     */
+    private readonly exitAdviceCache = new Map<number, AiExitAdvice>();
+    private readonly exitAdviceInFlight = new Set<number>();
+
+    /**
+     * Fire-and-forget: kicks off a refresh when the cached opinion has aged out and returns
+     * immediately. Never awaited from a decision path — that is the entire point.
+     */
+    private scheduleExitAdviceRefresh(
+        trade: TradeWithTelegramChat,
+        metrics: AiExitAdviceMetrics,
+    ): void {
+        if (!this.enableAiExitAdvisor) return;
+        if (this.exitAdviceInFlight.has(trade.id)) return;
+        const cached = this.exitAdviceCache.get(trade.id);
+        if (!shouldRefreshAdvice(cached, this.aiExitAdvisorRefreshMs)) return;
+
+        this.exitAdviceInFlight.add(trade.id);
+        void this.aiService
+            .evaluateExitAdvice(trade.tokenMint, trade.symbol || trade.tokenMint, metrics)
+            .then((advice) => {
+                if (advice) this.exitAdviceCache.set(trade.id, advice);
+            })
+            .catch(() => undefined)
+            .finally(() => {
+                this.exitAdviceInFlight.delete(trade.id);
+            });
+    }
+
+    private getExitAdvice(tradeId: number): AiExitAdvice | undefined {
+        if (!this.enableAiExitAdvisor) return undefined;
+        return this.exitAdviceCache.get(tradeId);
     }
 
     private confidenceRank(value: 'high' | 'medium' | 'low'): number {
@@ -415,7 +478,8 @@ export class PriceMonitorService {
             this.lastRiskAdjustmentAlertTime.size > 0 ||
             this.deepStopLossBreaches.size > 0 ||
             this.liquidityDropBreaches.size > 0 ||
-            this.whaleDumpBreaches.size > 0
+            this.whaleDumpBreaches.size > 0 ||
+            this.exitAdviceCache.size > 0
         ) {
             const openTradeIds = new Set(openTrades.map((t) => t.id));
             for (const id of this.priceMissCounts.keys()) {
@@ -444,6 +508,9 @@ export class PriceMonitorService {
             }
             for (const id of this.whaleDumpBreaches.keys()) {
                 if (!openTradeIds.has(id)) this.whaleDumpBreaches.delete(id);
+            }
+            for (const id of this.exitAdviceCache.keys()) {
+                if (!openTradeIds.has(id)) this.exitAdviceCache.delete(id);
             }
         }
 
@@ -1264,9 +1331,43 @@ export class PriceMonitorService {
             liquidityAvailable: freshMarketSignals?.liquidityAvailable ?? false,
         };
         const noisePressure = this.calculateNoisePressure(normalizedFreshMarketSignals);
-        const aiRecommendedTrailingDistance = this.aiService.getRecommendedTrailingDistance(
+        const heuristicTrailingDistance = this.aiService.getRecommendedTrailingDistance(
             normalizedFreshMarketSignals.volScore,
             normalizedFreshMarketSignals.priceChange1h,
+        );
+        // Kick off the next advisory refresh and read whatever the previous one left behind. The
+        // read is synchronous and the refresh is fire-and-forget, so an open position is always
+        // being reasoned about without any tick ever waiting on the model.
+        this.scheduleExitAdviceRefresh(trade, {
+            profitPercent,
+            stopLossPercent: this.getRouteNumberConfig(
+                trade.route,
+                'MICIN_STOP_LOSS_PERCENT',
+                'WHALE_STOP_LOSS_PERCENT',
+                'STOP_LOSS_PERCENT',
+                8,
+            ),
+            trailingDistancePercent: heuristicTrailingDistance,
+            trailingArmed: Boolean(trade.trailingStopPrice),
+            ageMinutes: Math.max(0, (Date.now() - new Date(trade.createdAt).getTime()) / 60000),
+            liquidityUsd: normalizedFreshMarketSignals.liquidityUsd,
+            entryLiquidityUsd: trade.entryLiquidity ?? 0,
+            volume5mUsd: normalizedFreshMarketSignals.volume5mUsd,
+            buys5mCount: normalizedFreshMarketSignals.buys5mCount,
+            sells5mCount: normalizedFreshMarketSignals.sells5mCount,
+            priceChange5mPct: 0, // Not carried on the monitor signal shape; 1h plus flow is enough here.
+            priceChange1hPct: normalizedFreshMarketSignals.priceChange1h,
+            volScore: normalizedFreshMarketSignals.volScore,
+            route: trade.route ?? 'MICIN_ROUTE',
+        });
+        // One-directional by construction: this can only return a value <= the heuristic one.
+        const aiRecommendedTrailingDistance = resolveAdvisedTrailingDistance(
+            heuristicTrailingDistance,
+            this.getExitAdvice(trade.id),
+            {
+                maxAgeMs: this.aiExitAdvisorMaxAgeMs,
+                minConfidence: this.aiExitAdvisorMinConfidence,
+            },
         );
         const baseTrailingDistancePercent =
             trade.targetTrailingDistance ??
@@ -1577,6 +1678,24 @@ export class PriceMonitorService {
         // Not (or no longer) in the dynamic hold zone — release any tracked entry timestamp.
         if (this.dynamicHoldZoneEnteredAt.has(trade.id)) {
             this.dynamicHoldZoneEnteredAt.delete(trade.id);
+        }
+
+        // Advisory early exit, read from cache — never awaited here. This is the only direction
+        // the advisor is allowed to move a position: out sooner. There is deliberately no branch
+        // that lets it hold past a trigger, because the awaited-LLM version of that idea
+        // (AI_STOP_LOSS_CONFIRMED) went 0 for 4 at -$4.03 gross in production.
+        if (shouldExitEarly(this.getExitAdvice(trade.id), {
+            maxAgeMs: this.aiExitAdvisorMaxAgeMs,
+            minConfidence: this.aiExitAdvisorMinConfidence,
+        })) {
+            const advice = this.getExitAdvice(trade.id);
+            this.logger.warn(
+                `[Slot ${trade.slotNumber}] AI advisor EXIT_NOW. tradeId=${trade.id} pnl=${profitPercent.toFixed(2)}% confidence=${advice?.confidenceLevel} reason=${advice?.reasoning}`,
+            );
+            this.dynamicHoldZoneEnteredAt.delete(trade.id);
+            this.exitAdviceCache.delete(trade.id);
+            await this.tradeService.executeSell(trade.id, currentPrice, 'AI_EXIT_ADVISOR');
+            return;
         }
 
         // Route-aware stop loss remains the hard floor after the dynamic hold zone is exhausted.

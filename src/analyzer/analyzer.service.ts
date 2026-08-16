@@ -523,6 +523,26 @@ export class AnalyzerService {
                     metadata: finalMetadata,
                 };
             }
+            // Across the 15 closed LIVE trades that carry netProfitUsd, the losers were bought
+            // roughly twice as extended as the winners (avg 1h +58.1% vs +28.5%). Only the 5m
+            // window was guarded, so a token that had already doubled over the hour could still
+            // pass on a calm five minutes. This caps the hourly extension as well.
+            const micinMaxPriceChange1h = Number.parseFloat(
+                this.configService.get<string>('MICIN_MAX_PRICE_CHANGE_1H', '0'),
+            );
+            if (
+                route === 'MICIN_ROUTE' &&
+                Number.isFinite(micinMaxPriceChange1h) &&
+                micinMaxPriceChange1h > 0 &&
+                (traction.priceChange1h || 0) > micinMaxPriceChange1h
+            ) {
+                return {
+                    safe: false,
+                    reason: 'micin_overextended_1h',
+                    permanent: false,
+                    metadata: finalMetadata,
+                };
+            }
             if (route === 'MICIN_ROUTE' && whaleSignal.score < micinSignalFloor) {
                 return {
                     safe: false,
