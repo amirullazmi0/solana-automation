@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import { loadRuntimeConfig, parseRuntimeConfigText, validateConfig } from './runtime-config';
 
 const validConfig = {
@@ -149,5 +151,18 @@ describe('h1 flow gate validation', () => {
         expect(validateConfig({ ...validConfig, HELIUS_FLOW_MAX_PAGES: 0 })).toContain(
             'HELIUS_FLOW_MAX_PAGES must be an integer >= 1.',
         );
+    });
+});
+
+describe('documentation drift', () => {
+    // Before this test existed the README went two months and 15 code commits without an update,
+    // ending up with only 16% of knobs documented. A new knob with no docs now fails the build.
+    const readme = readFileSync(resolve(__dirname, '../../README.md'), 'utf8');
+
+    it('documents every config knob in README.md', () => {
+        const undocumented = Object.keys(loadRuntimeConfig()).filter(
+            (key) => !readme.includes(key),
+        );
+        expect(undocumented).toEqual([]);
     });
 });
