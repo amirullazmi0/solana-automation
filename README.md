@@ -342,14 +342,21 @@ Tersimpan di `Trade.exitReason`, muncul di alert jual.
 **Set darurat** melewati guard tahan-minimum sebelum exit (`price-monitor.service.ts:876-885`):
 `PANIC_SELL`, `DEV_DUMP`, `RUGPULL`, `LIQUIDITY_RUGPULL`, `WHALE_DUMP`, `AI_HEALTH_CRITICAL`.
 
-**Set slippage darurat** memaksa 1500 bps (`trade.service.ts:2508-2520`): `STOP_LOSS`,
-`STOP_LOSS_ZONE_TIMEOUT`, `TRAILING_STOP`, `DEV_DUMP`, `RUGPULL`, `PANIC_SELL`,
-`AI_HEALTH_CRITICAL`.
+**Set slippage darurat** memaksa 1500 bps dan priority fee tinggi, ditentukan oleh
+`isUrgentExitReason()` di `trade.service.ts`: `STOP_LOSS`, `STOP_LOSS_ZONE_TIMEOUT`,
+`TRAILING_STOP`, `DEV_DUMP`, `RUGPULL`, `LIQUIDITY_RUGPULL`, `WHALE_DUMP`, `PANIC_SELL`,
+`AI_HEALTH_CRITICAL`, `AI_STOP_LOSS_CONFIRMED`.
 
-Kedua set itu **tidak sama**. `WHALE_DUMP`, `LIQUIDITY_RUGPULL`, `AI_STOP_LOSS_CONFIRMED`, dan
-`AI_EXIT_ADVISOR` tergolong darurat tapi **tidak** mendapat slippage darurat — artinya exit yang
-paling mendesak justru bisa gagal terisi karena slippage biasa. Asimetri ini kemungkinan tidak
-disengaja dan pantas ditinjau.
+Set kedua sengaja **lebih luas** dari set pertama. `LIQUIDITY_RUGPULL` dan `WHALE_DUMP` dulu
+tergolong darurat bagi price monitor tapi dijual dengan slippage biasa — padahal justru di situ
+gagal terisi paling mahal, karena pool sedang dikuras. `AI_STOP_LOSS_CONFIRMED` juga masuk, karena
+itu memang stop loss.
+
+`AI_EXIT_ADVISOR` **tidak** masuk, dan itu disengaja: dia exit diskresioner yang bisa menyala saat
+posisi nyaris tidak bergerak, jadi memberinya slippage 15% berarti membiarkan saran berubah menjadi
+kerugian besar. Exit sukarela (`TAKE_PROFIT`, `PARTIAL_TAKE_PROFIT`, `MANUAL_SELL`) dikecualikan
+dengan alasan yang sama — tidak ada yang sedang ambruk, jadi tidak ada alasan membayar mahal untuk
+keluar.
 
 **Pemicu blacklist creator otomatis**: `DEV_DUMP`, `RUGPULL`, `LIQUIDITY_RUGPULL`
 (`trade.service.ts:2966-2999`).
@@ -707,17 +714,6 @@ mengembalikan `{}` dan setiap knob jatuh ke default hardcoded di kode — yang n
 
 Tidak ada peringatan di log. Bot akan tampak jalan normal sambil memakai strategi yang sama sekali
 lain. **Selalu jalankan dari root repo.**
-
-### Ada dokumen kedua yang lebih basi lagi
-
-`docs/hybrid-pipeline-config-guide.md` (729 baris) menyalin **seluruh snapshot `config.json`** dari
-generasi berbeda di baris 107–200. Puluhan nilainya salah, sebagian jauh: `TOTAL_CAPITAL 25`
-(kini 16), `MIN_VL_RATIO 0.06` (kini 0.003, 20x), `COOLDOWN_WIN_HOURS 6` (kini 0.15, 40x),
-`MICIN_MAX_PRICE_IMPACT_PCT 3` (kini 18), dan `MICIN_/WHALE_MAX_CONSECUTIVE_LOSSES` yang
-**tertukar**. Contoh perhitungannya ikut salah.
-
-Snapshot konfigurasi yang basi lebih berbahaya daripada tidak ada dokumentasi. Jangan pakai berkas
-itu sebagai acuan nilai; `config.json` satu-satunya sumber kebenaran.
 
 ### Cakupan test tidak merata
 

@@ -5,6 +5,7 @@
 import {
     TradeService,
     capBuyPositionUsd,
+    isUrgentExitReason,
     resolveMonitorEntryPriceSol,
     calculateMinimumExecutablePositionUsd,
     calculateRoundtripLossPct,
@@ -1070,5 +1071,43 @@ describe('resolveMonitorEntryPriceSol', () => {
         const onChainSol = FILL_USD / SOL_USD;
         expect(resolveMonitorEntryPriceSol(FEED_USD, 0, onChainSol)).toBe(onChainSol);
         expect(resolveMonitorEntryPriceSol(FEED_USD, Number.NaN, onChainSol)).toBe(onChainSol);
+    });
+});
+
+describe('isUrgentExitReason', () => {
+    // These three were emergencies to the price monitor but ordinary sells to the swap layer, so
+    // the most time-critical exits competed on normal slippage and were likeliest to miss a fill.
+    it('covers the exits that were previously left out', () => {
+        expect(isUrgentExitReason('LIQUIDITY_RUGPULL')).toBe(true);
+        expect(isUrgentExitReason('WHALE_DUMP')).toBe(true);
+        expect(isUrgentExitReason('AI_STOP_LOSS_CONFIRMED')).toBe(true);
+    });
+
+    it('keeps every exit that was already urgent', () => {
+        for (const reason of [
+            'STOP_LOSS',
+            'STOP_LOSS_ZONE_TIMEOUT',
+            'TRAILING_STOP',
+            'DEV_DUMP',
+            'RUGPULL',
+            'PANIC_SELL',
+            'AI_HEALTH_CRITICAL',
+        ]) {
+            expect(isUrgentExitReason(reason)).toBe(true);
+        }
+    });
+
+    // A discretionary exit must not be allowed to pay 15% slippage to leave a position that has
+    // barely moved; that would turn a small loss into a large one.
+    it('excludes discretionary and voluntary exits', () => {
+        expect(isUrgentExitReason('AI_EXIT_ADVISOR')).toBe(false);
+        expect(isUrgentExitReason('TAKE_PROFIT')).toBe(false);
+        expect(isUrgentExitReason('PARTIAL_TAKE_PROFIT')).toBe(false);
+        expect(isUrgentExitReason('MANUAL_SELL')).toBe(false);
+    });
+
+    it('does not treat an unknown reason as urgent', () => {
+        expect(isUrgentExitReason('')).toBe(false);
+        expect(isUrgentExitReason('SOMETHING_NEW')).toBe(false);
     });
 });

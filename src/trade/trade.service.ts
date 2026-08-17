@@ -95,6 +95,35 @@ export function capBuyPositionUsd(
  * Falls back to the on-chain fill when the feed price is unusable, which is the pre-existing
  * behaviour.
  */
+/**
+ * Exits that must fill even at a bad price, because failing to fill costs more than filling badly.
+ * Drives BOTH the 1500 bps sell slippage and the elevated priority fee.
+ *
+ * This list used to omit LIQUIDITY_RUGPULL, WHALE_DUMP, and AI_STOP_LOSS_CONFIRMED even though
+ * `isEmergencyExitReason` in the price monitor already treated the first two as emergencies. That
+ * left the most time-critical exits of all — the pool is being drained, or a whale is dumping into
+ * it — competing on ordinary slippage, so they were the likeliest to miss their fill entirely.
+ *
+ * AI_EXIT_ADVISOR is deliberately NOT here. It is a discretionary exit that can fire while a
+ * position has barely moved, so granting it 15% slippage would let an advisory nudge turn a 2% loss
+ * into a large one. Voluntary exits (TAKE_PROFIT, PARTIAL_TAKE_PROFIT, MANUAL_SELL) are excluded
+ * for the same reason: nothing is collapsing, so there is no reason to overpay to leave.
+ */
+export function isUrgentExitReason(exitReason: string): boolean {
+    return [
+        'STOP_LOSS',
+        'STOP_LOSS_ZONE_TIMEOUT',
+        'TRAILING_STOP',
+        'DEV_DUMP',
+        'RUGPULL',
+        'LIQUIDITY_RUGPULL',
+        'WHALE_DUMP',
+        'PANIC_SELL',
+        'AI_HEALTH_CRITICAL',
+        'AI_STOP_LOSS_CONFIRMED',
+    ].includes(exitReason);
+}
+
 export function resolveMonitorEntryPriceSol(
     feedPriceUsd: number | undefined,
     solPriceUsd: number,
@@ -2505,15 +2534,7 @@ export class TradeService implements OnModuleInit {
             );
 
             // 2. PANIC SLIPPAGE: Kalau SL, Trailing Stop, atau Rugpull, hajar slippage 15% (1500 bps) biar pasti laku
-            const isUrgent = [
-                'STOP_LOSS',
-                'STOP_LOSS_ZONE_TIMEOUT',
-                'TRAILING_STOP',
-                'DEV_DUMP',
-                'RUGPULL',
-                'PANIC_SELL',
-                'AI_HEALTH_CRITICAL',
-            ].includes(exitReason);
+            const isUrgent = isUrgentExitReason(exitReason);
             const requestedSellSlippageBps = tradeSettings
                 ? Math.max(1, Math.round(tradeSettings.slippageOnSol * 10000))
                 : this.slippageBps;
