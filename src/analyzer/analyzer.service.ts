@@ -23,6 +23,8 @@ import {
 
 export { selectBestDexScreenerPair } from '../common/dex-pair';
 import { selectBestDexScreenerPair } from '../common/dex-pair';
+import { buyShare, failsBuyShare, formatBuyShare } from '../common/flow-pressure';
+import { FlowVolumeService } from './flow-volume.service';
 import { evaluateMintSafety } from '../common/token-mint-safety';
 import { DEFAULT_MIN_LP_LOCKED_PCT, isLpSafe, isMarketLpSafe, maxLpLockedPct } from '../common/lp-safety';
 import {
@@ -62,6 +64,7 @@ export class AnalyzerService {
         private readonly prismaService: PrismaService,
         private readonly creatorProfileService: CreatorProfileService,
         private readonly aiService: AIService,
+        private readonly flowVolumeService: FlowVolumeService,
     ) {
         this.connection = new Connection(this.getSolanaRpcUrl(), 'confirmed');
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
@@ -806,6 +809,10 @@ export class AnalyzerService {
             const txns5m = pair.txns?.m5 || {};
             const buys5m = txns5m.buys || 0;
             const sells5m = txns5m.sells || 0;
+            // Already present in every DexScreener response and in the DTO, but unread until now.
+            const txnsH1 = pair.txns?.h1 || {};
+            const buysH1 = txnsH1.buys || 0;
+            const sellsH1 = txnsH1.sells || 0;
             const marketCap = pair.fdv || 0;
             const symbol = pair.baseToken?.symbol;
             const tokenName = pair.baseToken?.name || pair.baseToken?.symbol || symbol;
@@ -820,7 +827,7 @@ export class AnalyzerService {
                     ? Math.max((Date.now() - pairCreatedAt) / 1000, 0)
                     : 0;
                 this.logger.debug(
-                    `[${tokenMint}] Market metric context reason=${reason} pairsCount=${pairs.length} selectedDexId=${pair.dexId || 'unknown'} liquidity=${liquidity.toFixed(2)} volume5m=${volume5m.toFixed(2)} buys5m=${buys5m} sells5m=${sells5m} marketCap=${marketCap.toFixed(2)} ageSeconds=${ageSeconds.toFixed(1)}`,
+                    `[${tokenMint}] Market metric context reason=${reason} pairsCount=${pairs.length} selectedDexId=${pair.dexId || 'unknown'} liquidity=${liquidity.toFixed(2)} volume5m=${volume5m.toFixed(2)} buys5m=${buys5m} sells5m=${sells5m} buysH1=${buysH1} sellsH1=${sellsH1} buyShareH1=${formatBuyShare(buyShare({ buys: buysH1, sells: sellsH1 }))} marketCap=${marketCap.toFixed(2)} ageSeconds=${ageSeconds.toFixed(1)}`,
                 );
             };
 
@@ -1057,6 +1064,37 @@ export class AnalyzerService {
                     String(this.configService.get('BUY_SELL_RATIO_THRESHOLD', '1.2')),
                 ),
             );
+            // The 1h companion to the 5m gate below. Measured as a share rather than a ratio
+            // because that is the question being asked: what fraction of the hour's trades were
+            // buys. A five-minute burst can look like momentum while the surrounding hour is net
+            // distribution — the token that prompted this read 49.4% buy share over 24h while its
+            // 5m window looked fine. Fails open when the hour has no data, so freshly migrated
+            // tokens are not shut out.
+            const minH1BuyShare = Number.parseFloat(
+                String(this.configService.get('MIN_H1_BUY_SHARE', '0')),
+            );
+            if (failsBuyShare({ buys: buysH1, sells: sellsH1 }, minH1BuyShare)) {
+                logMarketMetricReject('low_h1_buyer_dominance');
+                return {
+                    passed: false,
+                    reason: 'low_h1_buyer_dominance',
+                    marketCap,
+                    symbol,
+                    pairCreatedAt,
+                    socials,
+                    liquidity,
+                    volumeSurge,
+                    volScore,
+                    zScore,
+                    priceChange5m: pair.priceChange?.m5 || 0,
+                    priceChange15m: pair.priceChange?.m15 || 0,
+                    priceChange1h,
+                    isPumpFun,
+                    volume5m,
+                    buys5m,
+                    sells5m,
+                };
+            }
             if (sells5m > 0 && buys5m < sells5m * buySellRatioThreshold) {
                 logMarketMetricReject('low_buyer_dominance');
                 return {
@@ -1120,6 +1158,81 @@ export class AnalyzerService {
                     priceChange1h,
                     isPumpFun,
                 };
+            }
+
+            // Buy vs sell VOLUME, as opposed to the transaction counts every gate above uses. The
+            // two genuinely disagree: the token that prompted this read 49.4% of trades on the buy
+            // side but 50.6% of volume, because sells were more numerous yet smaller. Counts alone
+            // cannot see that.
+            //
+            // Deliberately the LAST gate in the chain. It is the only one that costs an external
+            // API call (Helius, 1-3 paginated requests), so it only ever runs for a token that has
+            // already survived every cheap check — a handful per hour rather than thousands.
+            const enableH1FlowVolume = String(
+                this.configService.get('ENABLE_H1_FLOW_VOLUME', 'false'),
+            ).toLowerCase() === 'true';
+            const minH1BuyVolumeShare = Number.parseFloat(
+                String(this.configService.get('MIN_H1_BUY_VOLUME_SHARE', '0')),
+            );
+            if (enableH1FlowVolume && minH1BuyVolumeShare > 0 && pair.pairAddress) {
+                const flow = await this.flowVolumeService.getHourlyFlowVolume(
+                    tokenMint,
+                    pair.pairAddress,
+                );
+                if (flow) {
+                    const failsVolumeShare = failsBuyShare(
+                        { buys: flow.buyVolumeSol, sells: flow.sellVolumeSol },
+                        minH1BuyVolumeShare,
+                    );
+                    if (failsVolumeShare) {
+                        logMarketMetricReject('low_h1_buy_volume');
+                        return {
+                            passed: false,
+                            reason: 'low_h1_buy_volume',
+                            marketCap,
+                            symbol,
+                            pairCreatedAt,
+                            socials,
+                            liquidity,
+                            volumeSurge,
+                            volScore,
+                            zScore,
+                            priceChange5m: pair.priceChange?.m5 || 0,
+                            priceChange15m: pair.priceChange?.m15 || 0,
+                            priceChange1h,
+                            isPumpFun,
+                            volume5m,
+                            buys5m,
+                            sells5m,
+                        };
+                    }
+                } else if (
+                    String(this.configService.get('FLOW_VOLUME_FAIL_OPEN', 'true')).toLowerCase() !==
+                    'true'
+                ) {
+                    // Only reachable when the operator has explicitly chosen strictness: a Helius
+                    // outage would otherwise halt all trading, which is worse than a missed filter.
+                    logMarketMetricReject('flow_volume_unavailable');
+                    return {
+                        passed: false,
+                        reason: 'flow_volume_unavailable',
+                        marketCap,
+                        symbol,
+                        pairCreatedAt,
+                        socials,
+                        liquidity,
+                        volumeSurge,
+                        volScore,
+                        zScore,
+                        priceChange5m: pair.priceChange?.m5 || 0,
+                        priceChange15m: pair.priceChange?.m15 || 0,
+                        priceChange1h,
+                        isPumpFun,
+                        volume5m,
+                        buys5m,
+                        sells5m,
+                    };
+                }
             }
 
             return {

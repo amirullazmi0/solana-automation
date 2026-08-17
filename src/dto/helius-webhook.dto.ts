@@ -1,7 +1,14 @@
 export interface HeliusTokenTransfer {
     fromUserAccount: string;
     toUserAccount: string;
-    amount: number;
+    /** Raw amount, as sent by the webhook payload. */
+    amount?: number;
+    /**
+     * Decimal-adjusted amount, as returned by the Enhanced Transactions REST API. Verified against
+     * a live pumpswap response: a WSOL leg arrives as `tokenAmount: 0.513580556` with `amount`
+     * absent entirely, so anything reading only `amount` silently measures nothing.
+     */
+    tokenAmount?: number;
     mint: string;
 }
 

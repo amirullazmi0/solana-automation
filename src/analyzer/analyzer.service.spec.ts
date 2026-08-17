@@ -115,6 +115,7 @@ describe('AnalyzerService market-flow entry gate', () => {
             {} as never,
             {} as never,
             {} as never,
+            {} as never,
         );
 
         const result = await (service as unknown as {
@@ -156,6 +157,7 @@ describe('aggressive-high market gates', () => {
         };
         const service = new AnalyzerService(
             { get: jest.fn((key: string, fallback?: number) => values[key] ?? fallback) } as never,
+            {} as never,
             {} as never,
             {} as never,
             {} as never,

@@ -111,6 +111,9 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     const probeUsd = readNumber(config, 'HONEYPOT_PROBE_USD', 0.5);
     const minPriceChange5mPct = readNumber(config, 'MIN_PRICE_CHANGE_5M_PCT', 0);
     const bearishReboundFloorPct = readNumber(config, 'BEARISH_REBOUND_1H_FLOOR_PCT', -60);
+    const minH1BuyShare = readNumber(config, 'MIN_H1_BUY_SHARE', 0);
+    const minH1BuyVolumeShare = readNumber(config, 'MIN_H1_BUY_VOLUME_SHARE', 0);
+    const heliusFlowMaxPages = readNumber(config, 'HELIUS_FLOW_MAX_PAGES', 3);
     const bearishReboundMin5mPct = readNumber(config, 'BEARISH_REBOUND_MIN_5M_PCT', 3);
     const aggressiveHolderLiquidityUsd = readNumber(
         config,
@@ -190,6 +193,17 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     }
     if (bearishReboundMin5mPct < 0 || bearishReboundMin5mPct > 100) {
         errors.push('BEARISH_REBOUND_MIN_5M_PCT must be between 0 and 100.');
+    }
+    // Shares, not percentages: 0.6 means 60% of flow. A value above 1 is always a unit mix-up
+    // (someone typing 60), and it would silently reject every token.
+    if (minH1BuyShare < 0 || minH1BuyShare > 1) {
+        errors.push('MIN_H1_BUY_SHARE must be a share between 0 and 1 (0 disables the gate).');
+    }
+    if (minH1BuyVolumeShare < 0 || minH1BuyVolumeShare > 1) {
+        errors.push('MIN_H1_BUY_VOLUME_SHARE must be a share between 0 and 1 (0 disables the gate).');
+    }
+    if (!Number.isInteger(heliusFlowMaxPages) || heliusFlowMaxPages < 1) {
+        errors.push('HELIUS_FLOW_MAX_PAGES must be an integer >= 1.');
     }
     if (aggressiveHolderLiquidityUsd < 0) {
         errors.push('AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD must be >= 0.');

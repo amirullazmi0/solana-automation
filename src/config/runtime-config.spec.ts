@@ -128,3 +128,26 @@ describe('zero-liquidity active retry settings', () => {
         );
     });
 });
+
+describe('h1 flow gate validation', () => {
+    // These are shares (0.6 = 60%), so a bare "60" would reject every token silently.
+    it('rejects a share expressed as a percentage', () => {
+        expect(validateConfig({ ...validConfig, MIN_H1_BUY_SHARE: 60 })).toContain(
+            'MIN_H1_BUY_SHARE must be a share between 0 and 1 (0 disables the gate).',
+        );
+        expect(validateConfig({ ...validConfig, MIN_H1_BUY_VOLUME_SHARE: 55 })).toContain(
+            'MIN_H1_BUY_VOLUME_SHARE must be a share between 0 and 1 (0 disables the gate).',
+        );
+    });
+
+    it('accepts valid shares and a zero that disables the gate', () => {
+        expect(validateConfig({ ...validConfig, MIN_H1_BUY_SHARE: 0.6 })).toEqual([]);
+        expect(validateConfig({ ...validConfig, MIN_H1_BUY_SHARE: 0 })).toEqual([]);
+    });
+
+    it('requires at least one page of Helius history', () => {
+        expect(validateConfig({ ...validConfig, HELIUS_FLOW_MAX_PAGES: 0 })).toContain(
+            'HELIUS_FLOW_MAX_PAGES must be an integer >= 1.',
+        );
+    });
+});
