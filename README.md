@@ -1,21 +1,37 @@
-# Solana Trend Follower Bot (MaSoul Sniper)
+# MaSoul Sniper — Bot Trading Memecoin Solana
 
-Bot trading otomatis untuk **Solana** dengan strategi **Hybrid Momentum**. Token muda diroute
-sebagai `MICIN_ROUTE`, token lebih matang sebagai `WHALE_ROUTE`. Setiap kandidat melewati rantai
-gerbang kuantitatif, pemeriksaan keamanan on-chain, RugCheck, dan risk breaker sebelum swap live
-lewat Jupiter.
+Bot ini **membeli dan menjual memecoin Solana secara otomatis**, tanpa campur tangan manusia per
+trade. Dia menemukan token yang baru lahir, menyaringnya lewat rantai pemeriksaan kuantitatif dan
+keamanan, membeli lewat Jupiter kalau lolos semuanya, lalu memantau posisi itu sampai keluar sendiri
+lewat take profit, trailing stop, stop loss, atau exit darurat saat mendeteksi rug.
 
-Dokumen ini menjelaskan bot **sebagaimana adanya**, termasuk hasil terukur dan keterbatasan yang
-diketahui. Nilai konfigurasi di sini diambil langsung dari `config.json`.
+Dikendalikan dari Telegram. Setiap chat punya wallet sendiri dan setelannya sendiri, jadi satu
+instance bisa melayani beberapa akun sekaligus — sebagian live, sebagian dry run.
 
-> **Status:** jalan di produksi (CapRover), 2 slot, ~60 trade sejak akhir Juni 2026. Belum
-> profitable — lihat [Kondisi Terukur](#kondisi-terukur). Angka-angka di bawah bukan proyeksi.
+Strateginya **momentum jangka pendek**: mencari token yang volumenya sedang berakselerasi dengan
+pembeli mendominasi penjual, masuk kecil, dan keluar cepat. Bukan strategi tahan lama. Umur token
+yang dibeli dihitung dalam menit sampai jam, dan posisi biasanya ditutup dalam hitungan menit.
+
+Dua jalur beli berjalan bersamaan:
+
+- **Jalur utama** — token muda dari pump.fun dan feed DexScreener, diroute jadi `MICIN` (di bawah
+  2 jam) atau `WHALE` (2 jam ke atas).
+- **Jalur established** — token yang sudah matang dan sedang rebound atau mengalami community
+  takeover.
+
+Yang membuat bot ini rumit bukan keputusan belinya, tapi **jumlah cara sebuah token bisa ditolak**:
+ada 84 alasan reject berbeda, dari likuiditas terlalu tipis sampai ekstensi Token-2022 yang
+memungkinkan dev membekukan saldo pembeli. Dokumen ini menjelaskan mekanismenya dan fungsi setiap
+knob konfigurasi.
+
+**Peringatan:** ini perangkat lunak yang membelanjakan uang nyata pada aset yang sangat berisiko.
+Bacalah [Rantai Gerbang](#rantai-gerbang) dan [Risk breaker](#risk-breaker) sebelum menyalakannya
+dalam mode live.
 
 ---
 
 ## Daftar Isi
 
-- [Kondisi Terukur](#kondisi-terukur)
 - [Cara Kerja](#cara-kerja)
 - [Model Route](#model-route)
 - [Rumus](#rumus)
@@ -23,63 +39,7 @@ diketahui. Nilai konfigurasi di sini diambil langsung dari `config.json`.
 - [Katalog Alasan Reject](#katalog-alasan-reject)
 - [Katalog Exit Reason](#katalog-exit-reason)
 - [Referensi Konfigurasi](#referensi-konfigurasi)
-- [Keterbatasan yang Diketahui](#keterbatasan-yang-diketahui)
-- [Setup dan Menjalankan](#setup-dan-menjalankan)
-- [Telegram](#telegram)
-- [Helius Webhook](#helius-webhook)
-- [Deployment](#deployment)
-- [Alat Verifikasi](#alat-verifikasi)
-- [Tech Stack](#tech-stack)
-
----
-
-## Kondisi Terukur
-
-Semua angka di bawah dari **15 trade LIVE tertutup yang punya `netProfitUsd`** (trade id 46–60,
-14 Juli – 16 Agustus 2026). Trade sebelumnya hanya menyimpan `profitUsd`, jadi tidak bisa dipakai
-menghitung P&L bersih.
-
-| Metrik | Nilai |
-| --- | --- |
-| Win rate | **20,0%** (3 dari 15) |
-| Rata-rata menang | +$0,777 |
-| Rata-rata kalah | -$0,524 |
-| Ekspektansi | **-$0,263 per trade** |
-| Total | **-$3,95** |
-
-Supaya impas di win rate 20%, rata-rata menang harus **2,09x** rata-rata kalah. Saat ini **1,48x**.
-
-Satu trade menanggung seluruh sisi positifnya: TOADLAYER **+$2,04** dari total +$2,33 kemenangan.
-Perlakukan itu sebagai peringatan tentang ukuran sampel, bukan bukti strategi.
-
-### Fee drag itu nyata di posisi kecil
-
-Fee round-trip nominalnya tetap (~0,0011 SOL), jadi persentasenya membengkak saat posisi mengecil:
-
-| Posisi | Fee | Drag | Artinya |
-| --- | --- | --- | --- |
-| $2,50 | $0,099 | **3,9%** | harus benar >3,9% cuma untuk impas |
-| $2,80 | $0,084 | 3,0% | |
-| $5,00 | $0,084 | 1,7% | |
-
-**Ukuran wallet masih lever terbesar terhadap profitabilitas**, lebih besar dari gerbang mana pun
-di dokumen ini.
-
-### Slippage terkonsentrasi di pool tipis
-
-Selisih antara harga saat exit dipicu dan harga fill sebenarnya, dikelompokkan per likuiditas entry:
-
-| Likuiditas entry | Fill lebih buruk dari trigger | Terburuk |
-| --- | --- | --- |
-| < $12.500 | **4 dari 6** | **-39,84pp** |
-| $12.500–25.000 | 0 dari 3 | +7,62pp |
-| $25.000–40.000 | 1 dari 3 | -0,37pp |
-| > $40.000 | 0 dari 3 | +2,03pp |
-
-Ini dasar `MIN_LIQUIDITY_USD = 15000`. Diuji balik ke 15 trade nyata, gerbang likuiditas plus cap
-1 jam menghasilkan 7 trade dengan total **+$1,54** alih-alih 15 trade dengan **-$3,95** — selisih
-+$5,49. Perlu diskon: ambangnya dipilih dengan melihat data yang sama, jadi itu batas atas, bukan
-ekspektasi.
+- [Menjalankan](#menjalankan)
 
 ---
 
@@ -171,8 +131,12 @@ chase harga MICIN (`MICIN_MAX_PRICE_CHANGE_5M`, `MICIN_MAX_PRICE_CHANGE_1H`), si
 konfirmasi entry.
 
 Gerbang #15 sengaja terakhir: itu satu-satunya yang butuh panggilan API eksternal, jadi hanya
-dijalankan untuk token yang sudah lolos semua pemeriksaan murah. **Defaultnya mati** — lihat
-[Keterbatasan](#keterbatasan-yang-diketahui).
+dijalankan untuk token yang sudah lolos semua pemeriksaan murah.
+
+**Defaultnya mati** (`ENABLE_H1_FLOW_VOLUME`). Klasifikasi swap-nya terbukti benar — cocok dengan
+pemisahan beli/jual per jam milik DexScreener, sebagian persis identik — tapi butuh 0,9–11,8 detik
+per token, terlalu lambat untuk jalur entry yang harganya sudah bergerak sekitar 10% antara sinyal
+dan quote. Nyalakan hanya kalau latensi sebesar itu bisa diterima.
 
 ---
 
@@ -368,10 +332,35 @@ mahal.
 
 ---
 
+---
+
 ## Referensi Konfigurasi
 
-Dibaca dari `config.json` lewat `loadRuntimeConfig()` ke `ConfigService`. Divalidasi saat boot oleh
-`validateConfig()` di `src/config/runtime-config.ts`.
+Semua nilai perilaku ada di `config.json`, dibaca lewat `loadRuntimeConfig()` ke `ConfigService`.
+Kredensial ada di `.env`, bukan di sini.
+
+**`config.json` dibaca relatif terhadap direktori kerja.** `parseRuntimeConfig()` memanggil
+`resolve(process.cwd(), 'config.json')`, dan bila berkasnya tidak ditemukan fungsinya **diam-diam**
+mengembalikan `{}` — setiap knob lalu jatuh ke default hardcoded di kode, yang nilainya jauh berbeda:
+
+| Knob | `config.json` | Default kode |
+| --- | --- | --- |
+| `MIN_LIQUIDITY_USD` | 15000 | 7500 |
+| `MIN_VOLUME_USD` | 6 | 200 |
+| `MAX_MCAP` | 50000000 | 300000 |
+| `TRAILING_DISTANCE_PERCENT` | 0.8 | 5.0 |
+| `COOLDOWN_LOSS_HOURS` | 1 | 24 |
+
+Tidak ada peringatan di log. Bot akan tampak jalan normal sambil memakai strategi yang sama sekali
+lain. Selalu jalankan dari root repo.
+
+Saat boot, `validateConfig()` memeriksa ~22 invarian dan menolak konfigurasi yang tidak konsisten:
+urutan batas holder (single <= top5 <= top10), urutan ambang likuiditas (WARN <= EXIT <= PANIC),
+pangsa yang harus berada di rentang 0–1, dan kecukupan modal
+(`TOTAL_CAPITAL - RESERVE_AMOUNT >= POSITION_SIZE_USD * TOTAL_SLOTS`).
+
+Knob berawalan `MICIN_` atau `WHALE_` **menang** atas versi globalnya. Misalnya
+`MICIN_STOP_LOSS_PERCENT` yang dipakai untuk route MICIN, bukan `STOP_LOSS_PERCENT`.
 
 ### Modal dan ukuran posisi
 
@@ -622,297 +611,52 @@ mengizinkannya menahan posisi melewati pemicu — invarian itu dikunci oleh test
 
 ---
 
-## Keterbatasan yang Diketahui
-
-Semua di bawah ini **terverifikasi**, bukan dugaan. Dicatat di sini supaya tidak ditemukan ulang.
-
-### Bot tidak bisa mengevaluasi gerbangnya sendiri
-
-`Trade` menyimpan `entryLiquidity`, `entryMarketCap`, `entryPriceSol`, `monitorEntryPrice`, dan
-`solPriceAtEntry` — tapi **tidak** menyimpan `buyShareH1`, `priceChange1h`, `buys5m`/`sells5m`,
-`confidenceScore`, atau `safetyIndex`.
-
-Akibatnya: gerbang likuiditas bisa diuji balik ke 15 trade nyata dan hasilnya terukur (+$5,49),
-sementara **semua gerbang lain tidak bisa dievaluasi sama sekali**. Ini alasan paling struktural
-kenapa tuning masih menebak. Perbaikannya kecil — satu kolom `Float?` per metrik saat entry — dan
-dampaknya besar: 15 trade berikutnya jadi bisa dipakai menyetel.
-
-### `ENABLE_H1_FLOW_VOLUME` mati, dan itu keputusan sadar
-
-Klasifikasi swap-nya **terverifikasi benar**: 6 dari 6 token sepakat dengan pemisahan beli/jual 1
-jam milik DexScreener, tiga di antaranya persis identik (90/81, 99/99, 43/44).
-
-Tapi butuh **0,9–11,8 detik per token** — sekitar sepuluh kali estimasi awal — di jalur entry yang
-harganya sudah bergerak ~10% antara sinyal dan quote. Mengecilkan ke satu halaman tidak menolong:
-masih ~2,9 detik median, dan akurasinya turun (satu token melenceng 10,1pp).
-
-Benar tapi tidak layak pakai di jalur entry. Kodenya tetap ada, teruji, dan mati.
-
-### AI exit advisor tidak boleh menutup posisi
-
-`AI_EXIT_ADVISOR_ALLOW_EXIT_NOW = false`. Advisor pernah menutup posisi pada evaluasi pertamanya,
-beberapa detik setelah entry, di -2,13% — pada token paling tenang di dataset (VoL 0,0353) dengan
-likuiditas $36k. Tidak ada yang memburuk; posisinya cuma belum naik.
-
-Risikonya asimetris: potensi untung dari jalur exit-awal +$0,47 (n=4), sementara eksposur ke
-pemotongan satu pemenang ~$1,3.
-
-### Blacklist creator hanya belajar dari rug bot ini sendiri
-
-Creator yang sudah merugikan banyak orang di luar tetap terbaca `riskScore: 0` sampai dia
-merugikan trade bot ini. Dengan ~60 trade dan 2 exit `DEV_DUMP`, tabel `CreatorProfile` praktis
-belum belajar apa pun.
-
-Selain itu `CreatorProfileService.penalizeCreator()` (`creator-profile.service.ts:83`) adalah
-**kode mati** — docstring-nya menyebut dipakai `TradeService`, tapi tidak ada pemanggil. Logika
-yang benar-benar jalan diduplikasi inline di `trade.service.ts:2964-2998`.
-
-### Alert "EXECUTION ATTEMPTING" dikirim sebelum pengecekan jalan
-
-`scanner.service.ts:1216` memanggil `sendBuySignalAlert` sebelum `attemptBuy` di `:1224`, jadi fee
-floor, capital guard, dan risk breaker baru dievaluasi **setelah** alert terkirim. Satu log 11 jam
-berisi 60 pasang "EXECUTION ATTEMPTING" yang langsung diikuti "BUY EXECUTION FAILED".
-
-### Produksi berjalan dalam mode development
-
-`Dockerfile:20` menjalankan **`yarn start:dev`** — yaitu `nest start --watch`, dengan seluruh
-`devDependencies` terpasang (`Dockerfile:12`). Jadi bot produksi jalan lewat watcher TypeScript,
-bukan artefak hasil build.
-
-Itu juga sebabnya kerusakan di bawah tidak pernah terasa.
-
-### `yarn start:prod` rusak
-
-Script-nya `node dist/main`, tapi build menghasilkan `dist/src/main.js`. Perintahnya gagal seketika
-dengan module-not-found. Sudah diuji: `node dist/src/main.js` boot bersih.
-
-Akar masalahnya bukan salah tulis satu path. `tsconfig.json` menyetel `baseUrl` tanpa `rootDir`,
-dan `tsconfig.build.json` hanya meng-exclude `node_modules`, `test`, `dist`, dan `**/*spec.ts` —
-**tidak** meng-exclude `scratch/` maupun `test-jito.ts` di root. TypeScript karenanya menyimpulkan
-akar sumber di root repo dan menurunkan semuanya satu tingkat. Buktinya ada di `dist/`: selain
-`dist/src/main.js`, ada `dist/test-jito.js` dan seluruh `dist/scratch/`.
-
-Perbaikannya bisa `"start:prod": "node dist/src/main"`, atau menyetel `rootDir: "src"` dan
-meng-exclude `scratch` di `tsconfig.build.json`.
-
-### `config.json` sensitif terhadap direktori kerja
-
-Ini konsekuensi tertinggi dari semua yang ada di daftar ini.
-
-`parseRuntimeConfig()` membaca `resolve(process.cwd(), 'config.json')`
-(`src/config/runtime-config.ts:23`). Kalau berkasnya tidak ditemukan, fungsinya **diam-diam**
-mengembalikan `{}` dan setiap knob jatuh ke default hardcoded di kode — yang nilainya jauh berbeda:
-
-| Knob | `config.json` | Default kode bila cwd salah |
-| --- | --- | --- |
-| `MIN_LIQUIDITY_USD` | 15000 | **7500** |
-| `MIN_VOLUME_USD` | 6 | **200** |
-| `MAX_MCAP` | 50000000 | **300000** |
-| `TRAILING_DISTANCE_PERCENT` | 0.8 | **5.0** |
-| `COOLDOWN_LOSS_HOURS` | 1 | **24** |
-| `ANALYZER_MIN_VOLUME_SURGE` | 0.5 | **1.5** |
-
-Tidak ada peringatan di log. Bot akan tampak jalan normal sambil memakai strategi yang sama sekali
-lain. **Selalu jalankan dari root repo.**
-
-### Cakupan test tidak merata
-
-281 tes / 17 suite, tapi terkonsentrasi di `trade.service` (67) dan `price-monitor.service` (52).
-Tanpa test sama sekali:
-
-| Berkas | Baris |
-| --- | --- |
-| `src/ai/ai.service.ts` | 982 |
-| `src/analyzer/established-analyzer.service.ts` | 731 |
-| `src/telegram/telegram-workspace.service.ts` | 464 |
-| `src/analyzer/creator-profile.service.ts` | 122 |
-
-`established-analyzer` adalah jalur beli kedua — 731 baris yang bisa mengeluarkan uang, tanpa satu
-tes pun.
-
-### Data historis hilang setelah 24 jam
-
-Baris `Watchlist` berstatus `FAILED`/`PENDING` dihapus setelah 24 jam
-(`scanner.service.ts:576-582`), jadi metrik entry token yang tidak jadi dibeli tidak bisa
-dianalisis belakangan.
-
-### Catatan lain
-
-- `netProfitUsd` baru terisi mulai trade id 46; sebelumnya hanya `profitUsd`.
-- Prisma menulis timestamp UTC sementara `now()` Postgres mengembalikan WIB (UTC+7). Query yang
-  membandingkan keduanya akan tampak berselisih 7 jam. Ini artefak query, bukan bug penyimpanan.
-- Counter reject di heartbeat menghitung setiap percobaan, jadi token yang di-retry tercatat
-  berkali-kali. Angkanya membesar tanpa berarti ada lebih banyak token.
-
 ---
 
-## Setup dan Menjalankan
-
-### Prasyarat
-
-Node.js 20+, Yarn, PostgreSQL. Salin `.env` dan isi minimal:
-
-```env
-DATABASE_URL="postgresql://user:pass@host:5432/db"
-SOLANA_RPC_URL="https://mainnet.helius-rpc.com/?api-key=..."
-TELEGRAM_BOT_TOKEN="..."
-JUPITER_API_KEY="..."
-OPENAI_API_KEY="..."
-HELIUS_WEBHOOK_SECRET="..."
-API_SECRET_KEY="..."
-```
-
-`SOLANA_RPC_URL` harus URL Helius berisi `api-key` bila analisis aliran dana Helius akan dipakai —
-kuncinya diambil dari situ, bukan dari variabel terpisah.
-
-Variabel lain yang dibaca kode tapi tidak ada di `.env.example`: `PUMPPORTAL_API_KEY`
-(`scanner.service.ts`), `SOLANA_RPC_FALLBACKS` dan `SELL_IDEMPOTENCY_STORE_PATH`
-(`trade.service.ts`), serta `ENCRYPTION_KEY` yang menjadi fallback bagi `WALLET_ENCRYPTION_KEY`
-(`telegram-workspace.service.ts`).
-
-### Menjalankan
+## Menjalankan
 
 ```bash
 yarn install
 npx prisma generate
-npx prisma db push        # sinkronkan skema
+npx prisma db push                    # sinkronkan skema
 
-yarn start:dev            # development, watch mode
+yarn start:dev                        # development
 yarn build && node dist/src/main.js   # produksi
 ```
 
-> **Selalu jalankan dari root repo.** `config.json` dibaca relatif terhadap `process.cwd()`, dan
-> bila tidak ditemukan seluruh knob jatuh ke default hardcoded **tanpa peringatan apa pun**. Lihat
-> [Keterbatasan](#keterbatasan-yang-diketahui).
+Env minimal: `DATABASE_URL`, `SOLANA_RPC_URL`, `TELEGRAM_BOT_TOKEN`, `JUPITER_API_KEY`,
+`OPENAI_API_KEY`, `HELIUS_WEBHOOK_SECRET`, `API_SECRET_KEY`. `SOLANA_RPC_URL` harus URL Helius
+berisi `api-key` bila analisis aliran dana Helius dipakai — kuncinya diambil dari situ.
 
-> **Jangan pakai `yarn start:prod`** — script-nya menunjuk `dist/main` sementara build menghasilkan
-> `dist/src/main.js`. Pakai `node dist/src/main.js`.
+Tiga hal yang perlu diketahui sebelum menjalankan:
 
-Saat boot, `validateConfig()` (`src/config/runtime-config.ts`) memeriksa ~22 invarian dan menolak
-konfigurasi yang tidak konsisten — antara lain urutan batas holder (single <= top5 <= top10),
-urutan ambang likuiditas (WARN <= EXIT <= PANIC), `MIN_H1_BUY_SHARE` di rentang 0–1,
-`BEARISH_REBOUND_1H_FLOOR_PCT` di rentang -100 sampai di bawah -15, dan kecukupan modal
-(`TOTAL_CAPITAL - RESERVE_AMOUNT >= POSITION_SIZE_USD * TOTAL_SLOTS`).
+- **Jalankan dari root repo.** `config.json` dibaca relatif terhadap `process.cwd()`, dan bila tidak
+  ditemukan seluruh knob jatuh ke default hardcoded tanpa satu baris log pun. Lihat catatan di
+  [Referensi Konfigurasi](#referensi-konfigurasi).
+- **Jangan pakai `yarn start:prod`.** Script-nya menunjuk `dist/main` sementara build menghasilkan
+  `dist/src/main.js`. Container produksi (`Dockerfile`) menjalankan `yarn start:dev`.
+- **Saat menjalankan lokal, timpa `TELEGRAM_BOT_TOKEN` dengan `your_telegram_bot_token`.** Nilai itu
+  mematikan polling Telegram dan mengarahkan alert ke konsol, sehingga instance lokal tidak berebut
+  update stream dengan bot produksi.
 
-Saat menjalankan lokal, timpa `TELEGRAM_BOT_TOKEN` dengan `your_telegram_bot_token`. Nilai itu
-mematikan polling Telegram dan mengarahkan alert ke konsol, sehingga instance lokal tidak berebut
-update stream dengan bot produksi.
-
-### Test
+Verifikasi:
 
 ```bash
-yarn test                 # 281 tes / 17 suite
-npx tsc --noEmit          # typecheck
-npx eslint src/           # lint
+yarn test          # 286 tes / 17 suite
+npx tsc --noEmit
+npx eslint src/
 ```
 
----
-
-## Telegram
-
-### Model wallet dan akses
-
-Setiap chat punya wallet sendiri di `TelegramWalletVault`. Akses dibatasi whitelist; chat yang belum
-di-whitelist ditolak. Setoran dan penarikan tercatat di `TelegramDepositLedger` dan
-`TelegramWithdrawal`, dengan guard `wallet_not_connected`, `wallet_mismatch`, `chat_not_allowed`,
-dan `withdrawals_disabled`.
-
-### Setelan per chat
-
-`TelegramChatSetting` menyimpan setelan per chat, yang terpenting **`dryRun`**. Chat dengan
-`dryRun: true` menerima sinyal tapi tidak pernah swap — alasan reject-nya `signal_only`.
-
-Kolom `balanceSol` di database bisa basi. Pakai perintah `/wallet` yang membaca saldo on-chain
-langsung.
-
-### Alert
-
-Alert eksekusi dikirim ke chat yang bersangkutan, bukan disiarkan. Yang disiarkan ke semua chat
-hanya `sendWatchlistStatusUpdate`, `sendWatchlistNotification`, dan ringkasan harian.
-
----
-
-## Helius Webhook
-
-Endpoint: `POST /helius/webhook`, ditangani `src/scanner/helius-webhook.controller.ts`.
-
-Autentikasi lewat header yang dicocokkan dengan `HELIUS_WEBHOOK_SECRET`. Payload berbentuk
-`HeliusWebhookTransaction` (`src/dto/helius-webhook.dto.ts`), dipakai untuk mendeteksi token baru
-dan event migrasi lebih cepat daripada polling.
-
-Catatan bentuk payload: REST Enhanced Transactions API mengirim `tokenAmount` (sudah disesuaikan
-desimal), sementara webhook mengirim `amount`. SOL pada swap AMM bergerak sebagai **wrapped SOL di
-`tokenTransfers`**, bukan di `nativeTransfers` — `nativeTransfers` pada sebuah swap umumnya hanya
-berisi sewa akun (~2.039.280 lamports). Membaca `nativeTransfers` sebagai ukuran trade akan
-mengukur sewa.
-
----
-
-## Deployment
-
-CapRover, lewat `captain-definition` dan `Dockerfile`:
+`scratch/analyzer-live-probe.ts` menjalankan `AnalyzerService.isTokenSafeToBuy()` yang asli terhadap
+token live dengan database distub, dan melaporkan gerbang mana yang menolak setiap token. Probe
+membaca `process.env` lebih dulu, jadi ambang bisa ditimpa tanpa menyentuh `config.json`:
 
 ```bash
-yarn deploy:vps
-```
-
-`npx prisma db push` dijalankan pada **setiap** deploy Docker (`Dockerfile:20`), jadi perubahan
-skema ikut terbawa otomatis. Deploy dari branch `master`.
-
-Perlu diketahui: container produksi menjalankan **`yarn start:dev`**, bukan artefak build. Lihat
-[Keterbatasan](#keterbatasan-yang-diketahui). `config.json` ikut terkirim bersama source code, dan
-karena `WORKDIR` adalah `/app` tempat berkasnya berada, pembacaan konfigurasinya benar di Docker.
-
----
-
-## Alat Verifikasi
-
-Dua skrip di `scratch/` menjalankan service **asli** terhadap data live, bukan tiruannya. Ini
-penting: implementasi ulang di skrip sekali pakai bisa menyimpang dari yang benar-benar berjalan.
-
-```bash
-# Jalankan AnalyzerService.isTokenSafeToBuy() asli dengan PrismaService distub.
-# Melaporkan gerbang mana yang menolak setiap token.
-npx ts-node -r tsconfig-paths/register scratch/analyzer-live-probe.ts [mint ...]
-
-# Silang-periksa klasifikasi swap Helius terhadap angka DexScreener untuk pool yang sama.
-npx ts-node -r tsconfig-paths/register scratch/flow-volume-verify.ts [mint ...]
-```
-
-Untuk A/B sebuah ambang, jalankan probe dua kali dengan env var berbeda dan bandingkan hasilnya:
-
-```bash
-MIN_H1_BUY_SHARE=0   npx ts-node -r tsconfig-paths/register scratch/analyzer-live-probe.ts
 MIN_H1_BUY_SHARE=0.6 npx ts-node -r tsconfig-paths/register scratch/analyzer-live-probe.ts
 ```
 
-Probe membaca `process.env` lebih dulu, lalu `config.json`, jadi ambang bisa ditimpa tanpa menyentuh
-berkas konfigurasi.
-
 ---
-
-## Tech Stack
-
-| Lapis | Teknologi |
-| --- | --- |
-| Framework | NestJS (TypeScript) |
-| Database | PostgreSQL + Prisma |
-| Swap | Jupiter Aggregator API, Jito bundle |
-| Data pasar | DexScreener |
-| Keamanan token | RugCheck API v1 |
-| On-chain | Solana Web3.js, Helius RPC + webhook |
-| Discovery | PumpPortal WebSocket, DexScreener boosts/profiles |
-| AI | API kompatibel OpenAI (`gpt-4o-mini`) |
-| Notifikasi | Telegram Bot API |
-| Deploy | Docker + CapRover |
-| Test | Jest |
-
----
-
-## Catatan Pemeliharaan
 
 Test `documents every config knob` di `src/config/runtime-config.spec.ts` memastikan setiap knob di
-`config.json` muncul di README ini. Menambahkan knob tanpa mendokumentasikannya membuat test merah.
+`config.json` muncul di dokumen ini. Menambah knob tanpa mendokumentasikannya membuat build merah.
 
-Itu disengaja: sebelum test ini ada, README bertahan dua bulan tanpa update sementara 15 commit
-kode masuk, dan berakhir dengan hanya 16% knob terdokumentasi.
