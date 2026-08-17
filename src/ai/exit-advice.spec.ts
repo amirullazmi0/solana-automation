@@ -70,22 +70,45 @@ describe('exit-advice', () => {
     });
 
     describe('early exit', () => {
+        const enabled = { now: NOW, allowExitNow: true };
+
+        it('stays shut unless explicitly enabled', () => {
+            expect(shouldExitEarly(advice({ bias: 'EXIT_NOW' }), { now: NOW })).toBe(false);
+            expect(shouldExitEarly(advice({ bias: 'EXIT_NOW' }), enabled)).toBe(true);
+        });
+
         it('exits only on a confident EXIT_NOW', () => {
-            expect(shouldExitEarly(advice({ bias: 'EXIT_NOW' }), { now: NOW })).toBe(true);
             expect(
-                shouldExitEarly(advice({ bias: 'EXIT_NOW', confidenceLevel: 'medium' }), { now: NOW }),
+                shouldExitEarly(advice({ bias: 'EXIT_NOW', confidenceLevel: 'medium' }), enabled),
             ).toBe(false);
-            expect(shouldExitEarly(advice({ bias: 'TIGHTEN' }), { now: NOW })).toBe(false);
-            expect(shouldExitEarly(advice({ bias: 'HOLD' }), { now: NOW })).toBe(false);
+            expect(shouldExitEarly(advice({ bias: 'TIGHTEN' }), enabled)).toBe(false);
+            expect(shouldExitEarly(advice({ bias: 'HOLD' }), enabled)).toBe(false);
+        });
+
+        // Guards the $Imagine case: closed seconds after entry at -2.13% on a calm token.
+        it('leaves a young position alone', () => {
+            const opts = { ...enabled, minHoldSeconds: 90 };
+            expect(
+                shouldExitEarly(advice({ bias: 'EXIT_NOW' }), { ...opts, positionAgeMs: 5_000 }),
+            ).toBe(false);
+            expect(
+                shouldExitEarly(advice({ bias: 'EXIT_NOW' }), { ...opts, positionAgeMs: 120_000 }),
+            ).toBe(true);
+        });
+
+        it('treats an unknown position age as too young to judge', () => {
+            expect(
+                shouldExitEarly(advice({ bias: 'EXIT_NOW' }), { ...enabled, minHoldSeconds: 90 }),
+            ).toBe(false);
         });
 
         it('never acts on stale advice', () => {
             const stale = advice({ bias: 'EXIT_NOW', updatedAt: NOW - 200_000 });
-            expect(shouldExitEarly(stale, { now: NOW })).toBe(false);
+            expect(shouldExitEarly(stale, enabled)).toBe(false);
         });
 
         it('does nothing when the advisor never answered', () => {
-            expect(shouldExitEarly(undefined, { now: NOW })).toBe(false);
+            expect(shouldExitEarly(undefined, enabled)).toBe(false);
         });
     });
 

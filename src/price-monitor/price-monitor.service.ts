@@ -198,6 +198,8 @@ export class PriceMonitorService {
     private readonly aiExitAdvisorRefreshMs: number;
     private readonly aiExitAdvisorMaxAgeMs: number;
     private readonly aiExitAdvisorMinConfidence: 'high' | 'medium' | 'low';
+    private readonly aiExitAdvisorAllowExitNow: boolean;
+    private readonly aiExitAdvisorMinHoldSeconds: number;
     private readonly devDumpThresholdRatio: number;
     private readonly aiCutlossMaxExtensionPercent: number;
     private readonly aiCutlossHardFloorPercent: number;
@@ -287,6 +289,14 @@ export class PriceMonitorService {
         this.aiExitAdvisorMinConfidence = this.getConfidenceConfig(
             'AI_EXIT_ADVISOR_MIN_CONFIDENCE',
             'high',
+        );
+        this.aiExitAdvisorAllowExitNow = this.getBooleanConfig(
+            'AI_EXIT_ADVISOR_ALLOW_EXIT_NOW',
+            false,
+        );
+        this.aiExitAdvisorMinHoldSeconds = Math.max(
+            0,
+            this.getNumberConfig('AI_EXIT_ADVISOR_MIN_HOLD_SECONDS', 90),
         );
         this.devDumpThresholdRatio = Math.min(
             1,
@@ -1687,6 +1697,9 @@ export class PriceMonitorService {
         if (shouldExitEarly(this.getExitAdvice(trade.id), {
             maxAgeMs: this.aiExitAdvisorMaxAgeMs,
             minConfidence: this.aiExitAdvisorMinConfidence,
+            allowExitNow: this.aiExitAdvisorAllowExitNow,
+            minHoldSeconds: this.aiExitAdvisorMinHoldSeconds,
+            positionAgeMs: this.getTradeAgeMs(trade),
         })) {
             const advice = this.getExitAdvice(trade.id);
             this.logger.warn(

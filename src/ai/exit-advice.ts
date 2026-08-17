@@ -129,12 +129,37 @@ export function resolveAdvisedTrailingDistance(
  */
 export function shouldExitEarly(
     advice: AiExitAdvice | undefined,
-    options: { maxAgeMs?: number; minConfidence?: AiConfidenceLevel; now?: number } = {},
+    options: {
+        maxAgeMs?: number;
+        minConfidence?: AiConfidenceLevel;
+        now?: number;
+        /** Master switch. Off by default: the advisor tightens trails but does not close positions. */
+        allowExitNow?: boolean;
+        /** How long a position is immune to an advisory close, in seconds. */
+        minHoldSeconds?: number;
+        positionAgeMs?: number;
+    } = {},
 ): boolean {
+    if (options.allowExitNow !== true) return false;
+
     const now = options.now ?? Date.now();
     if (!isAdviceFresh(advice, options.maxAgeMs, now)) return false;
     if (advice.bias !== 'EXIT_NOW') return false;
-    return confidenceRank(advice.confidenceLevel) >= confidenceRank(options.minConfidence ?? 'high');
+    if (confidenceRank(advice.confidenceLevel) < confidenceRank(options.minConfidence ?? 'high')) {
+        return false;
+    }
+
+    // $Imagine, 2026-08-16: the advisor closed a position on its very first evaluation, seconds
+    // after entry, at -2.13% — on the calmest token in the dataset (VoL 0.0353 against a 0.376
+    // average for winning trades) with $36k liquidity. Nothing had deteriorated; the position
+    // simply had not risen yet. A young position needs time to be judged at all.
+    const minHoldMs = Math.max(0, Number(options.minHoldSeconds ?? 0)) * 1000;
+    if (minHoldMs > 0) {
+        const ageMs = Number(options.positionAgeMs);
+        if (!Number.isFinite(ageMs) || ageMs < minHoldMs) return false;
+    }
+
+    return true;
 }
 
 /** True when enough time has passed to spend another API call on this position. */
