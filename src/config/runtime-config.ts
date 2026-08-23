@@ -114,6 +114,7 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     const minH1BuyShare = readNumber(config, 'MIN_H1_BUY_SHARE', 0);
     const minH1BuyVolumeShare = readNumber(config, 'MIN_H1_BUY_VOLUME_SHARE', 0);
     const heliusFlowMaxPages = readNumber(config, 'HELIUS_FLOW_MAX_PAGES', 3);
+    const drawdownLookbackHours = readNumber(config, 'RISK_DRAWDOWN_LOOKBACK_HOURS', 0);
     const bearishReboundMin5mPct = readNumber(config, 'BEARISH_REBOUND_MIN_5M_PCT', 3);
     const aggressiveHolderLiquidityUsd = readNumber(
         config,
@@ -204,6 +205,11 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     }
     if (!Number.isInteger(heliusFlowMaxPages) || heliusFlowMaxPages < 1) {
         errors.push('HELIUS_FLOW_MAX_PAGES must be an integer >= 1.');
+    }
+    // 0 disables the rolling window and falls back to RISK_PNL_START_AT alone, which is the
+    // configuration that produced a permanently latched drawdown breaker.
+    if (drawdownLookbackHours < 0) {
+        errors.push('RISK_DRAWDOWN_LOOKBACK_HOURS must be >= 0 (0 disables the rolling window).');
     }
     if (aggressiveHolderLiquidityUsd < 0) {
         errors.push('AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD must be >= 0.');

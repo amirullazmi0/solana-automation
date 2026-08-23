@@ -24,6 +24,7 @@ import {
 export { selectBestDexScreenerPair } from '../common/dex-pair';
 import { selectBestDexScreenerPair } from '../common/dex-pair';
 import { buyShare, failsBuyShare, formatBuyShare } from '../common/flow-pressure';
+import { averageVolume5m } from '../common/volume-baseline';
 import { FlowVolumeService } from './flow-volume.service';
 import { evaluateMintSafety } from '../common/token-mint-safety';
 import { DEFAULT_MIN_LP_LOCKED_PCT, isLpSafe, isMarketLpSafe, maxLpLockedPct } from '../common/lp-safety';
@@ -902,7 +903,11 @@ export class AnalyzerService {
 
             // 2. Volume Z-Score (Anomaly Detection)
             // Pseudo Z-Score: (Current - Avg) / StdDev (Asumsi StdDev = Avg * 0.5)
-            const avgVol5m = volumeH1 / 12;
+            // The baseline is scaled to the history the token actually has. Dividing by a flat 12
+            // assumed a full hour, so on anything younger volume1h WAS volume5m and the volume
+            // cancelled out — every fresh token reported exactly surge 12.00 / z 22.00 regardless
+            // of how much it traded. See volume-baseline.ts.
+            const avgVol5m = averageVolume5m(volumeH1, pairCreatedAt ? Date.now() - pairCreatedAt : undefined);
             const zScore = (volume5m - avgVol5m) / (avgVol5m * 0.5 || 1);
 
             // Zero sells is common during the first seconds of a launch. It is not proof of a

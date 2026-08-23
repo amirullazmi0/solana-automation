@@ -6,6 +6,7 @@ import {
     TradeService,
     capBuyPositionUsd,
     isUrgentExitReason,
+    shouldAnnounceRiskBlock,
     resolveMonitorEntryPriceSol,
     calculateMinimumExecutablePositionUsd,
     calculateRoundtripLossPct,
@@ -1109,5 +1110,51 @@ describe('isUrgentExitReason', () => {
     it('does not treat an unknown reason as urgent', () => {
         expect(isUrgentExitReason('')).toBe(false);
         expect(isUrgentExitReason('SOMETHING_NEW')).toBe(false);
+    });
+});
+
+describe('drawdown window', () => {
+    const NOW = Date.parse('2026-08-23T12:00:00Z');
+
+    // The bug this replaces: with only a fixed anchor the window could never move, so a latched
+    // drawdown breaker could not clear without a hand-edited timestamp and a restart.
+    it('rolls forward with wall-clock time when a lookback is set', () => {
+        const start = resolveRiskLookbackStart(null, 24, NOW);
+        expect(start?.getTime()).toBe(NOW - 24 * 60 * 60 * 1000);
+
+        const later = resolveRiskLookbackStart(null, 24, NOW + 60 * 60 * 1000);
+        expect(later!.getTime()).toBeGreaterThan(start!.getTime());
+    });
+
+    // Emptying RISK_PNL_START_AT on its own makes the breaker STRICTER, not looser: null means
+    // all-time. The lookback is what actually bounds the window.
+    it('still bounds the window when no anchor is configured', () => {
+        expect(resolveRiskLookbackStart(null, 0, NOW)).toBeNull(); // all-time, the old trap
+        expect(resolveRiskLookbackStart(null, 24, NOW)).not.toBeNull();
+    });
+
+    it('takes whichever bound is later when both are set', () => {
+        const oldAnchor = new Date(NOW - 90 * 24 * 60 * 60 * 1000);
+        expect(resolveRiskLookbackStart(oldAnchor, 24, NOW)?.getTime()).toBe(
+            NOW - 24 * 60 * 60 * 1000,
+        );
+
+        const recentAnchor = new Date(NOW - 60 * 60 * 1000);
+        expect(resolveRiskLookbackStart(recentAnchor, 24, NOW)?.getTime()).toBe(
+            recentAnchor.getTime(),
+        );
+    });
+});
+
+describe('shouldAnnounceRiskBlock', () => {
+    // One latched breaker re-evaluates per candidate and produced nine identical alerts in a
+    // single batch, which hid the fact that it was one permanent condition.
+    it('announces once per reason, then stays quiet', () => {
+        expect(shouldAnnounceRiskBlock(undefined, 'max_drawdown')).toBe(true);
+        expect(shouldAnnounceRiskBlock('max_drawdown', 'max_drawdown')).toBe(false);
+    });
+
+    it('announces again when the reason changes', () => {
+        expect(shouldAnnounceRiskBlock('max_drawdown', 'daily_max_loss')).toBe(true);
     });
 });

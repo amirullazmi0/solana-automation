@@ -9,6 +9,7 @@ import { ReportingService } from '../reporting/reporting.service';
 import { TradeService } from '../trade/trade.service';
 import { DexLimiter } from '../common/dex-limiter';
 import { selectBestDexScreenerPair } from '../common/dex-pair';
+import { averageVolume5m as resolveAverageVolume5m } from '../common/volume-baseline';
 import { AIService } from '../ai/ai.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 import { DexScreenerPair } from '../dto/analyzer.dto';
@@ -741,7 +742,10 @@ export class PriceMonitorService {
         const buys5mCount = pair.txns?.m5?.buys ?? 0;
         const sells5mCount = pair.txns?.m5?.sells ?? 0;
         const priceChange1h = pair.priceChange?.h1 ?? 0;
-        const averageVolume5m = volume1hUsd / 12;
+        // Must match the analyzer's baseline exactly, or the two services disagree about the same
+        // token: the analyzer would see a corrected surge while the monitor still saw a phantom 12.
+        const pairAgeMs = pair.pairCreatedAt ? Date.now() - pair.pairCreatedAt : undefined;
+        const averageVolume5m = resolveAverageVolume5m(volume1hUsd, pairAgeMs);
         const volumeSurge = averageVolume5m > 0 ? volume5mUsd / averageVolume5m : 0;
         const confidenceScore = this.calculateBuyConfidence(buys5mCount, sells5mCount);
         const volScore = liquidityUsd > 0 ? (volume5mUsd / liquidityUsd) * confidenceScore : 0;

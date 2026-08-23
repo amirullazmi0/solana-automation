@@ -109,6 +109,21 @@ export function capBuyPositionUsd(
  * into a large one. Voluntary exits (TAKE_PROFIT, PARTIAL_TAKE_PROFIT, MANUAL_SELL) are excluded
  * for the same reason: nothing is collapsing, so there is no reason to overpay to leave.
  */
+/**
+ * Whether a repeated risk-breaker alert should be sent again for this chat.
+ *
+ * A latched breaker re-evaluates on every candidate, so one condition produced nine identical
+ * "BUY EXECUTION FAILED" alerts in a single batch. That volume actively hides the signal: a
+ * permanent lockout reads like nine unrelated failures. Alert once per (chat, reason) and stay
+ * quiet until the reason changes or the breaker clears.
+ */
+export function shouldAnnounceRiskBlock(
+    lastAnnouncedReason: string | undefined,
+    reason: string,
+): boolean {
+    return lastAnnouncedReason !== reason;
+}
+
 export function isUrgentExitReason(exitReason: string): boolean {
     return [
         'STOP_LOSS',
@@ -633,6 +648,8 @@ export class TradeService implements OnModuleInit {
     private jitoTipAccounts: string[] = [];
 
     private readonly totalCapital: number;
+    /** Last risk-breaker reason announced per chat, so a latched breaker alerts once, not per candidate. */
+    private readonly lastRiskBlockReason = new Map<string, string>();
     private readonly reserveAmount: number;
     private readonly totalSlots: number;
     private readonly positionSizeUSD: number;
@@ -1030,6 +1047,7 @@ export class TradeService implements OnModuleInit {
         riskPnlStartAt?: Date | null,
         consecutiveLookbackHours = 3,
         telegramChatDbId?: number,
+        drawdownLookbackHours = 0,
     ): Promise<BuyRiskMetrics> {
         const dayStart = this.getStartOfDayUtc();
         const effectiveDailyStart =
@@ -1037,11 +1055,17 @@ export class TradeService implements OnModuleInit {
                 ? riskPnlStartAt
                 : dayStart;
         const chatWhere = telegramChatDbId ? { telegramChatId: telegramChatDbId } : {};
-        const baseWhere = riskPnlStartAt
+        // Drawdown used to anchor on RISK_PNL_START_AT alone, which made it the only breaker
+        // without a rolling window: its span could only grow, and while it blocked buys no new
+        // realised P&L could ever be recorded to lift the sum back over the floor. That is a latch
+        // needing a hand-edited timestamp plus a restart to clear. With a lookback configured it
+        // ages out like the other two breakers, and RISK_PNL_START_AT becomes optional.
+        const drawdownStartAt = resolveRiskLookbackStart(riskPnlStartAt, drawdownLookbackHours);
+        const baseWhere = drawdownStartAt
             ? {
                   status: 'CLOSED' as const,
                   mode: 'LIVE' as const,
-                  updatedAt: { gte: riskPnlStartAt },
+                  updatedAt: { gte: drawdownStartAt },
                   ...chatWhere,
               }
             : { status: 'CLOSED' as const, mode: 'LIVE' as const, ...chatWhere };
@@ -1674,12 +1698,16 @@ export class TradeService implements OnModuleInit {
             const effectiveConsecutiveLookbackHours = Number.isFinite(consecutiveLookbackHours)
                 ? consecutiveLookbackHours
                 : 3;
+            const drawdownLookbackHours = Number.parseFloat(
+                this.configService.get<string>('RISK_DRAWDOWN_LOOKBACK_HOURS', '0'),
+            );
             const metrics = await this.getBuyRiskMetrics(
                 maxConsecutiveLosses,
                 route,
                 riskPnlStartAt,
                 effectiveConsecutiveLookbackHours,
                 tradeChatDbId,
+                Number.isFinite(drawdownLookbackHours) ? drawdownLookbackHours : 0,
             );
             if (riskPnlStartAt || effectiveConsecutiveLookbackHours > 0) {
                 const baselineText = riskPnlStartAt
@@ -1711,13 +1739,24 @@ export class TradeService implements OnModuleInit {
                     `consecutiveLosses=${metrics.consecutiveLosses}, ` +
                     `totalPnL=$${metrics.totalRealizedPnlUsd.toFixed(2)}.`;
                 this.logger.warn(`[Risk] ${msg}`);
-                await notifyBuyFailure({
-                    reason: `risk_${decision.reason}`,
-                    details: msg,
-                    amountUsd: buyAmountUSD,
-                });
+                const riskAlertKey = `${telegramChatId ?? 'global'}`;
+                if (
+                    shouldAnnounceRiskBlock(
+                        this.lastRiskBlockReason.get(riskAlertKey),
+                        decision.reason as string,
+                    )
+                ) {
+                    this.lastRiskBlockReason.set(riskAlertKey, decision.reason as string);
+                    await notifyBuyFailure({
+                        reason: `risk_${decision.reason}`,
+                        details: msg,
+                        amountUsd: buyAmountUSD,
+                    });
+                }
                 return { success: false, message: msg };
             }
+            // Breaker cleared: forget the announcement so the next latch alerts again.
+            this.lastRiskBlockReason.delete(`${telegramChatId ?? 'global'}`);
         }
 
         // Ambil harga SOL terbaru

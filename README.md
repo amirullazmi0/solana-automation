@@ -85,7 +85,8 @@ Banyak knob punya varian per-route. Yang spesifik menang atas yang global — mi
 Dihitung di `checkMarketTraction` (`src/analyzer/analyzer.service.ts`):
 
 ```text
-avgVolume_5m   = volume_1h / 12
+buckets        = clamp(umurToken_menit / 5, 1, 12)
+avgVolume_5m   = volume_1h / buckets
 volumeSurge    = volume_5m / avgVolume_5m
 zScore         = (volume_5m - avgVolume_5m) / (avgVolume_5m x 0.5)
 
@@ -97,9 +98,22 @@ velocity        = volume_5m / marketCap
 buyShare_1h     = buys_1h / (buys_1h + sells_1h)
 ```
 
-Perhatikan `zScore` memakai asumsi standar deviasi = 0,5 x rata-rata, bukan stddev sebenarnya, dan
-baseline-nya diturunkan dari jendela 1 jam sementara pembilangnya 5 menit. Ini pseudo z-score;
-berguna sebagai peringkat relatif, bukan sebagai ukuran statistik.
+**Kenapa baselinenya dibagi bucket, bukan langsung 12.** Membagi dengan 12 mengasumsikan token
+punya riwayat satu jam penuh. Untuk token yang lebih muda, angka 1 jam DexScreener **adalah** angka
+5 menitnya, sehingga volumenya saling menghapus dan kedua metrik runtuh jadi konstanta:
+
+```text
+volumeSurge = v / (v/12)          = 12,00  untuk v berapa pun
+zScore      = (v - v/12) / (v/24) = 22,00  untuk v berapa pun
+```
+
+Itu terlihat di produksi: enam token berbeda dalam satu batch alert melaporkan persis
+`Surge: 12.00x` dan `Z: 22.00`. Keduanya maksimum matematis, bukan pengukuran — untuk token baru,
+keduanya hanya mengatakan "umurnya di bawah 5 menit". Membagi dengan bucket yang benar-benar sudah
+berlalu memperbaikinya, dan token berumur >= 1 jam berperilaku persis seperti sebelumnya.
+
+Perhatikan juga `zScore` memakai asumsi standar deviasi = 0,5 x rata-rata, bukan stddev sebenarnya.
+Ini pseudo z-score; berguna sebagai peringkat relatif, bukan sebagai ukuran statistik.
 
 ---
 
@@ -513,6 +527,23 @@ Knob berawalan `MICIN_` atau `WHALE_` **menang** atas versi globalnya. Misalnya
 
 ### Risk breaker
 
+Ketiga breaker membaca trade `CLOSED` bermode `LIVE` milik chat itu sendiri, dibandingkan terhadap
+`updatedAt`. Yang membedakan hanya batas kiri jendelanya:
+
+| Breaker | Batas kiri | Pulih sendiri |
+| --- | --- | --- |
+| `daily_max_loss` | `max(RISK_PNL_START_AT, awal hari UTC)` | tiap 00:00 UTC |
+| `max_consecutive_losses` | `max(RISK_PNL_START_AT, now - RISK_CONSECUTIVE_LOOKBACK_HOURS)` | bergulir |
+| `max_drawdown` | `max(RISK_PNL_START_AT, now - RISK_DRAWDOWN_LOOKBACK_HOURS)` | bergulir |
+
+Tanpa `RISK_DRAWDOWN_LOOKBACK_HOURS`, drawdown adalah satu-satunya breaker tanpa jendela bergulir:
+rentangnya hanya bisa membesar, dan selama ia memblokir pembelian tidak ada P&L baru yang bisa
+mengangkat jumlahnya kembali. Itu mengunci permanen dan hanya bisa dilepas dengan mengedit
+konfigurasi lalu **restart proses**.
+
+Perlu diingat: mengosongkan `RISK_PNL_START_AT` membuat perhitungan memakai **seluruh riwayat**,
+sehingga breaker menjadi lebih ketat, bukan lebih longgar. Jendela bergulirlah yang membatasinya.
+
 | Knob | Nilai | Keterangan |
 | --- | --- | --- |
 | `DAILY_MAX_LOSS_USD` | 2.5 | Batas rugi harian |
@@ -521,8 +552,9 @@ Knob berawalan `MICIN_` atau `WHALE_` **menang** atas versi globalnya. Misalnya
 | `WHALE_MAX_CONSECUTIVE_LOSSES` | 3 | Rugi berurutan WHALE |
 | `MAX_DRAWDOWN_PCT` | 25 | Drawdown maksimum |
 | `RISK_CONSECUTIVE_LOOKBACK_HOURS` | 2 | Jendela hitung rugi berurutan |
+| `RISK_DRAWDOWN_LOOKBACK_HOURS` | 24 | Jendela bergulir untuk drawdown. `0` mematikannya dan kembali bergantung pada `RISK_PNL_START_AT` saja |
 | `RISK_APPLY_TO_MANUAL` | false | Terapkan risk breaker ke trade manual |
-| `RISK_PNL_START_AT` | `2026-07-22T22:24:23+07:00` | Titik awal akumulasi P&L |
+| `RISK_PNL_START_AT` | `""` | Batas bawah opsional untuk seluruh perhitungan risiko. **Kosong berarti seluruh riwayat, bukan mati** |
 | `DISABLE_BUY_UNTIL` | `""` | Matikan pembelian sampai waktu tertentu |
 | `COOLDOWN_WIN_HOURS` | 0.15 | Cooldown setelah menang (~9 menit) |
 | `COOLDOWN_LOSS_HOURS` | 1 | Cooldown setelah kalah |
