@@ -20,6 +20,8 @@ import {
     stripJsonFence,
 } from './narrative-advice';
 
+type AiTask = 'NARRATIVE' | 'EXIT' | 'ENTRY' | 'HEALTH' | 'CUTLOSS';
+
 interface CacheEntry {
     result: AIAnalysisResult;
     expiresAt: number;
@@ -179,33 +181,64 @@ export class AIService {
     }
 
     /**
-     * Optional request parameters that differ between model families.
+     * Model id for one task, falling back to the global knob.
      *
-     * These were hardcoded literals. The model id is an operator-facing knob, and model families
-     * disagree about them: some GPT-5 models reject `temperature` outright, and reasoning models
-     * bill reasoning tokens as output unless effort is set to none. Omitting an unset field rather
-     * than sending a default is what lets the operator switch models from config alone.
+     * Tasks have genuinely different needs: the narrative advisor runs off the critical path and
+     * can afford a stronger model, while the exit advisor wants the lowest-latency one available.
+     * A single AI_MODEL forced both to share, so neither could be tuned.
      */
-    private buildModelParams(): Record<string, unknown> {
+    private resolveModel(task: AiTask): string {
+        const global = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
+        const scoped = String(
+            this.configService.get<string>(`AI_MODEL_${task}`, '') ?? '',
+        ).trim();
+        return scoped || global;
+    }
+
+    /**
+     * Optional request parameters, resolved per task then falling back to the global knob.
+     *
+     * These were hardcoded literals, which only works while every task shares one model. Model
+     * families disagree: some GPT-5 models reject `temperature` outright, and reasoning models bill
+     * reasoning tokens as output unless effort is set to none. An unset field is omitted from the
+     * body rather than sent as a default, so switching models stays a config change.
+     */
+    private buildModelParams(task: AiTask): Record<string, unknown> {
         const params: Record<string, unknown> = {};
 
         // String() before trim: config.json holds AI_TEMPERATURE as a JSON number, so ConfigService
         // hands back a number and calling .trim() on it throws. Found by running the advisor
         // against live tokens, where every call failed before reaching the API.
-        const rawTemperature = String(
+        const scopedTemp = String(
+            this.configService.get<string | number>(`AI_TEMPERATURE_${task}`, '') ?? '',
+        ).trim();
+        const globalTemp = String(
             this.configService.get<string | number>('AI_TEMPERATURE', '') ?? '',
         ).trim();
+        // A task-scoped empty string is an explicit "send no temperature", so it must win over the
+        // global value rather than fall through to it.
+        const rawTemperature = this.hasScopedKey(`AI_TEMPERATURE_${task}`) ? scopedTemp : globalTemp;
         if (rawTemperature) {
             const temperature = Number.parseFloat(rawTemperature);
             if (Number.isFinite(temperature)) params.temperature = temperature;
         }
 
-        const effort = String(
+        const scopedEffort = String(
+            this.configService.get<string>(`AI_REASONING_EFFORT_${task}`, '') ?? '',
+        ).trim();
+        const globalEffort = String(
             this.configService.get<string>('AI_REASONING_EFFORT', '') ?? '',
         ).trim();
+        const effort = scopedEffort || globalEffort;
         if (effort) params.reasoning_effort = effort;
 
         return params;
+    }
+
+    /** Distinguishes "configured as empty" from "not configured", which mean opposite things. */
+    private hasScopedKey(key: string): boolean {
+        const sentinel = '__unset__';
+        return this.configService.get<string>(key, sentinel) !== sentinel;
     }
 
     /**
@@ -225,7 +258,7 @@ export class AIService {
         if (!apiKey) return null;
 
         const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
-        const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
+        const model = this.resolveModel('NARRATIVE');
         const timeout = Number.parseInt(
             this.configService.get<string>('AI_NARRATIVE_TIMEOUT_MS', '8000'),
             10,
@@ -265,7 +298,7 @@ How to judge:
                         { role: 'user', content: JSON.stringify({ tokenMint, ...metrics }) },
                     ],
                     response_format: { type: 'json_object' },
-                    ...this.buildModelParams(),
+                    ...this.buildModelParams('NARRATIVE'),
                 },
                 {
                     headers: {
@@ -309,7 +342,7 @@ How to judge:
         if (!apiKey) return null;
 
         const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
-        const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
+        const model = this.resolveModel('EXIT');
 
         const systemPrompt = `You advise the exit side of an already-open Solana memecoin position.
 You cannot open, add to, or hold a position past its stop. Your advice can only make the exit
@@ -655,7 +688,7 @@ Guidance:
         }
 
         const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
-        const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
+        const model = this.resolveModel('CUTLOSS');
 
         try {
             const response = await axios.post<OpenAIChatCompletionResponse>(
@@ -770,7 +803,7 @@ Rules:
         }
 
         const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
-        const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
+        const model = this.resolveModel('HEALTH');
 
         try {
             const response = await axios.post<OpenAIChatCompletionResponse>(
@@ -891,7 +924,7 @@ Rules:
         }
 
         const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
-        const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
+        const model = this.resolveModel('ENTRY');
         const thresholds = this.getThresholdSnapshot();
 
         this.logger.log(

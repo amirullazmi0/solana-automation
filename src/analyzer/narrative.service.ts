@@ -35,7 +35,22 @@ export class NarrativeService {
         private readonly prismaService: PrismaService,
     ) {}
 
-    private get enabled(): boolean {
+    /**
+     * Whether the model is allowed to LOOK at candidates.
+     *
+     * Deliberately separate from enforcement. A single flag conflated the two, so switching the
+     * gate off also switched evaluation off — meaning a shadow-mode rollout, the whole point of
+     * which is collecting evidence before trusting the model, would have gathered nothing.
+     */
+    private get shadowEnabled(): boolean {
+        return (
+            String(this.configService.get('ENABLE_AI_NARRATIVE_SHADOW', 'false')).toLowerCase() ===
+            'true'
+        );
+    }
+
+    /** Whether a verdict is allowed to DROP a candidate. Off until the shadow data earns it. */
+    private get gateEnabled(): boolean {
         return (
             String(this.configService.get('ENABLE_AI_NARRATIVE_GATE', 'false')).toLowerCase() ===
             'true'
@@ -61,13 +76,24 @@ export class NarrativeService {
         return this.ttlMs;
     }
 
+    /** Enforcement only. `shouldRejectOnNarrative` receives this, never the shadow flag. */
     get isEnabled(): boolean {
-        return this.enabled;
+        return this.gateEnabled;
     }
 
-    /** Synchronous read. Returns undefined when nothing has been decided yet — never blocks. */
+    /** True when verdicts are being produced at all, whether or not they are enforced. */
+    get isShadowEnabled(): boolean {
+        return this.shadowEnabled;
+    }
+
+    /**
+     * Synchronous read. Returns undefined when nothing has been decided yet — never blocks.
+     *
+     * Served whenever evaluation is on, not only when enforcement is, so shadow mode can log what
+     * the gate WOULD have done next to what the deterministic chain actually did.
+     */
     getVerdict(tokenMint: string): NarrativeAdvice | undefined {
-        if (!this.enabled) return undefined;
+        if (!this.shadowEnabled && !this.gateEnabled) return undefined;
         return this.cache.get(tokenMint);
     }
 
@@ -77,7 +103,7 @@ export class NarrativeService {
      * buy decision is reached. Returns immediately in every case.
      */
     scheduleEvaluation(tokenMint: string, metrics: NarrativeMetrics, label?: string): void {
-        if (!this.enabled) return;
+        if (!this.shadowEnabled && !this.gateEnabled) return;
         if (this.inFlight.has(tokenMint)) return;
         if (!shouldRefreshNarrative(this.cache.get(tokenMint), this.ttlMs)) return;
 

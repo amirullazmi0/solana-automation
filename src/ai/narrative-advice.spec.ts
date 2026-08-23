@@ -134,3 +134,37 @@ describe('narrative-advice', () => {
         expect(narrativeConfidenceRank(undefined)).toBe(0);
     });
 });
+
+describe('shadow mode versus enforcement', () => {
+    const weak = advice({ verdict: 'WEAK', confidenceLevel: 'high' });
+
+    // The whole point of the split: evaluating and enforcing are different decisions. A single
+    // flag conflated them, so turning the gate off also turned evaluation off and a shadow rollout
+    // would have collected nothing.
+    it('asking what the gate WOULD do is independent of whether it is on', () => {
+        expect(shouldRejectOnNarrative(weak, { enabled: true, now: NOW })).toBe(true);
+        expect(shouldRejectOnNarrative(weak, { enabled: false, now: NOW })).toBe(false);
+    });
+
+    // Shadow observation must never change an outcome, whatever the verdict says.
+    it('no verdict can reject while enforcement is off', () => {
+        for (const verdict of ['STRONG', 'NEUTRAL', 'WEAK'] as const) {
+            for (const confidenceLevel of ['high', 'medium', 'low'] as const) {
+                expect(
+                    shouldRejectOnNarrative(advice({ verdict, confidenceLevel }), {
+                        enabled: false,
+                        now: NOW,
+                    }),
+                ).toBe(false);
+            }
+        }
+    });
+
+    // Once enforcement is switched on, staleness still applies — an old verdict must not act.
+    it('enforcement still refuses a stale verdict', () => {
+        const stale = advice({ evaluatedAt: NOW - 48 * HOUR });
+        expect(
+            shouldRejectOnNarrative(stale, { enabled: true, maxAgeMs: 24 * HOUR, now: NOW }),
+        ).toBe(false);
+    });
+});

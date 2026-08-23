@@ -89,18 +89,41 @@ export class AnalyzerService {
     }
 
     /**
-     * What is being promoted on this chain right now, refreshed by the scanner's boost poll.
+     * A rolling window of what this bot has actually seen trading, used as meta context.
      *
-     * The narrative model needs this because its training data cannot tell it today's meta. The
-     * scanner already fetches the feed each cycle, so keeping the descriptions costs nothing.
+     * The first version fed the model DexScreener's boost feed. That feed is PAID promotion, so
+     * labelling it "what is hot right now" biased every verdict toward whatever spammers were
+     * currently buying. This stream is organic: these are tokens the analyzer just measured, with
+     * their real five-minute volume, and it costs no extra request because the data already passes
+     * through checkMarketTraction on every cycle.
      */
-    private trendingDescriptions: string[] = [];
+    private readonly recentlySeen = new Map<string, { name: string; volume5m: number; at: number }>();
 
-    setTrendingDescriptions(descriptions: string[]): void {
-        this.trendingDescriptions = (descriptions || [])
-            .map((d) => String(d ?? '').replace(/\s+/g, ' ').trim())
-            .filter((d) => d.length > 0)
-            .slice(0, 25);
+    private recordSeenToken(name: string | undefined, volume5m: number): void {
+        const label = String(name ?? '').trim();
+        if (!label || !Number.isFinite(volume5m) || volume5m <= 0) return;
+
+        this.recentlySeen.set(label.toLowerCase(), { name: label, volume5m, at: Date.now() });
+
+        // Bounded by age, then by size, so a quiet period cannot leave stale names in the context.
+        const cutoff = Date.now() - 30 * 60 * 1000;
+        for (const [key, entry] of this.recentlySeen.entries()) {
+            if (entry.at < cutoff) this.recentlySeen.delete(key);
+        }
+        if (this.recentlySeen.size > 200) {
+            const oldest = [...this.recentlySeen.entries()].sort((a, b) => a[1].at - b[1].at);
+            for (const [key] of oldest.slice(0, this.recentlySeen.size - 200)) {
+                this.recentlySeen.delete(key);
+            }
+        }
+    }
+
+    /** The busiest names seen recently — the model's evidence for what is actually being traded. */
+    private get trendingDescriptions(): string[] {
+        return [...this.recentlySeen.values()]
+            .sort((a, b) => b.volume5m - a.volume5m)
+            .slice(0, 25)
+            .map((e) => `${e.name} (vol5m $${Math.round(e.volume5m)})`);
     }
 
     private isMetaNarrativeMatch(tokenName?: string): { matched: boolean; label?: string } {
@@ -615,16 +638,17 @@ export class AnalyzerService {
 
             // One-directional: a WEAK verdict can drop a candidate, a STRONG one changes nothing.
             // A cold verdict means the model has no opinion yet, which must not block the buy.
-            if (
-                shouldRejectOnNarrative(this.narrativeService.getVerdict(tokenMint), {
-                    enabled: this.narrativeService.isEnabled,
-                    maxAgeMs: this.narrativeService.maxAgeMs,
-                    minConfidence: this.narrativeService.minConfidence,
-                })
-            ) {
-                const verdict = this.narrativeService.getVerdict(tokenMint);
+            const narrativeVerdict = this.narrativeService.getVerdict(tokenMint);
+            const narrativeWouldReject = shouldRejectOnNarrative(narrativeVerdict, {
+                // Ask what the gate WOULD decide, independently of whether it is switched on.
+                enabled: true,
+                maxAgeMs: this.narrativeService.maxAgeMs,
+                minConfidence: this.narrativeService.minConfidence,
+            });
+
+            if (narrativeWouldReject && this.narrativeService.isEnabled) {
                 this.logger.debug(
-                    `[${tokenMint}] Narrative gate rejected. reason=${verdict?.reasoning}`,
+                    `[${tokenMint}] Narrative gate rejected. reason=${narrativeVerdict?.reasoning}`,
                 );
                 return {
                     safe: false,
@@ -632,6 +656,17 @@ export class AnalyzerService {
                     permanent: false,
                     metadata: baseMetadata,
                 };
+            }
+
+            // Shadow mode: record the verdict the gate would have acted on, but let the candidate
+            // through. This line is the entire output of the shadow period — it is what later gets
+            // compared against how the trade actually turned out.
+            if (narrativeVerdict && this.narrativeService.isShadowEnabled) {
+                this.logger.log(
+                    `[${tokenMint}] narrative_shadow verdict=${narrativeVerdict.verdict} ` +
+                        `confidence=${narrativeVerdict.confidenceLevel} ` +
+                        `wouldReject=${narrativeWouldReject} reason=${narrativeVerdict.reasoning}`,
+                );
             }
 
             if (shouldUseAi) {
@@ -879,6 +914,7 @@ export class AnalyzerService {
             const marketCap = pair.fdv || 0;
             const symbol = pair.baseToken?.symbol;
             const tokenName = pair.baseToken?.name || pair.baseToken?.symbol || symbol;
+            this.recordSeenToken(tokenName, volume5m);
             const pairCreatedAt = pair.pairCreatedAt || 0;
             const socials = {
                 twitter: pair.info?.socials?.find((s) => s.type === 'twitter')?.url,

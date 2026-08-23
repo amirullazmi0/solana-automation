@@ -186,6 +186,11 @@ Muncul di log produksi dan alert Telegram. Kolom knob menunjukkan setelan mana y
 | `stagnant_timeout` | Token dipantau terlalu lama tanpa lolos | `ANALYZER_MAX_SCAN_DURATION_MIN` |
 | `ai_rejected` | Lapis keputusan AI mengembalikan skip | `ENABLE_AI_ENTRY_DECISION`, `AI_CONVICTION_THRESHOLD` |
 | `narrative_weak` | AI menilai nama dan jejak sosial token sebagai template spam | `ENABLE_AI_NARRATIVE_GATE`, `NARRATIVE_MIN_CONFIDENCE` |
+
+Selama `ENABLE_AI_NARRATIVE_GATE` mati, verdict tetap dihitung dan dicatat sebagai
+`narrative_shadow` di log — lengkap dengan `wouldReject` — tapi tidak pernah menggugurkan kandidat.
+Itulah keluaran periode shadow, dan satu-satunya dasar untuk memutuskan apakah gerbangnya layak
+dinyalakan.
 | `error` | Pengecualian tak terduga di rantai gerbang | — |
 
 ### Keamanan dan RugCheck
@@ -584,7 +589,12 @@ sehingga breaker menjadi lebih ketat, bukan lebih longgar. Jendela bergulirlah y
 | `AI_MODEL` | `gpt-4o-mini` | Model yang dipakai. Tetap di sini karena mendukung `temperature`, non-reasoning sehingga risiko timeout rendah, dan harga input-nya murah untuk prompt yang lebih besar dari output-nya |
 | `AI_TEMPERATURE` | `0.1` | **Kosongkan agar field-nya tidak dikirim.** Sebagian model GPT-5 menolak parameter ini |
 | `AI_REASONING_EFFORT` | `""` | Isi `"none"` untuk model reasoning, supaya reasoning token tidak menambah biaya dan latensi |
-| `ENABLE_AI_NARRATIVE_GATE` | `true` | Gerbang narasi: menilai kredibilitas nama dan sosial token |
+| `ENABLE_AI_NARRATIVE_SHADOW` | `true` | AI **menilai dan menyimpan** verdict narasi, tanpa membatalkan trade |
+| `ENABLE_AI_NARRATIVE_GATE` | `false` | **Penegakan.** Terpisah dari shadow supaya bukti bisa dikumpulkan sebelum dipercaya |
+| `AI_MODEL_NARRATIVE` | `gpt-5.6-luna` | Model khusus narasi. Terverifikasi jalan: 1118 ms dengan `reasoning_effort: none` |
+| `AI_TEMPERATURE_NARRATIVE` | `""` | **Wajib kosong.** `gpt-5.6-luna` menolak `temperature` dengan 400 |
+| `AI_REASONING_EFFORT_NARRATIVE` | `"none"` | Tanpa ini reasoning token menambah biaya dan latensi |
+| `AI_MODEL_EXIT` | `gpt-4o-mini` | Model exit advisor |
 | `NARRATIVE_CACHE_TTL_MS` | `86400000` | 24 jam. Narasi statis per token, jadi satu mint cukup dinilai sekali |
 | `NARRATIVE_MIN_CONFIDENCE` | `"high"` | Hanya keyakinan setinggi ini yang boleh menolak |
 | `AI_NARRATIVE_TIMEOUT_MS` | `8000` | Muat di jendela RugCheck yang memang sudah ditunggu |
@@ -609,8 +619,12 @@ tapi verdict `STRONG` tidak mengubah apa pun. AI tidak pernah bisa membujuk bot 
 gerbang deterministik belum setujui.
 
 Model tidak diminta mengingat meta yang sedang panas — itu di luar batas pengetahuannya. Prompt-nya
-menyertakan deskripsi token yang sedang di-boost dari feed yang sudah dipolling scanner, sebagai
-bukti apa yang dipromosikan saat ini.
+menyertakan nama token yang **baru saja dianalisis bot ini sendiri** beserta volume 5 menitnya,
+sebagai bukti apa yang benar-benar diperdagangkan sekarang.
+
+Versi pertama memakai feed `token-boosts` DexScreener untuk ini, dan itu keliru: feed tersebut
+adalah **promosi berbayar**, sehingga verdict-nya condong ke apa pun yang sedang dibeli spammer.
+Aliran analyzer sendiri bersifat organik dan tidak menambah satu pun panggilan jaringan.
 
 Advisor exit **hanya boleh mempersempit** trailing atau mempercepat exit. Tidak ada jalur yang
 mengizinkannya menahan posisi melewati pemicu — invarian itu dikunci oleh test di
