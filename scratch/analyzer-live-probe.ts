@@ -12,6 +12,7 @@ import { ConfigService } from '@nestjs/config';
 import * as https from 'https';
 import { AnalyzerService } from '../src/analyzer/analyzer.service';
 import { FlowVolumeService } from '../src/analyzer/flow-volume.service';
+import { NarrativeService } from '../src/analyzer/narrative.service';
 import { loadRuntimeConfig } from '../src/config/runtime-config';
 import { CreatorProfileService } from '../src/analyzer/creator-profile.service';
 import { AIService } from '../src/ai/ai.service';
@@ -91,6 +92,7 @@ async function main() {
         creatorProfileService,
         aiService,
         flowVolumeService,
+        new NarrativeService(configService, aiService, prismaService),
     );
 
     const mints = process.argv.slice(2).length ? process.argv.slice(2) : await discover();

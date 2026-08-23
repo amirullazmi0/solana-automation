@@ -26,6 +26,8 @@ import { selectBestDexScreenerPair } from '../common/dex-pair';
 import { buyShare, failsBuyShare, formatBuyShare } from '../common/flow-pressure';
 import { averageVolume5m } from '../common/volume-baseline';
 import { FlowVolumeService } from './flow-volume.service';
+import { shouldRejectOnNarrative } from '../ai/narrative-advice';
+import { NarrativeService } from './narrative.service';
 import { evaluateMintSafety } from '../common/token-mint-safety';
 import { DEFAULT_MIN_LP_LOCKED_PCT, isLpSafe, isMarketLpSafe, maxLpLockedPct } from '../common/lp-safety';
 import {
@@ -66,6 +68,7 @@ export class AnalyzerService {
         private readonly creatorProfileService: CreatorProfileService,
         private readonly aiService: AIService,
         private readonly flowVolumeService: FlowVolumeService,
+        private readonly narrativeService: NarrativeService,
     ) {
         this.connection = new Connection(this.getSolanaRpcUrl(), 'confirmed');
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
@@ -83,6 +86,21 @@ export class AnalyzerService {
         }
 
         return 'https://api.mainnet-beta.solana.com';
+    }
+
+    /**
+     * What is being promoted on this chain right now, refreshed by the scanner's boost poll.
+     *
+     * The narrative model needs this because its training data cannot tell it today's meta. The
+     * scanner already fetches the feed each cycle, so keeping the descriptions costs nothing.
+     */
+    private trendingDescriptions: string[] = [];
+
+    setTrendingDescriptions(descriptions: string[]): void {
+        this.trendingDescriptions = (descriptions || [])
+            .map((d) => String(d ?? '').replace(/\s+/g, ' ').trim())
+            .filter((d) => d.length > 0)
+            .slice(0, 25);
     }
 
     private isMetaNarrativeMatch(tokenName?: string): { matched: boolean; label?: string } {
@@ -363,6 +381,29 @@ export class AnalyzerService {
                 };
             }
 
+            // Warm the narrative verdict here rather than at the buy decision. Everything below —
+            // RugCheck, creator profile, whale scoring — is seconds of network I/O this call is
+            // already paying for, so the model answers inside a window that already exists. If it
+            // has not answered by the time the decision is reached, the candidate simply proceeds
+            // without an opinion.
+            this.narrativeService.scheduleEvaluation(
+                tokenMint,
+                {
+                    tokenName: traction.tokenName || traction.symbol || tokenMint,
+                    symbol: traction.symbol || 'UNKNOWN',
+                    deterministicLabel: this.isMetaNarrativeMatch(traction.tokenName).label,
+                    twitterUrl: traction.socials?.twitter,
+                    telegramUrl: traction.socials?.telegram,
+                    websiteUrl: traction.socials?.website,
+                    ageMinutes: traction.pairCreatedAt
+                        ? (Date.now() - traction.pairCreatedAt) / 60000
+                        : 0,
+                    marketCapUsd: traction.marketCap || 0,
+                    trendingDescriptions: this.trendingDescriptions,
+                },
+                this.isMetaNarrativeMatch(traction.tokenName).label,
+            );
+
             // 🛡️ ADVANCED METRICS CHECK
             // 1. VoL Check (Min 0.05 untuk koin breakout)
             const minVolScore = Number.parseFloat(
@@ -569,6 +610,27 @@ export class AnalyzerService {
                     reason: 'whale_signal_too_weak',
                     permanent: false,
                     metadata: finalMetadata,
+                };
+            }
+
+            // One-directional: a WEAK verdict can drop a candidate, a STRONG one changes nothing.
+            // A cold verdict means the model has no opinion yet, which must not block the buy.
+            if (
+                shouldRejectOnNarrative(this.narrativeService.getVerdict(tokenMint), {
+                    enabled: this.narrativeService.isEnabled,
+                    maxAgeMs: this.narrativeService.maxAgeMs,
+                    minConfidence: this.narrativeService.minConfidence,
+                })
+            ) {
+                const verdict = this.narrativeService.getVerdict(tokenMint);
+                this.logger.debug(
+                    `[${tokenMint}] Narrative gate rejected. reason=${verdict?.reasoning}`,
+                );
+                return {
+                    safe: false,
+                    reason: 'narrative_weak',
+                    permanent: false,
+                    metadata: baseMetadata,
                 };
             }
 

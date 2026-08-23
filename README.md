@@ -185,6 +185,7 @@ Muncul di log produksi dan alert Telegram. Kolom knob menunjukkan setelan mana y
 | `whale_signal_too_weak` | Whale signal score WHALE di bawah floor | `WHALE_SIGNAL_SCORE_FLOOR` |
 | `stagnant_timeout` | Token dipantau terlalu lama tanpa lolos | `ANALYZER_MAX_SCAN_DURATION_MIN` |
 | `ai_rejected` | Lapis keputusan AI mengembalikan skip | `ENABLE_AI_ENTRY_DECISION`, `AI_CONVICTION_THRESHOLD` |
+| `narrative_weak` | AI menilai nama dan jejak sosial token sebagai template spam | `ENABLE_AI_NARRATIVE_GATE`, `NARRATIVE_MIN_CONFIDENCE` |
 | `error` | Pengecualian tak terduga di rantai gerbang | — |
 
 ### Keamanan dan RugCheck
@@ -580,7 +581,13 @@ sehingga breaker menjadi lebih ketat, bukan lebih longgar. Jendela bergulirlah y
 | Knob | Nilai | Keterangan |
 | --- | --- | --- |
 | `AI_BASE_URL` | `https://api.openai.com/v1` | Endpoint kompatibel OpenAI |
-| `AI_MODEL` | `gpt-4o-mini` | Model yang dipakai |
+| `AI_MODEL` | `gpt-4o-mini` | Model yang dipakai. Tetap di sini karena mendukung `temperature`, non-reasoning sehingga risiko timeout rendah, dan harga input-nya murah untuk prompt yang lebih besar dari output-nya |
+| `AI_TEMPERATURE` | `0.1` | **Kosongkan agar field-nya tidak dikirim.** Sebagian model GPT-5 menolak parameter ini |
+| `AI_REASONING_EFFORT` | `""` | Isi `"none"` untuk model reasoning, supaya reasoning token tidak menambah biaya dan latensi |
+| `ENABLE_AI_NARRATIVE_GATE` | `true` | Gerbang narasi: menilai kredibilitas nama dan sosial token |
+| `NARRATIVE_CACHE_TTL_MS` | `86400000` | 24 jam. Narasi statis per token, jadi satu mint cukup dinilai sekali |
+| `NARRATIVE_MIN_CONFIDENCE` | `"high"` | Hanya keyakinan setinggi ini yang boleh menolak |
+| `AI_NARRATIVE_TIMEOUT_MS` | `8000` | Muat di jendela RugCheck yang memang sudah ditunggu |
 | `ENABLE_AI_ENTRY_DECISION` | false | Keputusan entry oleh LLM |
 | `AI_CONVICTION_THRESHOLD` | (kode: 75) | Skor keyakinan minimum untuk beli |
 | `ENABLE_AI_EXIT_ADVISOR` | true | Advisor exit, berjalan di latar belakang |
@@ -596,6 +603,14 @@ sehingga breaker menjadi lebih ketat, bukan lebih longgar. Jendela bergulirlah y
 | `AI_CUTLOSS_MIN_CONFIDENCE` | (kode: medium) | Keyakinan minimum pembelaan |
 | `HEALTH_CHECK_BEFORE_EARLY_SL` | false | Cek kesehatan AI sebelum stop dini |
 | `HEALTH_CHECK_BEFORE_EARLY_TRAILING` | false | Cek kesehatan AI sebelum trailing dini |
+
+Gerbang narasi juga **satu arah**: verdict `WEAK` berkeyakinan tinggi bisa menggugurkan kandidat,
+tapi verdict `STRONG` tidak mengubah apa pun. AI tidak pernah bisa membujuk bot masuk ke trade yang
+gerbang deterministik belum setujui.
+
+Model tidak diminta mengingat meta yang sedang panas — itu di luar batas pengetahuannya. Prompt-nya
+menyertakan deskripsi token yang sedang di-boost dari feed yang sudah dipolling scanner, sebagai
+bukti apa yang dipromosikan saat ini.
 
 Advisor exit **hanya boleh mempersempit** trailing atau mempercepat exit. Tidak ada jalur yang
 mengizinkannya menahan posisi melewati pemicu — invarian itu dikunci oleh test di

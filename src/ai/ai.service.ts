@@ -13,6 +13,12 @@ import {
     OpenAIChatCompletionResponse,
 } from '../dto/ai.dto';
 import { AiExitAdvice, AiExitAdviceMetrics, normalizeExitAdvice } from './exit-advice';
+import {
+    NarrativeAdvice,
+    NarrativeMetrics,
+    normalizeNarrativeAdvice,
+    stripJsonFence,
+} from './narrative-advice';
 
 interface CacheEntry {
     result: AIAnalysisResult;
@@ -169,6 +175,122 @@ export class AIService {
                 `[AI Brain] Trailing distance recommendation failed, using default config: ${message}`,
             );
             return this.getTrailingDistanceConfig();
+        }
+    }
+
+    /**
+     * Optional request parameters that differ between model families.
+     *
+     * These were hardcoded literals. The model id is an operator-facing knob, and model families
+     * disagree about them: some GPT-5 models reject `temperature` outright, and reasoning models
+     * bill reasoning tokens as output unless effort is set to none. Omitting an unset field rather
+     * than sending a default is what lets the operator switch models from config alone.
+     */
+    private buildModelParams(): Record<string, unknown> {
+        const params: Record<string, unknown> = {};
+
+        // String() before trim: config.json holds AI_TEMPERATURE as a JSON number, so ConfigService
+        // hands back a number and calling .trim() on it throws. Found by running the advisor
+        // against live tokens, where every call failed before reaching the API.
+        const rawTemperature = String(
+            this.configService.get<string | number>('AI_TEMPERATURE', '') ?? '',
+        ).trim();
+        if (rawTemperature) {
+            const temperature = Number.parseFloat(rawTemperature);
+            if (Number.isFinite(temperature)) params.temperature = temperature;
+        }
+
+        const effort = String(
+            this.configService.get<string>('AI_REASONING_EFFORT', '') ?? '',
+        ).trim();
+        if (effort) params.reasoning_effort = effort;
+
+        return params;
+    }
+
+    /**
+     * Judges a candidate's narrative and social credibility.
+     *
+     * Deliberately given two things no other AI path here receives: the real social URLs (every
+     * other consumer collapses them to presence booleans) and a snapshot of what is being promoted
+     * right now, because a model cannot know today's meta from training data alone.
+     *
+     * Returns null on any failure so the caller treats it as no opinion.
+     */
+    async evaluateNarrative(
+        tokenMint: string,
+        metrics: NarrativeMetrics,
+    ): Promise<NarrativeAdvice | null> {
+        const apiKey = this.configService.get<string>('OPENAI_API_KEY');
+        if (!apiKey) return null;
+
+        const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
+        const model = this.configService.get<string>('AI_MODEL', 'gpt-4o-mini');
+        const timeout = Number.parseInt(
+            this.configService.get<string>('AI_NARRATIVE_TIMEOUT_MS', '8000'),
+            10,
+        );
+
+        const systemPrompt = `You judge whether a Solana memecoin has a credible narrative, using
+its name and its actual social links. Deterministic filters have already checked liquidity, volume,
+holders and contract safety — do not re-judge those. You cannot approve a buy; a positive verdict
+changes nothing. Your answer can only cause a candidate to be skipped, so answer WEAK only when the
+evidence is clear.
+
+Return JSON with exactly these fields:
+{
+  "verdict": "STRONG" | "NEUTRAL" | "WEAK",
+  "confidenceLevel": "high" | "medium" | "low",
+  "reasoning": "<brief indonesian explanation, max 2 sentences>"
+}
+
+How to judge:
+- WEAK means the project looks like template spam: a generic or derivative name with no social
+  presence, or links that look auto-generated rather than run by anyone.
+- The trending list shows what is being promoted on this chain RIGHT NOW. Use it as your evidence
+  for what the live meta is; do not rely on your own training data for current trends.
+- A name aligning with a live meta AND having real socials is STRONG. A name aligning with nothing
+  and having no socials is WEAK. Most tokens are NEUTRAL — say so.
+- A brand-new token with no socials yet is not automatically spam. Reserve high confidence for
+  cases where the name itself is clearly derivative.
+- deterministicLabel is a regex guess at the theme. Treat it as a hint, not as truth.`;
+
+        try {
+            const response = await axios.post<OpenAIChatCompletionResponse>(
+                `${baseUrl}/chat/completions`,
+                {
+                    model,
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: JSON.stringify({ tokenMint, ...metrics }) },
+                    ],
+                    response_format: { type: 'json_object' },
+                    ...this.buildModelParams(),
+                },
+                {
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json',
+                    },
+                    timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 8000,
+                },
+            );
+
+            const content = response.data.choices?.[0]?.message?.content;
+            if (!content) return null;
+
+            const advice = normalizeNarrativeAdvice(
+                JSON.parse(stripJsonFence(content)) as Partial<NarrativeAdvice>,
+                Date.now(),
+            );
+            this.logger.log(
+                `[AI Narrative] ${metrics.symbol || tokenMint} verdict=${advice.verdict} confidence=${advice.confidenceLevel} label=${metrics.deterministicLabel ?? 'none'} reason=${advice.reasoning}`,
+            );
+            return advice;
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[AI Narrative] Failed for ${tokenMint}: ${msg}.`);
+            return null;
         }
     }
 

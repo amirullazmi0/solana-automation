@@ -53,20 +53,20 @@ enum WithdrawalStatus {
 }
 
 model TelegramChat {
-  id          Int                 @id @default(autoincrement())
-  chatId      String              @unique
-  chatType    TelegramChatType
-  title       String?
-  username    String?
-  status      TelegramChatStatus   @default(ACTIVE)
-  lastSeenAt  DateTime             @default(now())
-  createdAt   DateTime             @default(now())
-  updatedAt   DateTime             @updatedAt
-  walletVault TelegramWalletVault?
-  deposits    TelegramDepositLedger[]
-  settings    TelegramChatSetting?
-  trades      Trade[]
-  withdrawals TelegramWithdrawal[]
+  id                Int                     @id @default(autoincrement())
+  chatId            String                  @unique
+  chatType          TelegramChatType
+  title             String?
+  username          String?
+  status            TelegramChatStatus      @default(ACTIVE)
+  lastSeenAt        DateTime                @default(now())
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  walletVault       TelegramWalletVault?
+  deposits          TelegramDepositLedger[]
+  settings          TelegramChatSetting?
+  trades            Trade[]
+  withdrawals       TelegramWithdrawal[]
   tokenSafetyProbes TokenSafetyProbe[]
 
   @@index([status, chatType])
@@ -74,29 +74,29 @@ model TelegramChat {
 }
 
 model TelegramWalletVault {
-  id                  Int           @id @default(autoincrement())
-  telegramChatId      Int           @unique
-  publicKey           String        @unique
-  balanceSol          Float         @default(0)
-  encryptedSecretKey  String
+  id                   Int          @id @default(autoincrement())
+  telegramChatId       Int          @unique
+  publicKey            String       @unique
+  balanceSol           Float        @default(0)
+  encryptedSecretKey   String
   initializationVector String
-  authTag             String
-  keyVersion          Int           @default(1)
-  createdAt           DateTime      @default(now())
-  updatedAt           DateTime      @updatedAt
-  chat                TelegramChat  @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+  authTag              String
+  keyVersion           Int          @default(1)
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+  chat                 TelegramChat @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
 }
 
 model TelegramDepositLedger {
-  id               Int          @id @default(autoincrement())
-  telegramChatId   Int
-  walletPublicKey  String
-  signature        String
-  amountSol        Float
-  slotNumber       Int?
-  txTimestamp      DateTime?
-  createdAt        DateTime     @default(now())
-  chat             TelegramChat @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+  id              Int          @id @default(autoincrement())
+  telegramChatId  Int
+  walletPublicKey String
+  signature       String
+  amountSol       Float
+  slotNumber      Int?
+  txTimestamp     DateTime?
+  createdAt       DateTime     @default(now())
+  chat            TelegramChat @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
 
   @@unique([signature, walletPublicKey])
   @@index([telegramChatId, createdAt])
@@ -104,42 +104,42 @@ model TelegramDepositLedger {
 }
 
 model TelegramChatSetting {
-  id               Int          @id @default(autoincrement())
-  telegramChatId   Int          @unique
-  totalSlots       Int          @default(2)
-  positionSizeUsd  Float        @default(5)
-  slippageOnSol    Float        @default(0.005)
-  dryRun           Boolean      @default(true)
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
-  chat             TelegramChat  @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+  id              Int          @id @default(autoincrement())
+  telegramChatId  Int          @unique
+  totalSlots      Int          @default(2)
+  positionSizeUsd Float        @default(5)
+  slippageOnSol   Float        @default(0.005)
+  dryRun          Boolean      @default(true)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  chat            TelegramChat @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
 }
 
 model TelegramWithdrawal {
-  id                  Int                 @id @default(autoincrement())
-  telegramChatId      Int
-  destinationAddress  String
-  amountMode          WithdrawalAmountMode
-  requestedAmount     Float
+  id                   Int                  @id @default(autoincrement())
+  telegramChatId       Int
+  destinationAddress   String
+  amountMode           WithdrawalAmountMode
+  requestedAmount      Float
   amountTransferredSol Float?
-  balanceBeforeSol    Float?
-  balanceAfterSol     Float?
-  status              WithdrawalStatus     @default(PENDING)
-  txHash              String?
-  errorMessage        String?
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
-  chat                TelegramChat        @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+  balanceBeforeSol     Float?
+  balanceAfterSol      Float?
+  status               WithdrawalStatus     @default(PENDING)
+  txHash               String?
+  errorMessage         String?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  chat                 TelegramChat         @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
 
   @@index([telegramChatId, createdAt])
   @@index([telegramChatId, status])
 }
 
 model Trade {
-  id                      Int         @id @default(autoincrement())
+  id                      Int                 @id @default(autoincrement())
   telegramChatId          Int?
   tokenMint               String
-  symbol                  String?     @default("UNKNOWN")
+  symbol                  String?             @default("UNKNOWN")
   slotNumber              Int
   entryPrice              Float
   highestPrice            Float
@@ -166,11 +166,11 @@ model Trade {
   entryMarketCap          Float?
   solPriceAtEntry         Float?
   entryValueUsd           Float?
-  status                  TradeStatus @default(OPEN)
-  mode                    TradeMode   @default(LIVE)
+  status                  TradeStatus         @default(OPEN)
+  mode                    TradeMode           @default(LIVE)
   route                   TradeRoute?
   aiDecisionSnapshotId    Int?
-  aiCutlossDefenseCount   Int         @default(0)
+  aiCutlossDefenseCount   Int                 @default(0)
   aiCutlossLastAt         DateTime?
   aiCutlossReason         String?
   amountInSol             Float
@@ -182,14 +182,14 @@ model Trade {
   topHolderAddress        String?
   initialCreatorBalance   Float?
   initialTopHolderBalance Float?
-  createdAt               DateTime    @default(now())
-  updatedAt               DateTime    @updatedAt
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
   slTriggeredAt           DateTime?
   partialTakeProfitAt     DateTime?
   targetTakeProfit        Float?
   targetStopLoss          Float?
   targetTrailingDistance  Float?
-  telegramChat            TelegramChat? @relation(fields: [telegramChatId], references: [id], onDelete: SetNull)
+  telegramChat            TelegramChat?       @relation(fields: [telegramChatId], references: [id], onDelete: SetNull)
   aiDecisionSnapshot      AiDecisionSnapshot? @relation(fields: [aiDecisionSnapshotId], references: [id], onDelete: SetNull)
 
   @@index([status])
@@ -200,19 +200,19 @@ model Trade {
 }
 
 model TokenSafetyProbe {
-  id               Int                     @id @default(autoincrement())
-  telegramChatId   Int
-  tokenMint        String
-  walletAddress    String
-  amountUsd        Float
-  verdict          TokenSafetyProbeVerdict
-  reason           String?
-  buyTxHash        String?
-  sellTxHash       String?
-  expiresAt        DateTime?
-  createdAt        DateTime                @default(now())
-  updatedAt        DateTime                @updatedAt
-  chat             TelegramChat            @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
+  id             Int                     @id @default(autoincrement())
+  telegramChatId Int
+  tokenMint      String
+  walletAddress  String
+  amountUsd      Float
+  verdict        TokenSafetyProbeVerdict
+  reason         String?
+  buyTxHash      String?
+  sellTxHash     String?
+  expiresAt      DateTime?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+  chat           TelegramChat            @relation(fields: [telegramChatId], references: [id], onDelete: Cascade)
 
   @@unique([telegramChatId, tokenMint])
   @@index([tokenMint, verdict])
@@ -220,12 +220,12 @@ model TokenSafetyProbe {
 }
 
 model AiDecisionSnapshot {
-  id        Int         @id @default(autoincrement())
+  id        Int        @id @default(autoincrement())
   tokenMint String
   route     TradeRoute
   metrics   Json
   result    Json
-  createdAt DateTime    @default(now())
+  createdAt DateTime   @default(now())
   trades    Trade[]
 
   @@index([tokenMint, createdAt])
@@ -239,39 +239,59 @@ enum WatchlistStatus {
 }
 
 model Watchlist {
-  id            Int             @id @default(autoincrement())
-  tokenMint     String          @unique
-  symbol        String?
-  tokenName     String?
-  mcap          Float?
-  liquidity     Float?
-  volumeSurge   Float?
-  volScore      Float?
-  zScore        Float?
-  priceChange1h Float?
-  isPumpFun     Boolean         @default(false)
-  hasWebsite    Boolean?
-  hasTwitter    Boolean?
-  hasTelegram   Boolean?
-  isDexPaidUpdated Boolean?
-  isCommunityTakeover Boolean?
-  whaleSignalScore Float?
-  pairCreatedAt DateTime?
-  entryConfirmStartedAt DateTime?
-  entryConfirmPriceUsd Float?
+  id                       Int             @id @default(autoincrement())
+  tokenMint                String          @unique
+  symbol                   String?
+  tokenName                String?
+  mcap                     Float?
+  liquidity                Float?
+  volumeSurge              Float?
+  volScore                 Float?
+  zScore                   Float?
+  priceChange1h            Float?
+  isPumpFun                Boolean         @default(false)
+  hasWebsite               Boolean?
+  hasTwitter               Boolean?
+  hasTelegram              Boolean?
+  isDexPaidUpdated         Boolean?
+  isCommunityTakeover      Boolean?
+  whaleSignalScore         Float?
+  pairCreatedAt            DateTime?
+  entryConfirmStartedAt    DateTime?
+  entryConfirmPriceUsd     Float?
   entryConfirmLiquidityUsd Float?
-  entryConfirmBuys5m Int?
-  entryConfirmSells5m Int?
-  entryConfirmCount Int @default(0)
-  checkCount    Int             @default(0)
-  lastCheckedAt DateTime        @default(now())
-  createdAt     DateTime        @default(now())
-  status        WatchlistStatus @default(PENDING)
-  reason        String?
+  entryConfirmBuys5m       Int?
+  entryConfirmSells5m      Int?
+  entryConfirmCount        Int             @default(0)
+  checkCount               Int             @default(0)
+  lastCheckedAt            DateTime        @default(now())
+  createdAt                DateTime        @default(now())
+  status                   WatchlistStatus @default(PENDING)
+  reason                   String?
 
   @@index([status, lastCheckedAt])
   @@index([createdAt, status])
   @@index([pairCreatedAt, createdAt])
+}
+
+// Narrative verdicts are static per token: a name and its social links do not change minute to
+// minute the way price and volume do. They therefore live in their own table rather than on
+// Watchlist, whose FAILED/PENDING rows are hard-deleted after 24 hours — which would drop the
+// verdict for exactly the mints the scanner re-encounters.
+model TokenNarrative {
+  tokenMint   String   @id
+  verdict     String
+  confidence  String
+  reasoning   String?
+  // Label from the deterministic regex matcher, kept alongside so the LLM verdict can be judged
+  // against the free baseline instead of being trusted on its own.
+  label       String?
+  evaluatedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([verdict])
+  @@index([evaluatedAt])
 }
 
 model CreatorProfile {

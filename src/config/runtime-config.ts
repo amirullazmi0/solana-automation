@@ -70,6 +70,15 @@ export function getRuntimePort(fallback = 3000): number {
     return port > 0 ? port : fallback;
 }
 
+function readString(config: ConfigReader | RuntimeConfig, key: string, fallback: string): string {
+    const isConfigReader = typeof (config as ConfigReader).get === 'function';
+    const value = isConfigReader
+        ? (config as ConfigReader).get<string>(key, fallback)
+        : (config[key] as string | undefined);
+    const text = String(value ?? fallback).trim();
+    return text.length > 0 ? text : fallback;
+}
+
 function readNumber(config: ConfigReader | RuntimeConfig, key: string, fallback: number): number {
     const isConfigReader = typeof (config as ConfigReader).get === 'function';
     const value = isConfigReader
@@ -115,6 +124,9 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     const minH1BuyVolumeShare = readNumber(config, 'MIN_H1_BUY_VOLUME_SHARE', 0);
     const heliusFlowMaxPages = readNumber(config, 'HELIUS_FLOW_MAX_PAGES', 3);
     const drawdownLookbackHours = readNumber(config, 'RISK_DRAWDOWN_LOOKBACK_HOURS', 0);
+    const narrativeCacheTtlMs = readNumber(config, 'NARRATIVE_CACHE_TTL_MS', 86400000);
+    const narrativeTimeoutMs = readNumber(config, 'AI_NARRATIVE_TIMEOUT_MS', 8000);
+    const narrativeMinConfidence = readString(config, 'NARRATIVE_MIN_CONFIDENCE', 'high').toLowerCase();
     const bearishReboundMin5mPct = readNumber(config, 'BEARISH_REBOUND_MIN_5M_PCT', 3);
     const aggressiveHolderLiquidityUsd = readNumber(
         config,
@@ -210,6 +222,16 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     // configuration that produced a permanently latched drawdown breaker.
     if (drawdownLookbackHours < 0) {
         errors.push('RISK_DRAWDOWN_LOOKBACK_HOURS must be >= 0 (0 disables the rolling window).');
+    }
+    if (narrativeCacheTtlMs < 60000) {
+        errors.push('NARRATIVE_CACHE_TTL_MS must be >= 60000; narrative verdicts are static per token.');
+    }
+    // Must stay inside the RugCheck window it rides on, or the answer arrives after the decision.
+    if (narrativeTimeoutMs < 500 || narrativeTimeoutMs > 30000) {
+        errors.push('AI_NARRATIVE_TIMEOUT_MS must be between 500 and 30000.');
+    }
+    if (!['high', 'medium', 'low'].includes(narrativeMinConfidence)) {
+        errors.push('NARRATIVE_MIN_CONFIDENCE must be one of high, medium, low.');
     }
     if (aggressiveHolderLiquidityUsd < 0) {
         errors.push('AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD must be >= 0.');

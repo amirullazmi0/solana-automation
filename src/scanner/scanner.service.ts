@@ -437,14 +437,18 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 try {
                     // Sumber 1: Token Boosts (koin dengan marketing budget)
                     const boostRes = await DexLimiter.get<
-                        Array<{ chainId: string; tokenAddress: string }>
+                        Array<{ chainId: string; tokenAddress: string; description?: string }>
                     >('https://api.dexscreener.com/token-boosts/latest/v1', {
                         timeout: 10000,
                         httpsAgent: this.httpsAgent,
                     });
-                    const boostTokens = boostRes.data
-                        .filter((t) => t.chainId === 'solana')
-                        .map((t) => t.tokenAddress);
+                    const solanaBoosts = boostRes.data.filter((t) => t.chainId === 'solana');
+                    const boostTokens = solanaBoosts.map((t) => t.tokenAddress);
+                    // The promo blurbs on this feed are the only live evidence of the current meta
+                    // available to the narrative model, whose training data has a cutoff.
+                    this.analyzerService.setTrendingDescriptions(
+                        solanaBoosts.map((t) => t.description || '').filter(Boolean),
+                    );
 
                     // Sumber 2: Trending Pairs (koin yang sedang ramai organik)
                     let trendingTokens: string[] = [];
