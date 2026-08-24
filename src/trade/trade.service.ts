@@ -124,6 +124,46 @@ export function shouldAnnounceRiskBlock(
     return lastAnnouncedReason !== reason;
 }
 
+/**
+ * The trailing stop a runner keeps after a partial take-profit.
+ *
+ * The old expression was `min(entryPrice * (1 + floorPct), exitPrice * 0.999)`. Naming it a
+ * "floor" was misleading: `min` made it a CEILING, so banking half a position actively moved the
+ * stop DOWN. $TRUMPLEEK took partial profit at +24% with its trail sitting at roughly +12%, and
+ * the runner was left protected only near break-even — every point of the gain above that was
+ * handed back if the token faded.
+ *
+ * A trailing stop must never retreat. The break-even floor is now applied as a genuine floor
+ * against whatever the trail had already reached.
+ *
+ * The upper clamp stays: a stop at or above the current price would liquidate the runner on the
+ * very next tick, which is what guards a break-even floor configured above the take-profit
+ * trigger.
+ *
+ * (This is not what lost that trade — a liquidity rug gapped the price from +24% to -95% between
+ * two ticks, and no stop level can be filled when there is no price in between. It is a real
+ * exposure on an ordinary fade, which is a different and much more common way to lose.)
+ */
+export function resolveRunnerStopPrice(
+    existingStopPrice: number | null | undefined,
+    entryPrice: number,
+    runnerFloorPercent: number,
+    exitPrice: number,
+): number {
+    const floorPct = Number.isFinite(runnerFloorPercent) ? runnerFloorPercent : 8;
+    const entry = Number(entryPrice);
+    const breakEvenFloor = Number.isFinite(entry) && entry > 0 ? entry * (1 + floorPct / 100) : 0;
+
+    const existing = Number(existingStopPrice);
+    const held = Number.isFinite(existing) && existing > 0 ? existing : 0;
+
+    const desired = Math.max(held, breakEvenFloor);
+
+    const exit = Number(exitPrice);
+    if (!Number.isFinite(exit) || exit <= 0) return desired;
+    return Math.min(desired, exit * 0.999);
+}
+
 export function isUrgentExitReason(exitReason: string): boolean {
     return [
         'STOP_LOSS',
@@ -2908,13 +2948,14 @@ export class TradeService implements OnModuleInit {
                     select: { entryPrice: true },
                 });
                 const currentEntryPrice = freshEntryPriceRow?.entryPrice ?? trade.entryPrice;
-                const runnerFloorPrice =
-                    currentEntryPrice *
-                    (1 + (Number.isFinite(runnerFloorPercent) ? runnerFloorPercent : 8) / 100);
-                // Never let the break-even floor sit at/above the current price, or the
-                // runner would be liquidated on the next tick (guards a misconfigured floor
-                // set above the take-profit trigger). exitPrice = partial-TP price.
-                runnerStopPrice = Math.min(runnerFloorPrice, exitPriceSolForRunner * 0.999);
+                // Keeps whatever height the trail had already earned; see the function doc for
+                // why the old `min` silently lowered the stop when half the position was banked.
+                runnerStopPrice = resolveRunnerStopPrice(
+                    trade.trailingStopPrice,
+                    currentEntryPrice,
+                    runnerFloorPercent,
+                    exitPriceSolForRunner,
+                );
             }
 
             // GUARDED WRITE (finding: partial-sell vs scale-in race). `trade` here is a

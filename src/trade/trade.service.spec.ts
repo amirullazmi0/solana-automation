@@ -6,6 +6,7 @@ import {
     TradeService,
     capBuyPositionUsd,
     isUrgentExitReason,
+    resolveRunnerStopPrice,
     shouldAnnounceRiskBlock,
     resolveMonitorEntryPriceSol,
     calculateMinimumExecutablePositionUsd,
@@ -1156,5 +1157,51 @@ describe('shouldAnnounceRiskBlock', () => {
 
     it('announces again when the reason changes', () => {
         expect(shouldAnnounceRiskBlock('max_drawdown', 'daily_max_loss')).toBe(true);
+    });
+});
+
+describe('resolveRunnerStopPrice', () => {
+    // $TRUMPLEEK, reconstructed in SOL terms: entry 0.0000005044, the trail had reached roughly
+    // 0.00000057, and partial TP filled at 0.0000006255. The old min() dropped the stop to the
+    // break-even floor, discarding every point the trail had already locked in.
+    const ENTRY = 0.0000005044;
+    const TRAIL_REACHED = 0.00000057;
+    const PARTIAL_FILL = 0.0000006255;
+
+    it('keeps the height the trail already earned', () => {
+        const stop = resolveRunnerStopPrice(TRAIL_REACHED, ENTRY, 4, PARTIAL_FILL);
+        expect(stop).toBeCloseTo(TRAIL_REACHED, 12);
+        // The break-even floor on its own would have been materially lower.
+        expect(stop).toBeGreaterThan(ENTRY * 1.04);
+    });
+
+    // A trailing stop that can retreat is not a trailing stop.
+    it('never returns less than the existing stop', () => {
+        for (const existing of [0.0000006, 0.0000005, 0.00000055]) {
+            const stop = resolveRunnerStopPrice(existing, ENTRY, 4, PARTIAL_FILL);
+            expect(stop).toBeGreaterThanOrEqual(Math.min(existing, PARTIAL_FILL * 0.999));
+        }
+    });
+
+    it('applies the break-even floor when no trail has been set yet', () => {
+        expect(resolveRunnerStopPrice(null, ENTRY, 4, PARTIAL_FILL)).toBeCloseTo(ENTRY * 1.04, 12);
+        expect(resolveRunnerStopPrice(0, ENTRY, 4, PARTIAL_FILL)).toBeCloseTo(ENTRY * 1.04, 12);
+    });
+
+    // Guards a break-even floor misconfigured above the take-profit trigger, which would
+    // liquidate the runner on the very next tick.
+    it('never sits at or above the fill price', () => {
+        const stop = resolveRunnerStopPrice(PARTIAL_FILL * 2, ENTRY, 500, PARTIAL_FILL);
+        expect(stop).toBeLessThan(PARTIAL_FILL);
+        expect(stop).toBeCloseTo(PARTIAL_FILL * 0.999, 12);
+    });
+
+    it('survives junk inputs instead of producing a zero stop', () => {
+        expect(resolveRunnerStopPrice(TRAIL_REACHED, Number.NaN, 4, PARTIAL_FILL)).toBeCloseTo(
+            TRAIL_REACHED,
+            12,
+        );
+        // An unusable fill price must not clamp the stop to zero.
+        expect(resolveRunnerStopPrice(TRAIL_REACHED, ENTRY, 4, 0)).toBeCloseTo(TRAIL_REACHED, 12);
     });
 });
