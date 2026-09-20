@@ -13,6 +13,9 @@ import * as https from 'https';
 import { AnalyzerService } from '../src/analyzer/analyzer.service';
 import { FlowVolumeService } from '../src/analyzer/flow-volume.service';
 import { NarrativeService } from '../src/analyzer/narrative.service';
+import { MetaLabelService } from '../src/meta/meta-label.service';
+import { MetaTrendService } from '../src/meta/meta-trend.service';
+import { NullMetaSocialSource } from '../src/meta/meta-social';
 import { loadRuntimeConfig } from '../src/config/runtime-config';
 import { CreatorProfileService } from '../src/analyzer/creator-profile.service';
 import { AIService } from '../src/ai/ai.service';
@@ -82,9 +85,24 @@ async function main() {
             isBlacklisted: false,
         }),
     } as unknown as CreatorProfileService;
-    const aiService = {} as AIService;
+    // A real AIService, not a stub: the point of this probe is to see what the model actually
+    // returns for live token names and what that costs, which a stub cannot show.
+    const aiService = new AIService(configService, prismaService);
 
     const flowVolumeService = new FlowVolumeService(configService);
+
+    // Real services, stub Prisma. Labelling therefore makes real API calls and the probe reports
+    // what the model actually returns for live token names -- which is the point of running it.
+    // Heat stays empty unless the stub is pointed at a database with sightings in it, so a probe
+    // run measures labelling and cost, and the A/B of the score adjustment is done by re-running
+    // with META_BONUS_* zeroed.
+    const metaLabelService = new MetaLabelService(configService, aiService, prismaService);
+    const metaTrendService = new MetaTrendService(
+        configService,
+        prismaService,
+        metaLabelService,
+        new NullMetaSocialSource(),
+    );
 
     const analyzer = new AnalyzerService(
         configService,
@@ -93,7 +111,14 @@ async function main() {
         aiService,
         flowVolumeService,
         new NarrativeService(configService, aiService, prismaService),
+        metaLabelService,
+        metaTrendService,
     );
+
+    // Constructed directly rather than through Nest, so the lifecycle hook that starts the
+    // batch flush timer has to be called by hand. Without it the buffer only ever flushes
+    // when it hits META_LABEL_BATCH_SIZE, which a probe run never reaches.
+    await metaLabelService.onModuleInit();
 
     const mints = process.argv.slice(2).length ? process.argv.slice(2) : await discover();
     console.log(`\nMenguji ${mints.length} token lewat AnalyzerService.isTokenSafeToBuy() asli\n`);
@@ -133,6 +158,42 @@ async function main() {
         console.table(passed);
     }
     console.log(`\nTotal: ${mints.length} | Lolos: ${passed.length}`);
+
+    // Give the last batch a chance to leave the buffer, then report what the model actually said
+    // and what it cost. This is the measurement the cost estimate has to be checked against.
+    console.log('\nMenunggu batch pelabelan terakhir...');
+    await sleep(
+        Number.parseInt(String(configService.get('META_LABEL_BATCH_INTERVAL_MS', '20000')), 10) +
+            8000,
+    );
+
+    const labelled: Array<Record<string, unknown>> = [];
+    const byLabel = new Map<string, number>();
+    for (const mint of mints) {
+        const record = metaLabelService.getRecord(mint);
+        if (!record) continue;
+        labelled.push({ mint: mint.slice(0, 8), label: record.label, conf: record.confidence });
+        byLabel.set(record.label, (byLabel.get(record.label) ?? 0) + 1);
+    }
+
+    console.log('\n=== SEBARAN META ===');
+    for (const [label, count] of [...byLabel.entries()].sort((a, b) => b[1] - a[1])) {
+        console.log(`${String(count).padStart(4)}  ${label}`);
+    }
+
+    const usage = metaLabelService.getUsageSnapshot();
+    const perMint = usage.mints > 0 ? (usage.promptTokens + usage.completionTokens) / usage.mints : 0;
+    console.log('\n=== BIAYA PELABELAN (terukur, bukan estimasi) ===');
+    console.log(`request       : ${usage.requests}`);
+    console.log(`mint terlabel : ${usage.mints}`);
+    console.log(`token in/out  : ${usage.promptTokens} / ${usage.completionTokens}`);
+    console.log(`token per mint: ${perMint.toFixed(1)}`);
+    console.log(`belum terlabel: ${mints.length - labelled.length} dari ${mints.length}`);
+
+    metaLabelService.onModuleDestroy();
+    metaTrendService.onModuleDestroy();
+    process.exit(0);
+
 }
 
 void main();
