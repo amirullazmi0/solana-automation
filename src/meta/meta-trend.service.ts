@@ -89,6 +89,16 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
         return this.readNumber('META_REFRESH_MS', 120000, 10000, 3600000);
     }
 
+    /**
+     * Length of the "now" slice the acceleration term compares against the rest of the window.
+     *
+     * An hour by default: long enough that a handful of launches is not noise, short enough that a
+     * meta waking up is visible while it is still waking up rather than after it has peaked.
+     */
+    private get accelWindowMinutes(): number {
+        return this.readNumber('META_ACCEL_WINDOW_MIN', 60, 5, 1440);
+    }
+
     private get sightingDedupeMs(): number {
         return this.readNumber('META_SIGHTING_DEDUPE_MS', 300000, 10000, 3600000);
     }
@@ -99,6 +109,7 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
             weightVolume: this.readNumber('META_WEIGHT_VOLUME', 0.4, 0, 10),
             weightBoost: this.readNumber('META_WEIGHT_BOOST', 0.2, 0, 10),
             weightSocial: this.readNumber('META_WEIGHT_SOCIAL', 0.1, 0, 10),
+            weightAccel: this.readNumber('META_WEIGHT_ACCEL', 0.25, 0, 10),
             pnlWeight: this.readNumber('META_PNL_WEIGHT', 0.6, 0, 1),
             minTradeSample: this.readNumber('META_MIN_TRADE_SAMPLE', 8, 1, 1000),
             hotPercentile: this.readNumber('META_HOT_PERCENTILE', 70, 0, 100),
@@ -232,9 +243,13 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
      */
     async refresh(): Promise<void> {
         try {
-            const since = new Date(Date.now() - this.windowHours * 60 * 60 * 1000);
+            const windowMinutes = this.windowHours * 60;
+            const recentMinutes = Math.min(this.accelWindowMinutes, Math.max(windowMinutes - 1, 1));
+            const since = new Date(Date.now() - windowMinutes * 60 * 1000);
+            const recentSince = new Date(Date.now() - recentMinutes * 60 * 1000);
+
             const [activity, trades] = await Promise.all([
-                this.loadActivity(since),
+                this.loadActivity(since, recentSince),
                 this.loadTradeOutcomes(since),
             ]);
 
@@ -255,6 +270,9 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
                     sightings: a?.sightings ?? 0,
                     volumeSum: a?.volumeSum ?? 0,
                     boostCount: a?.boostCount ?? 0,
+                    recentSightings: a?.recent ?? 0,
+                    windowMinutes,
+                    recentMinutes,
                     trades: t?.trades ?? 0,
                     netPnlTotal: t?.netPnlTotal ?? 0,
                     wins: t?.wins ?? 0,
@@ -280,13 +298,26 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
 
     private async loadActivity(
         since: Date,
-    ): Promise<Map<string, { sightings: number; volumeSum: number; boostCount: number }>> {
+        recentSince: Date,
+    ): Promise<
+        Map<string, { sightings: number; volumeSum: number; boostCount: number; recent: number }>
+    > {
         const rows = await this.prismaService.metaSighting.groupBy({
             by: ['label'],
             where: { seenAt: { gte: since } },
             _count: { _all: true },
             _sum: { volume5m: true },
         });
+
+        // The same index, read twice over a narrower bound. This second pass is what turns the
+        // sightings signal from a level into a rate of change -- the only term here that can lead
+        // the meta rather than confirm it after the fact.
+        const recent = await this.prismaService.metaSighting.groupBy({
+            by: ['label'],
+            where: { seenAt: { gte: recentSince } },
+            _count: { _all: true },
+        });
+        const recentByLabel = new Map(recent.map((row) => [row.label, row._count._all]));
 
         // Prisma cannot express a filtered count inside groupBy, so boosts come from a second,
         // equally cheap pass over the same index rather than from raw SQL.
@@ -304,6 +335,7 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
                     sightings: row._count._all,
                     volumeSum: Number(row._sum.volume5m ?? 0),
                     boostCount: boostByLabel.get(row.label) ?? 0,
+                    recent: recentByLabel.get(row.label) ?? 0,
                 },
             ]),
         );

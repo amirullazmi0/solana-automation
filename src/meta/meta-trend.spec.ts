@@ -1,4 +1,10 @@
-import { MetaAggregate, computeHeat, metaScoreAdjustment, percentileRank } from './meta-trend';
+import {
+    MetaAggregate,
+    computeAcceleration,
+    computeHeat,
+    metaScoreAdjustment,
+    percentileRank,
+} from './meta-trend';
 
 const base = (over: Partial<MetaAggregate> & { label: string }): MetaAggregate => ({
     sightings: 0,
@@ -156,5 +162,90 @@ describe('metaScoreAdjustment', () => {
         expect(Math.abs(metaScoreAdjustment('TOXIC', bonuses))).toBeGreaterThan(
             metaScoreAdjustment('HOT', bonuses),
         );
+    });
+});
+
+describe('computeAcceleration', () => {
+    const window = { windowMinutes: 720, recentMinutes: 60 };
+
+    it('reports a meta launching faster now than earlier as above 1', () => {
+        // 8 in the last hour against 12 across the previous eleven: waking up.
+        const ratio = computeAcceleration({ sightings: 20, recentSightings: 8, ...window });
+        expect(ratio).toBeGreaterThan(1);
+    });
+
+    it('reports a fading meta as below 1', () => {
+        // 1 in the last hour against 39 before it: the run already happened.
+        const ratio = computeAcceleration({ sightings: 40, recentSightings: 1, ...window });
+        expect(ratio).toBeLessThan(1);
+    });
+
+    it('reports a steady meta as roughly flat', () => {
+        // 60 sightings spread evenly over 720 minutes means 5 in any 60-minute slice.
+        const ratio = computeAcceleration({ sightings: 60, recentSightings: 5, ...window });
+        expect(ratio).toBeGreaterThan(0.9);
+        expect(ratio).toBeLessThan(1.1);
+    });
+
+    it('does not let a brand-new label divide by zero and rank first forever', () => {
+        // Every sighting inside the recent slice, so there is no history to compare against. The
+        // baseline floor is what stops this becoming Infinity on three sightings.
+        const ratio = computeAcceleration({ sightings: 3, recentSightings: 3, ...window });
+        expect(Number.isFinite(ratio)).toBe(true);
+        expect(ratio).toBeGreaterThan(1);
+    });
+
+    it('still ranks a big new label above a small new one', () => {
+        const small = computeAcceleration({ sightings: 3, recentSightings: 3, ...window });
+        const large = computeAcceleration({ sightings: 30, recentSightings: 30, ...window });
+        expect(large).toBeGreaterThan(small);
+    });
+
+    it('answers flat when the arithmetic is not meaningful', () => {
+        // The trap volumeSurge fell into: a recent slice as long as the window leaves nothing to
+        // compare against, and every label would otherwise collapse to the same constant.
+        expect(computeAcceleration({ sightings: 10, recentSightings: 10, windowMinutes: 60, recentMinutes: 60 })).toBe(1);
+        expect(computeAcceleration({ sightings: 0, recentSightings: 0, ...window })).toBe(1);
+        expect(computeAcceleration({ sightings: 10, recentSightings: 0, windowMinutes: 0, recentMinutes: 0 })).toBe(1);
+    });
+
+    it('clamps a recent count that exceeds the total instead of going negative', () => {
+        const ratio = computeAcceleration({ sightings: 5, recentSightings: 99, ...window });
+        expect(Number.isFinite(ratio)).toBe(true);
+        expect(ratio).toBeGreaterThan(0);
+    });
+});
+
+describe('computeHeat acceleration term', () => {
+    it('ranks an accelerating meta above an equally busy but fading one', () => {
+        // Identical level, opposite direction. Without the acceleration term these two would tie,
+        // which is exactly the blind spot it was added to remove.
+        const heat = computeHeat([
+            base({
+                label: 'rising',
+                sightings: 20,
+                volumeSum: 10_000,
+                recentSightings: 15,
+                windowMinutes: 720,
+                recentMinutes: 60,
+            }),
+            base({
+                label: 'fading',
+                sightings: 20,
+                volumeSum: 10_000,
+                recentSightings: 1,
+                windowMinutes: 720,
+                recentMinutes: 60,
+            }),
+        ]);
+
+        expect(heat.get('rising')!.accelRatio).toBeGreaterThan(heat.get('fading')!.accelRatio);
+        expect(heat.get('rising')!.heatScore).toBeGreaterThan(heat.get('fading')!.heatScore);
+    });
+
+    it('defaults to flat when no window information is supplied', () => {
+        // The snapshot script has no history at all; it must not be reported as accelerating.
+        const heat = computeHeat([base({ label: 'dog', sightings: 5, volumeSum: 100 })]);
+        expect(heat.get('dog')!.accelRatio).toBe(1);
     });
 });

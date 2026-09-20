@@ -21,6 +21,11 @@ export interface MetaAggregate {
     sightings: number;
     volumeSum: number;
     boostCount: number;
+    /** Sightings inside the recent sub-window only, used to measure change rather than level. */
+    recentSightings?: number;
+    /** Length of the full window and of the recent slice, in minutes. */
+    windowMinutes?: number;
+    recentMinutes?: number;
     /** Closed LIVE trades bought under this label within the window. */
     trades: number;
     netPnlTotal: number;
@@ -37,6 +42,8 @@ export interface MetaHeat {
     netPnlPerTrade: number;
     winRate: number;
     activityScore: number;
+    /** How much faster this meta is launching now than it was earlier in the window. */
+    accelRatio: number;
     /** Undefined until the label has enough closed trades to be judged on money. */
     pnlScore?: number;
     reasons: string[];
@@ -47,6 +54,7 @@ export interface HeatOptions {
     weightVolume: number;
     weightBoost: number;
     weightSocial: number;
+    weightAccel: number;
     /** Share of the final score taken by P&L once the sample is large enough. */
     pnlWeight: number;
     minTradeSample: number;
@@ -55,10 +63,14 @@ export interface HeatOptions {
 }
 
 export const DEFAULT_HEAT_OPTIONS: HeatOptions = {
-    weightSightings: 0.3,
-    weightVolume: 0.4,
-    weightBoost: 0.2,
+    // Rebalanced when acceleration was added: the level terms were each shaded down rather than
+    // the new term simply piled on top, so the blend still sums to one and the tier percentiles
+    // keep meaning what they did before.
+    weightSightings: 0.2,
+    weightVolume: 0.3,
+    weightBoost: 0.15,
     weightSocial: 0.1,
+    weightAccel: 0.25,
     pnlWeight: 0.6,
     minTradeSample: 8,
     hotPercentile: 70,
@@ -99,6 +111,49 @@ function safeDivide(numerator: number, denominator: number): number {
 }
 
 /**
+ * How much faster this meta is producing tokens now than it was earlier in the window.
+ *
+ * This is the one term that leads rather than follows. A meta's *level* -- eight animal tokens in
+ * the window -- says it already happened. Its *rate of change* says it is happening: developers
+ * mass-launch copies of a theme before retail arrives, so the launch rate per theme is a live
+ * census of what builders believe is about to run.
+ *
+ * Deliberately shaped like `volumeSurge` in the analyzer (recent rate over baseline rate), and
+ * deliberately avoiding the trap that formula fell into there. That one divided by a fixed bucket
+ * count regardless of how much history existed, so for a young token the numerator and denominator
+ * cancelled and every token reported the same constant. The guard here is the baseline floor: a
+ * label whose sightings are *all* inside the recent slice has no history to compare against, and
+ * without a floor it would divide by zero and rank first forever on three sightings. Treating the
+ * baseline as at least one sighting over the baseline period caps a brand-new label's ratio at
+ * roughly its own recent count, so it can rise quickly but cannot beat physics.
+ *
+ * Returns 1.0 -- flat, no opinion -- whenever the arithmetic is not meaningful.
+ */
+export function computeAcceleration(input: {
+    sightings: number;
+    recentSightings: number;
+    windowMinutes: number;
+    recentMinutes: number;
+}): number {
+    const total = Math.max(0, input.sightings ?? 0);
+    const recent = Math.max(0, Math.min(input.recentSightings ?? 0, total));
+    const windowMinutes = input.windowMinutes ?? 0;
+    const recentMinutes = input.recentMinutes ?? 0;
+
+    const baselineMinutes = windowMinutes - recentMinutes;
+    // A recent slice as long as the window leaves nothing to compare against.
+    if (recentMinutes <= 0 || baselineMinutes <= 0) return 1;
+    if (total === 0) return 1;
+
+    const recentRate = recent / recentMinutes;
+    const baselineRate = (total - recent) / baselineMinutes;
+    const flooredBaseline = Math.max(baselineRate, 1 / baselineMinutes);
+
+    const ratio = recentRate / flooredBaseline;
+    return Number.isFinite(ratio) ? ratio : 1;
+}
+
+/**
  * Scores every label against every other label in the same window.
  *
  * Relative by construction: a meta is hot compared to what else is running right now, not against a
@@ -117,6 +172,14 @@ export function computeHeat(
     const volumes = aggregates.map((a) => a.volumeSum ?? 0);
     const boosts = aggregates.map((a) => a.boostCount ?? 0);
     const socials = aggregates.map((a) => a.socialScore ?? 0);
+    const accelerations = aggregates.map((a) =>
+        computeAcceleration({
+            sightings: a.sightings ?? 0,
+            recentSightings: a.recentSightings ?? 0,
+            windowMinutes: a.windowMinutes ?? 0,
+            recentMinutes: a.recentMinutes ?? 0,
+        }),
+    );
 
     // Only labels that cleared the sample bar take part in the P&L ranking. Including the rest
     // would rank a label with two trades against one with sixty as if the numbers were comparable.
@@ -124,21 +187,28 @@ export function computeHeat(
     const pnlPerTrade = eligible.map((a) => safeDivide(a.netPnlTotal ?? 0, a.trades ?? 0));
 
     const activityWeightTotal =
-        opts.weightSightings + opts.weightVolume + opts.weightBoost + opts.weightSocial;
+        opts.weightSightings +
+        opts.weightVolume +
+        opts.weightBoost +
+        opts.weightSocial +
+        opts.weightAccel;
 
-    for (const aggregate of aggregates) {
+    for (const [position, aggregate] of aggregates.entries()) {
         const reasons: string[] = [];
+        const accelRatio = accelerations[position];
 
         const pctSightings = percentileRank(sightings, aggregate.sightings ?? 0);
         const pctVolume = percentileRank(volumes, aggregate.volumeSum ?? 0);
         const pctBoost = percentileRank(boosts, aggregate.boostCount ?? 0);
         const pctSocial = percentileRank(socials, aggregate.socialScore ?? 0);
+        const pctAccel = percentileRank(accelerations, accelRatio);
 
         const weightedActivity =
             opts.weightSightings * pctSightings +
             opts.weightVolume * pctVolume +
             opts.weightBoost * pctBoost +
-            opts.weightSocial * pctSocial;
+            opts.weightSocial * pctSocial +
+            opts.weightAccel * pctAccel;
         // Normalising by the weight total keeps the score on a 0..100 scale whatever the operator
         // sets the individual weights to, so the tier percentiles stay meaningful after tuning.
         const activityScore = clamp(safeDivide(weightedActivity, activityWeightTotal), 0, 100);
@@ -162,6 +232,7 @@ export function computeHeat(
         } else {
             reasons.push(`activity only (${sampleSize}/${opts.minTradeSample} trades)`);
         }
+        reasons.push(`accel ${accelRatio.toFixed(2)}x`);
 
         result.set(aggregate.label, {
             label: aggregate.label,
@@ -171,6 +242,7 @@ export function computeHeat(
             netPnlPerTrade,
             winRate,
             activityScore,
+            accelRatio,
             pnlScore,
             reasons,
         });
