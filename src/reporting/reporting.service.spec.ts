@@ -10,10 +10,14 @@ describe('startup update announcement', () => {
     it('builds a complete English update message with working menu actions', () => {
         const announcement = buildStartupUpdateAnnouncement();
 
-        expect(announcement.message).toContain('MSOULMATION JUST GOT AN UPGRADE');
-        expect(announcement.message).toContain('🛡️');
-        expect(announcement.message).toContain('💧');
-        expect(announcement.message).toContain('🐋');
+        expect(announcement.message).toContain('MSOULMATION NOW TRADES THE META');
+        expect(announcement.message).toContain('Meta detection');
+        expect(announcement.message).toContain('Rising metas get priority');
+        expect(announcement.message).toContain('Losing metas get pushed down');
+        // The command has to be discoverable from the broadcast: it is the only place most chats
+        // will ever be told the leaderboard exists.
+        expect(announcement.message).toContain('/meta');
+        // Kept deliberately across releases so a deploy does not read as a config reset.
         expect(announcement.message).toContain('wallet and chat trading settings remain unchanged');
         expect(announcement.options.reply_markup).toEqual({
             inline_keyboard: [

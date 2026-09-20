@@ -36,15 +36,16 @@ export function buildStartupUpdateAnnouncement(): {
 } {
     return {
         message:
-            `🚀 *MSOULMATION JUST GOT AN UPGRADE*\n` +
+            `🚀 *MSOULMATION NOW TRADES THE META*\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `✨ A fresh update is now live.\n\n` +
-            `🛡️ *Stronger token safety checks*\n` +
-            `💧 *Live liquidity-collapse protection*\n` +
-            `🐋 *Smarter whale-dump detection*\n` +
-            `🔄 *Pre-buy sellability validation*\n` +
+            `🧭 *Meta detection* — every token is sorted into its theme\n` +
+            `📈 *Rising metas get priority* — measured by launch rate, not hype\n` +
+            `☠️ *Losing metas get pushed down* — judged on your own realised P&L\n` +
+            `🛡️ *All existing safety checks still run first*\n` +
             `⚡ *Sharper entry and exit protection*\n\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
+            `💬 Send /meta anytime to see which themes are running.\n` +
             `✅ Your wallet and chat trading settings remain unchanged.\n` +
             `📲 The upgraded protection is active now.`,
         options: {
@@ -306,7 +307,7 @@ export class ReportingService implements OnModuleInit {
                     [{ text: '\uD83D\uDCBC Balance' }, { text: '\uD83D\uDCC8 Portfolio' }],
                     [{ text: '\u2699\uFE0F Settings' }, { text: '\uD83D\uDCC8 Win Rate' }],
                     [{ text: '\uD83D\uDC40 Watchlist' }, { text: '\uD83D\uDCB8 Withdraw' }],
-                    [{ text: '������ Meta' }],
+                    [{ text: '������ Meta' }],
                 ],
                 resize_keyboard: true,
             },
@@ -1918,9 +1919,19 @@ export class ReportingService implements OnModuleInit {
                       `(win ${entry.winRate.toFixed(0)}%)`
                     : 'no closed trades yet';
 
+            // Acceleration gets its own column rather than being buried in the reason string: it
+            // is the only figure here that says where a meta is going instead of where it has been.
+            const trend =
+                entry.accelRatio >= 1.3
+                    ? 'rising'
+                    : entry.accelRatio <= 0.7
+                      ? 'fading'
+                      : 'steady';
+
             return (
                 `${index + 1}. ${tierIcon} *${entry.label}*${arrow} — ${money}\n` +
-                `    heat ${entry.heatScore.toFixed(0)} · ${entry.reasons.join(' · ')}`
+                `    heat ${entry.heatScore.toFixed(0)} · ${trend} ${entry.accelRatio.toFixed(2)}x · ` +
+                `${entry.reasons.join(' · ')}`
             );
         });
 
