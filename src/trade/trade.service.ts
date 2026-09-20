@@ -2307,6 +2307,11 @@ export class TradeService implements OnModuleInit {
                         entryLiquidity: metadata?.liquidity || 0,
                         entryPairAddress: metadata?.pairAddress || null,
                         entryMarketCap: metadata?.marketCap || 0,
+                        // Stamped at entry and never backfilled. A trade is judged against the meta
+                        // it was bought under, not whatever that mint gets relabelled to later --
+                        // and Watchlist, the only other row carrying a name, is deleted after 24h,
+                        // so without this column P&L per meta could not be measured at all.
+                        metaLabel: metadata?.metaLabel || null,
                         creatorAddress: metadata?.creator,
                         topHolderAddress: metadata?.topHolder,
                         initialCreatorBalance,
