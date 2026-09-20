@@ -6,9 +6,10 @@ import { CreatorProfileService } from './creator-profile.service';
 import { FlowVolumeService } from './flow-volume.service';
 import { NarrativeService } from './narrative.service';
 import { AIModule } from '../ai/ai.module';
+import { MetaModule } from '../meta/meta.module';
 
 @Module({
-    imports: [TradeModule, AIModule],
+    imports: [TradeModule, AIModule, MetaModule],
     providers: [AnalyzerService, EstablishedAnalyzerService, CreatorProfileService, FlowVolumeService, NarrativeService],
     exports: [AnalyzerService, EstablishedAnalyzerService, CreatorProfileService, FlowVolumeService, NarrativeService],
 })

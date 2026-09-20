@@ -28,6 +28,9 @@ import { averageVolume5m } from '../common/volume-baseline';
 import { FlowVolumeService } from './flow-volume.service';
 import { shouldRejectOnNarrative } from '../ai/narrative-advice';
 import { NarrativeService } from './narrative.service';
+import { MetaLabelService } from '../meta/meta-label.service';
+import { MetaTrendService } from '../meta/meta-trend.service';
+import { MetaHeat, metaScoreAdjustment } from '../meta/meta-trend';
 import { evaluateMintSafety } from '../common/token-mint-safety';
 import { DEFAULT_MIN_LP_LOCKED_PCT, isLpSafe, isMarketLpSafe, maxLpLockedPct } from '../common/lp-safety';
 import {
@@ -69,6 +72,8 @@ export class AnalyzerService {
         private readonly aiService: AIService,
         private readonly flowVolumeService: FlowVolumeService,
         private readonly narrativeService: NarrativeService,
+        private readonly metaLabelService: MetaLabelService,
+        private readonly metaTrendService: MetaTrendService,
     ) {
         this.connection = new Connection(this.getSolanaRpcUrl(), 'confirmed');
         this.jupiterApiKey = this.configService.get<string>('JUPITER_API_KEY') || '';
@@ -99,9 +104,36 @@ export class AnalyzerService {
      */
     private readonly recentlySeen = new Map<string, { name: string; volume5m: number; at: number }>();
 
-    private recordSeenToken(name: string | undefined, volume5m: number): void {
-        const label = String(name ?? '').trim();
+    /**
+     * One call per analysed token, carrying everything the meta pipeline needs.
+     *
+     * Deliberately sited before the traction gates rather than after them. The heat score has to
+     * know what the whole market is doing, not merely what our own filters let through -- judging a
+     * meta only by the tokens that already passed our gates would measure the filters, not the
+     * market. Labelling of these non-candidates is rate-limited separately inside MetaLabelService,
+     * so the broader sample costs a fixed amount per minute instead of scaling with throughput.
+     */
+    private recordSeenToken(input: {
+        tokenMint: string;
+        name: string | undefined;
+        symbol?: string;
+        volume5m: number;
+        liquidityUsd?: number;
+    }): void {
+        const { tokenMint, volume5m } = input;
+        const label = String(input.name ?? '').trim();
         if (!label || !Number.isFinite(volume5m) || volume5m <= 0) return;
+
+        this.metaLabelService.scheduleLabel(
+            { tokenMint, tokenName: label, symbol: input.symbol },
+            { population: true },
+        );
+        this.metaTrendService.recordSighting({
+            tokenMint,
+            volume5m,
+            liquidityUsd: input.liquidityUsd,
+            isBoosted: this.metaTrendService.isBoosted(tokenMint),
+        });
 
         this.recentlySeen.set(label.toLowerCase(), { name: label, volume5m, at: Date.now() });
 
@@ -118,35 +150,34 @@ export class AnalyzerService {
         }
     }
 
+    private metaNumber(key: string, fallback: number): number {
+        const raw = Number.parseFloat(this.configService.get<string>(key, String(fallback)));
+        return Number.isFinite(raw) ? raw : fallback;
+    }
+
+    private get metaBonusHot(): number {
+        return this.metaNumber('META_BONUS_HOT', 14);
+    }
+
+    private get metaBonusWarm(): number {
+        return this.metaNumber('META_BONUS_WARM', 6);
+    }
+
+    private get metaPenaltyToxic(): number {
+        return this.metaNumber('META_PENALTY_TOXIC', 18);
+    }
+
+    /** Enforcement only. Off until the shadow log shows the gate would have been right. */
+    private get metaGateEnabled(): boolean {
+        return String(this.configService.get('ENABLE_META_GATE', 'false')).toLowerCase() === 'true';
+    }
+
     /** The busiest names seen recently — the model's evidence for what is actually being traded. */
     private get trendingDescriptions(): string[] {
         return [...this.recentlySeen.values()]
             .sort((a, b) => b.volume5m - a.volume5m)
             .slice(0, 25)
             .map((e) => `${e.name} (vol5m $${Math.round(e.volume5m)})`);
-    }
-
-    private isMetaNarrativeMatch(tokenName?: string): { matched: boolean; label?: string } {
-        const normalized = (tokenName || '').toLowerCase();
-        if (!normalized) return { matched: false };
-
-        const patterns: Array<{ label: string; regex: RegExp }> = [
-            { label: 'AI', regex: /\b(ai|agent|llm|gpt|model)\b/i },
-            { label: 'Dog', regex: /\b(dog|doge|inu|shib)\b/i },
-            { label: 'Cat', regex: /\b(cat|kitty|neko)\b/i },
-            { label: 'Politics', regex: /\b(trump|polit|election|biden|maga|president)\b/i },
-            { label: 'Meme', regex: /\b(meme|pepe|frog|wojak)\b/i },
-            { label: 'Solana', regex: /\b(sol|solana|jito|pump|raydium)\b/i },
-            { label: 'Celebrity', regex: /\b(elon|musk|x\s?ai|tate|kanye)\b/i },
-        ];
-
-        for (const pattern of patterns) {
-            if (pattern.regex.test(normalized)) {
-                return { matched: true, label: pattern.label };
-            }
-        }
-
-        return { matched: false };
     }
 
     private calculateWhaleSignalScore(input: {
@@ -167,6 +198,8 @@ export class AnalyzerService {
         safetyIndex?: number;
         liquidityUsd: number;
         marketCapUsd: number;
+        metaLabel?: string;
+        metaHeat?: MetaHeat;
     }): { score: number; reasons: string[]; narrativeLabel?: string } {
         let score = 30;
         const reasons: string[] = [];
@@ -210,10 +243,18 @@ export class AnalyzerService {
             reasons.push('cto');
         }
 
-        const narrative = this.isMetaNarrativeMatch(input.tokenName);
-        if (narrative.matched) {
-            score += 8;
-            reasons.push(`narrative:${narrative.label}`);
+        // Replaces a flat +8 for "the name matches some theme". That bonus was identical for every
+        // meta and blind to time, so a token riding a meta that had been losing money all week
+        // scored exactly like one riding the meta everything was pumping on. The adjustment now
+        // follows measured heat, and a meta proven to lose money subtracts instead of adding.
+        const metaAdjustment = metaScoreAdjustment(input.metaHeat?.tier, {
+            hot: this.metaBonusHot,
+            warm: this.metaBonusWarm,
+            toxicPenalty: this.metaPenaltyToxic,
+        });
+        if (metaAdjustment !== 0) {
+            score += metaAdjustment;
+            reasons.push(`meta:${input.metaLabel ?? 'none'}:${input.metaHeat?.tier ?? 'NONE'}`);
         }
 
         const volumeSurge = input.volumeSurge ?? 0;
@@ -288,7 +329,7 @@ export class AnalyzerService {
         }
 
         score = Math.max(-100, Math.min(100, Math.round(score)));
-        return { score, reasons, narrativeLabel: narrative.label };
+        return { score, reasons, narrativeLabel: input.metaLabel };
     }
 
     private resolveRoute(ageHours: number): 'MICIN_ROUTE' | 'WHALE_ROUTE' {
@@ -375,6 +416,7 @@ export class AnalyzerService {
                 awaitingAmmPair: traction.awaitingAmmPair,
                 symbol: traction.symbol,
                 tokenName: traction.tokenName,
+                metaLabel: this.metaLabelService.getLabel(tokenMint),
                 socials: traction.socials,
                 volumeSurge: traction.volumeSurge,
                 volScore: traction.volScore,
@@ -404,6 +446,15 @@ export class AnalyzerService {
                 };
             }
 
+            // This token cleared traction, so it is a real buy candidate and its label is worth an
+            // un-throttled request: unlike the population sample taken in recordSeenToken, this one
+            // can change a trade. Idempotent -- the mint is usually already queued or answered.
+            this.metaLabelService.scheduleLabel({
+                tokenMint,
+                tokenName: traction.tokenName || traction.symbol || tokenMint,
+                symbol: traction.symbol,
+            });
+
             // Warm the narrative verdict here rather than at the buy decision. Everything below —
             // RugCheck, creator profile, whale scoring — is seconds of network I/O this call is
             // already paying for, so the model answers inside a window that already exists. If it
@@ -414,7 +465,7 @@ export class AnalyzerService {
                 {
                     tokenName: traction.tokenName || traction.symbol || tokenMint,
                     symbol: traction.symbol || 'UNKNOWN',
-                    deterministicLabel: this.isMetaNarrativeMatch(traction.tokenName).label,
+                    deterministicLabel: this.metaLabelService.getLabel(tokenMint),
                     twitterUrl: traction.socials?.twitter,
                     telegramUrl: traction.socials?.telegram,
                     websiteUrl: traction.socials?.website,
@@ -424,7 +475,7 @@ export class AnalyzerService {
                     marketCapUsd: traction.marketCap || 0,
                     trendingDescriptions: this.trendingDescriptions,
                 },
-                this.isMetaNarrativeMatch(traction.tokenName).label,
+                this.metaLabelService.getLabel(tokenMint),
             );
 
             // 🛡️ ADVANCED METRICS CHECK
@@ -541,6 +592,8 @@ export class AnalyzerService {
                 hasTelegram: Boolean(traction.socials?.telegram?.trim()),
                 isCommunityTakeover,
                 tokenName: traction.tokenName || traction.symbol || undefined,
+                metaLabel: this.metaLabelService.getLabel(tokenMint),
+                metaHeat: this.metaTrendService.getHeatForMint(tokenMint),
                 creatorRiskScore: creatorProfile?.riskScore,
                 creatorRuggedTokens: creatorProfile?.ruggedTokens,
                 safetyIndex: rugResult.safetyIndex,
@@ -634,6 +687,39 @@ export class AnalyzerService {
                     permanent: false,
                     metadata: finalMetadata,
                 };
+            }
+
+            // Meta gate, built on the same shadow-then-enforce shape as the narrative gate below.
+            //
+            // TOXIC is the only tier that can reject, and it is the one tier backed by our own
+            // money: it requires both a real sample of closed trades and a negative average across
+            // them. A merely quiet meta (COLD) never blocks anything, because quiet is what every
+            // meta looks like an hour before it runs.
+            const metaLabel = this.metaLabelService.getLabel(tokenMint);
+            const metaHeat = this.metaTrendService.getHeatForMint(tokenMint);
+            const metaWouldReject = metaHeat?.tier === 'TOXIC';
+
+            if (metaWouldReject && this.metaGateEnabled) {
+                this.logger.debug(
+                    `[${tokenMint}] Meta gate rejected. label=${metaLabel} ` +
+                        `pnl/trade=${metaHeat?.netPnlPerTrade.toFixed(3)} n=${metaHeat?.sampleSize}`,
+                );
+                return {
+                    safe: false,
+                    reason: 'meta_cold',
+                    permanent: false,
+                    metadata: baseMetadata,
+                };
+            }
+
+            // Shadow line. With the gate off this is the feature's entire output on the buy path,
+            // and the only evidence for whether enforcing it would have helped or cost money.
+            if (metaHeat) {
+                this.logger.log(
+                    `[${tokenMint}] meta_shadow label=${metaLabel} tier=${metaHeat.tier} ` +
+                        `heat=${metaHeat.heatScore.toFixed(1)} n=${metaHeat.sampleSize} ` +
+                        `wouldReject=${metaWouldReject} (${metaHeat.reasons.join('; ')})`,
+                );
             }
 
             // One-directional: a WEAK verdict can drop a candidate, a STRONG one changes nothing.
@@ -914,7 +1000,13 @@ export class AnalyzerService {
             const marketCap = pair.fdv || 0;
             const symbol = pair.baseToken?.symbol;
             const tokenName = pair.baseToken?.name || pair.baseToken?.symbol || symbol;
-            this.recordSeenToken(tokenName, volume5m);
+            this.recordSeenToken({
+                tokenMint,
+                name: tokenName,
+                symbol,
+                volume5m,
+                liquidityUsd: liquidity,
+            });
             const pairCreatedAt = pair.pairCreatedAt || 0;
             const socials = {
                 twitter: pair.info?.socials?.find((s) => s.type === 'twitter')?.url,

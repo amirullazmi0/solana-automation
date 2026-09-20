@@ -117,6 +117,11 @@ describe('AnalyzerService market-flow entry gate', () => {
             {} as never,
             {} as never,
             {} as never,
+            // Meta label and trend services. These tests drive checkMarketTraction and the
+            // holder-concentration tiers, neither of which reads a meta verdict back, so inert
+            // stubs keep the constructor satisfied without pulling in the meta pipeline.
+            { scheduleLabel: () => undefined, getLabel: () => undefined } as never,
+            { recordSighting: () => undefined, isBoosted: () => false } as never,
         );
 
         const result = await (service as unknown as {
@@ -163,6 +168,11 @@ describe('aggressive-high market gates', () => {
             {} as never,
             {} as never,
             {} as never,
+            // Meta label and trend services. These tests drive checkMarketTraction and the
+            // holder-concentration tiers, neither of which reads a meta verdict back, so inert
+            // stubs keep the constructor satisfied without pulling in the meta pipeline.
+            { scheduleLabel: () => undefined, getLabel: () => undefined } as never,
+            { recordSighting: () => undefined, isBoosted: () => false } as never,
         );
         const rugCheckData = {
             score: 0,
