@@ -143,6 +143,9 @@ describe('scanner health telemetry', () => {
             {} as never,
             {} as never,
             {} as never,
+            // Meta trend service: this test only reads the health counters, which never consult
+            // heat, so an inert stub is enough to satisfy the constructor.
+            { markBoosted: () => undefined, getHeatForMint: () => undefined } as never,
         );
 
         const status = scanner.getScannerStatus();

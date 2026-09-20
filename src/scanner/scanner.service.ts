@@ -5,6 +5,7 @@ import axios from 'axios';
 import * as WebSocket from 'ws';
 import * as https from 'https';
 import { AnalyzerService } from '../analyzer/analyzer.service';
+import { MetaTrendService } from '../meta/meta-trend.service';
 import { EstablishedAnalyzerService } from '../analyzer/established-analyzer.service';
 import { TradeService } from '../trade/trade.service';
 import { ReportingService } from '../reporting/reporting.service';
@@ -85,6 +86,8 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
     // Batasi max token yang dipantau bersamaan biar nggak kelebihan memory
     private activeMonitoring = 0;
     private readonly MAX_CONCURRENT: number;
+    /** How many watchlist rows the radar actually processes per cycle, after meta re-ranking. */
+    private readonly WATCHLIST_RADAR_BATCH = 20;
     private readonly processingTokens = new Set<string>();
     private readonly noDexPairRetryCounts = new Map<string, number>();
     private readonly zeroLiquidityRetryCounts = new Map<string, number>();
@@ -127,6 +130,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         private readonly establishedAnalyzerService: EstablishedAnalyzerService,
         private readonly prismaService: PrismaService,
         private readonly moduleRef: ModuleRef,
+        private readonly metaTrendService: MetaTrendService,
     ) {
         this.MAX_CONCURRENT = Number.parseInt(
             this.configService.get<string>('SCANNER_MAX_CONCURRENT', '100'),
@@ -161,6 +165,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             'no_volume_anomaly',
             'low_vol_score',
             'whale_signal_too_weak',
+            // A cold meta is a statement about this hour, not about this token: the same name can
+            // sit in a toxic meta at noon and a hot one by evening. Keeping it on the watchlist is
+            // what lets the radar pick it up again once the heat moves.
+            'meta_cold',
         ].includes(normalizedReason);
     }
 
@@ -464,6 +472,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
                     // Gabungkan & deduplicate
                     const allCandidates = [...new Set([...boostTokens, ...trendingTokens])];
+
+                    // Remember that these arrived via the paid-promotion feed. Only the analyzer
+                    // later learns the token's name and can attribute it to a meta, so the fact is
+                    // parked in MetaTrendService, which both modules can reach.
+                    for (const mint of boostTokens) this.metaTrendService.markBoosted(mint);
                     const now = Date.now();
 
                     for (const mint of allCandidates) {
@@ -550,15 +563,38 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         this.watchlistRadarLastStartedAt = new Date();
         this.watchlistRadarLastError = null;
         try {
-            const pending = await this.prismaService.watchlist.findMany({
+            // Oversample, then re-rank by how hot each token's meta currently is, and only then
+            // cut to the batch size. This is the one place where "look at the live meta first" is
+            // an ordering rather than a score: at discovery a mint is just an address, and only
+            // these rows -- already analysed once -- carry a name the labeller has seen.
+            //
+            // The heat lookup cannot be pushed into the query: it is computed in memory from a
+            // rolling window across two tables, and Prisma cannot order by it. Oversampling and
+            // sorting a few dozen rows in JS costs nothing next to the analysis each one triggers.
+            const oversample = Math.max(
+                this.WATCHLIST_RADAR_BATCH,
+                Number.parseInt(this.configService.get<string>('META_RADAR_OVERSAMPLE', '60'), 10) ||
+                    60,
+            );
+            const candidates = await this.prismaService.watchlist.findMany({
                 where: {
                     status: 'PENDING',
                     lastCheckedAt: { lt: new Date(Date.now() - 3 * 60 * 1000) },
                 },
                 orderBy: [{ pairCreatedAt: 'asc' }, { createdAt: 'asc' }],
-                take: 20,
+                take: oversample,
                 select: { tokenMint: true },
             });
+
+            const pending = [...candidates]
+                .sort((a, b) => {
+                    const heatA = this.metaTrendService.getHeatForMint(a.tokenMint)?.heatScore ?? -1;
+                    const heatB = this.metaTrendService.getHeatForMint(b.tokenMint)?.heatScore ?? -1;
+                    // Ties keep the query's age ordering, so an unlabelled token is still checked
+                    // in the order it would have been before -- never starved by labelled ones.
+                    return heatB - heatA;
+                })
+                .slice(0, this.WATCHLIST_RADAR_BATCH);
             this.watchlistRadarLastPendingCount = pending.length;
 
             for (const item of pending) {
