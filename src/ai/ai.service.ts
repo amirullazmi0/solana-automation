@@ -19,8 +19,20 @@ import {
     normalizeNarrativeAdvice,
     stripJsonFence,
 } from './narrative-advice';
+import {
+    MetaLabelRecord,
+    MetaLabelRequest,
+    normalizeLabelBatch,
+} from '../meta/meta-label';
 
-type AiTask = 'NARRATIVE' | 'EXIT' | 'ENTRY' | 'HEALTH' | 'CUTLOSS';
+/** One batch's answers plus what it cost, so spend is reported from the API rather than guessed. */
+export interface MetaLabelBatchResult {
+    records: MetaLabelRecord[];
+    promptTokens: number;
+    completionTokens: number;
+}
+
+type AiTask = 'NARRATIVE' | 'EXIT' | 'ENTRY' | 'HEALTH' | 'CUTLOSS' | 'META';
 
 interface CacheEntry {
     result: AIAnalysisResult;
@@ -239,6 +251,121 @@ export class AIService {
     private hasScopedKey(key: string): boolean {
         const sentinel = '__unset__';
         return this.configService.get<string>(key, sentinel) !== sentinel;
+    }
+
+    /**
+     * Assigns a meta label to many tokens in one request.
+     *
+     * Batched rather than per-token, and that is the whole reason full-LLM labelling is affordable
+     * here. The narrative advisor spends one request per mint on a prompt carrying social URLs and
+     * a trending snapshot; this spends one request per forty mints on nothing but names. The
+     * per-token cost lands roughly an order of magnitude lower, and because a name never changes
+     * the answer is kept forever instead of being re-bought every 24 hours.
+     *
+     * The vocabulary is passed in rather than fixed in the prompt. Left to itself the model returns
+     * "dog", "Dogs" and "doge meta" for one concept within a single batch, and every aggregate
+     * built on those labels then splits one hot meta into three cold ones. It may still coin at
+     * most one genuinely new label per batch, so the vocabulary tracks the market instead of being
+     * frozen at deploy time.
+     *
+     * Returns null on any failure -- never a partial or invented mapping -- so the caller can
+     * distinguish "the model had nothing to say" from "the call did not happen" and avoid
+     * persisting a transient outage as a permanent verdict.
+     */
+    async labelMetas(
+        items: ReadonlyArray<MetaLabelRequest>,
+        vocabulary: ReadonlyArray<string>,
+        aliases: ReadonlyMap<string, string> = new Map(),
+    ): Promise<MetaLabelBatchResult | null> {
+        if (items.length === 0) {
+            return { records: [], promptTokens: 0, completionTokens: 0 };
+        }
+
+        const apiKey = this.configService.get<string>('OPENAI_API_KEY');
+        if (!apiKey) return null;
+
+        const baseUrl = this.configService.get<string>('AI_BASE_URL', 'https://api.openai.com/v1');
+        const model = this.resolveModel('META');
+        const timeout = this.getIntegerConfig('META_LABEL_TIMEOUT_MS', 12000);
+
+        const systemPrompt = `You sort Solana memecoins into the "meta" they belong to -- the theme
+currently being traded, such as an animal meta, a politics meta, an AI meta, a celebrity meta.
+
+You are given a list of tokens and the vocabulary of labels already in use. For each token, return
+the ONE label that best fits its name.
+
+Rules:
+- Prefer a label from the provided vocabulary. Reusing an existing label is almost always correct.
+- You may invent AT MOST ONE new label across the entire batch, and only when a token clearly
+  belongs to a theme that the vocabulary cannot express. Never invent a second one.
+- A new label must be one or two lowercase words, generic enough that other tokens can share it.
+  "dog" is a label. "dog-with-hat-wearing-sunglasses" is not.
+- Use "unlabeled" when a name carries no theme at all -- random letters, a bare ticker, pure noise.
+  This is a normal answer, not a failure. Do not stretch to find a theme that is not there.
+- Judge the name only. You are not being asked whether the token is good, safe, or worth buying.
+
+Return JSON: { "labels": [ { "i": <index>, "label": "<label>", "confidence": "high" | "medium" | "low" } ] }
+
+"i" is the token's index in the list you were given, starting at 0. Return one entry for every
+token. Do not repeat the mint address -- the index alone identifies the token.`;
+
+        try {
+            const response = await axios.post<OpenAIChatCompletionResponse>(
+                `${baseUrl}/chat/completions`,
+                {
+                    model,
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        {
+                            role: 'user',
+                            content: JSON.stringify({
+                                vocabulary,
+                                // Indexed, and the mint is not sent at all: the model has no use
+                                // for a 44-character address it is told not to echo, and leaving
+                                // it out shortens both halves of the request.
+                                tokens: items.map((item, i) => ({
+                                    i,
+                                    name: item.tokenName,
+                                    symbol: item.symbol ?? '',
+                                })),
+                            }),
+                        },
+                    ],
+                    response_format: { type: 'json_object' },
+                    ...this.buildModelParams('META'),
+                },
+                {
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json',
+                    },
+                    timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 12000,
+                },
+            );
+
+            const content = response.data.choices?.[0]?.message?.content;
+            if (!content) return null;
+
+            const records = normalizeLabelBatch(
+                JSON.parse(stripJsonFence(content)),
+                items,
+                aliases,
+            );
+            const usage = response.data.usage;
+            this.logger.log(
+                `[AI Meta] labelled ${records.length} mint(s) in 1 request model=${model} ` +
+                    `tokens_in=${usage?.prompt_tokens ?? '?'} tokens_out=${usage?.completion_tokens ?? '?'}`,
+            );
+            return {
+                records,
+                promptTokens: usage?.prompt_tokens ?? 0,
+                completionTokens: usage?.completion_tokens ?? 0,
+            };
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[AI Meta] Batch of ${items.length} failed: ${msg}.`);
+            return null;
+        }
     }
 
     /**
