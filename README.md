@@ -664,13 +664,34 @@ harus tahu apa yang dilakukan pasar, bukan cuma apa yang diloloskan filter sendi
 persentil lintas-label karena satuannya tidak sebanding:
 
 ```text
+recentRate   = sightings_recent / META_ACCEL_WINDOW_MIN
+baselineRate = (sightings_total - sightings_recent) / (windowMenit - META_ACCEL_WINDOW_MIN)
+accel        = recentRate / max(baselineRate, 1 / baselineMenit)
+
 activityScore = (wSight x pct(sightings) + wVol x pct(volume) + wBoost x pct(boosted)
-                 + wSocial x pct(social)) / (wSight + wVol + wBoost + wSocial)
+                 + wSocial x pct(social) + wAccel x pct(accel))
+                / (wSight + wVol + wBoost + wSocial + wAccel)
 
 heatScore     = n >= META_MIN_TRADE_SAMPLE
                 ? META_PNL_WEIGHT x pct(netPnL/trade) + (1 - META_PNL_WEIGHT) x activityScore
                 : activityScore
 ```
+
+**Kenapa ada term akselerasi.** Empat term lainnya mengukur *level* — "ada delapan token hewan di
+jendela ini" mengatakan metanya **sudah** terjadi. `accel` mengukur *laju perubahan*, dan itu satu-
+satunya term yang bisa mendahului: dev mass-launch tiruan sebuah tema **sebelum** retail masuk, jadi
+laju launch per tema adalah sensus real-time atas apa yang builder yakini akan jalan. Tanpa term ini
+sebuah meta yang naik dari 2 ke 15 token dalam sejam mendapat skor persis sama dengan meta yang
+turun dari 19 ke 1, karena keduanya punya 20 penampakan.
+
+Bentuknya sengaja meniru `volumeSurge` di analyzer, **dan sengaja menghindari jebakan yang formula
+itu kena di sana**. `volumeSurge` dulu membagi dengan jumlah bucket tetap tanpa peduli berapa banyak
+riwayat yang benar-benar ada, sehingga untuk token muda pembilang dan penyebutnya saling menghapus
+dan semua token melaporkan konstanta yang sama. Di sini penjaganya adalah lantai baseline: label yang
+seluruh penampakannya ada di irisan terbaru tidak punya pembanding, dan tanpa lantai itu dia akan
+membagi nol lalu bertengger di peringkat satu selamanya bermodal tiga penampakan. Memperlakukan
+baseline sebagai minimal satu penampakan membuat label baru bisa naik cepat tapi tidak bisa melawan
+fisika. Kalau aritmetikanya tidak bermakna, jawabannya `1.0` — datar, tanpa opini.
 
 Di bawah `META_MIN_TRADE_SAMPLE` trade tertutup, label dinilai murni dari aktivitas. Tanpa guard itu
 satu trade beruntung akan menobatkan sebuah meta. Di atasnya, P&L realisasi mengambil bobot dominan:
@@ -732,10 +753,12 @@ semua label dan karena itu saling menghapus, bukan menyeret skor turun.
 | `META_SIGHTING_DEDUPE_MS` | 300000 | Satu mint dicatat sekali per jendela ini, bukan sekali per detik |
 | `META_MIN_TRADE_SAMPLE` | 8 | Trade tertutup minimum sebelum P&L dipercaya |
 | `META_PNL_WEIGHT` | 0.6 | Bobot P&L setelah sampel cukup |
-| `META_WEIGHT_SIGHTINGS` | 0.3 | Bobot jumlah penampakan |
-| `META_WEIGHT_VOLUME` | 0.4 | Bobot volume 5 menit |
-| `META_WEIGHT_BOOST` | 0.2 | Bobot promosi berbayar |
+| `META_WEIGHT_SIGHTINGS` | 0.2 | Bobot jumlah penampakan (level) |
+| `META_WEIGHT_VOLUME` | 0.3 | Bobot volume 5 menit |
+| `META_WEIGHT_BOOST` | 0.15 | Bobot promosi berbayar |
 | `META_WEIGHT_SOCIAL` | 0.1 | Bobot sinyal sosial eksternal |
+| `META_WEIGHT_ACCEL` | 0.25 | Bobot akselerasi. Satu-satunya term yang mendahului meta |
+| `META_ACCEL_WINDOW_MIN` | 60 | Panjang irisan "sekarang" yang dibandingkan dengan sisa jendela |
 | `META_BONUS_HOT` | 14 | Bonus skor tier `HOT` |
 | `META_BONUS_WARM` | 6 | Bonus skor tier `WARM` |
 | `META_PENALTY_TOXIC` | 18 | Penalti meta yang terbukti rugi |
