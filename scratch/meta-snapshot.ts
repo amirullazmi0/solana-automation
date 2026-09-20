@@ -193,6 +193,11 @@ async function main() {
         '\nCatatan: ini setengah AKTIVITAS dari heat score. Bagian P&L butuh trade tertutup ' +
             'yang membawa metaLabel, jadi ranking ini "apa yang ramai", bukan "apa yang cuan".',
     );
+    console.log(
+        'Term AKSELERASI juga datar (1.00x) di sini: dia membandingkan irisan satu jam terakhir ' +
+            'dengan sisa jendela, dan skrip sekali-jalan ini tidak punya riwayat. Di bot yang ' +
+            'berjalan, tabel MetaSighting menyediakan riwayat itu dan akselerasi baru hidup.',
+    );
     process.exit(0);
 }
 
