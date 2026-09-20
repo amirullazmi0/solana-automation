@@ -186,6 +186,7 @@ Muncul di log produksi dan alert Telegram. Kolom knob menunjukkan setelan mana y
 | `stagnant_timeout` | Token dipantau terlalu lama tanpa lolos | `ANALYZER_MAX_SCAN_DURATION_MIN` |
 | `ai_rejected` | Lapis keputusan AI mengembalikan skip | `ENABLE_AI_ENTRY_DECISION`, `AI_CONVICTION_THRESHOLD` |
 | `narrative_weak` | AI menilai nama dan jejak sosial token sebagai template spam | `ENABLE_AI_NARRATIVE_GATE`, `NARRATIVE_MIN_CONFIDENCE` |
+| `meta_cold` | Meta token ini terbukti rugi pada jendela yang diukur | `ENABLE_META_GATE`, `META_MIN_TRADE_SAMPLE` |
 
 Selama `ENABLE_AI_NARRATIVE_GATE` mati, verdict tetap dihitung dan dicatat sebagai
 `narrative_shadow` di log — lengkap dengan `wouldReject` — tapi tidak pernah menggugurkan kandidat.
@@ -629,6 +630,127 @@ Aliran analyzer sendiri bersifat organik dan tidak menambah satu pun panggilan j
 Advisor exit **hanya boleh mempersempit** trailing atau mempercepat exit. Tidak ada jalur yang
 mengizinkannya menahan posisi melewati pemicu — invarian itu dikunci oleh test di
 `src/ai/exit-advice.spec.ts`.
+
+### Meta trend
+
+Meta adalah tema yang sedang diperdagangkan — meta hewan, meta politik, meta AI, dan seterusnya.
+Bot memperlakukannya sebagai **sumbu pencarian pertama**: token di meta yang sedang panas dan
+terbukti cuan dinaikkan, token di meta yang terbukti membakar uang diturunkan.
+
+Sebelumnya bagian ini berupa tujuh regex hardcoded yang memberi **+8 flat** ke whale signal score
+untuk nama apa pun yang cocok. Bonus itu sama besar untuk semua meta dan buta terhadap waktu, jadi
+token bertema kucing dapat bonus identik dengan token bertema politik walaupun salah satunya sedang
+mati total. Regex itu sudah dipensiunkan.
+
+**Pelabelan.** Setiap mint dilabeli oleh LLM, sekali seumur hidup, dan disimpan di `TokenMetaLabel`.
+Permintaan dikumpulkan dalam buffer dan dikirim **satu request untuk 40 nama**, bukan satu request
+per token — inilah yang membuat pelabelan penuh LLM jauh lebih murah daripada gerbang narasi yang
+sudah berjalan (yang membayar satu request per mint, atas prompt yang jauh lebih besar, dan
+membelinya ulang tiap 24 jam). Model memilih dari kosakata di `MetaVocabulary` dan boleh menciptakan
+**paling banyak satu** label baru per batch; tanpa batasan itu model mengarang ejaan baru tiap batch
+("dog", "Dogs", "doge meta") dan satu meta panas pecah jadi tiga meta dingin.
+
+Token yang belum berlabel bernilai `unlabeled` dan mendapat penyesuaian skor **nol** — bukan
+tebakan. Karena mint yang sama dianalisis ulang tiap detik, labelnya biasanya sudah turun pada pass
+kedua atau ketiga.
+
+**Plafon biaya.** Tiga pengunci membuat biaya tidak tumbuh mengikuti throughput scanner: cache
+permanen per mint, pelabelan prioritas hanya untuk token yang lolos traksi, dan
+`META_LABEL_MAX_PER_HOUR` sebagai plafon keras. Token yang gagal traksi tetap disampel — heat score
+harus tahu apa yang dilakukan pasar, bukan cuma apa yang diloloskan filter sendiri — tapi dibatasi
+`META_POPULATION_SAMPLE_PER_MIN`. Biaya maksimum per bulan karena itu bisa dihitung di muka.
+
+**Heat score.** Empat sumber bukti digabung jadi satu angka per label, semuanya dinormalisasi ke
+persentil lintas-label karena satuannya tidak sebanding:
+
+```text
+activityScore = (wSight x pct(sightings) + wVol x pct(volume) + wBoost x pct(boosted)
+                 + wSocial x pct(social)) / (wSight + wVol + wBoost + wSocial)
+
+heatScore     = n >= META_MIN_TRADE_SAMPLE
+                ? META_PNL_WEIGHT x pct(netPnL/trade) + (1 - META_PNL_WEIGHT) x activityScore
+                : activityScore
+```
+
+Di bawah `META_MIN_TRADE_SAMPLE` trade tertutup, label dinilai murni dari aktivitas. Tanpa guard itu
+satu trade beruntung akan menobatkan sebuah meta. Di atasnya, P&L realisasi mengambil bobot dominan:
+sebuah meta bisa jadi yang paling ramai di chain dan sekaligus cara tercepat kehilangan uang, dan
+saat kedua sinyal bertentangan, P&L-lah yang sudah dibayar.
+
+Skornya **relatif**, bukan ambang tetap — sebuah meta panas dibandingkan apa yang sedang jalan
+sekarang. Ambang absolut akan melaporkan seluruh chain dingin di malam sepi dan panas saat mania,
+keduanya tidak memberi tahu meta mana yang layak dipilih.
+
+**Tier dan pengaruhnya ke skor.**
+
+| Tier | Syarat | Efek ke whale signal score |
+| --- | --- | --- |
+| `HOT` | heat >= `META_HOT_PERCENTILE` | `+META_BONUS_HOT` |
+| `WARM` | di antaranya | `+META_BONUS_WARM` |
+| `COLD` | heat <= `META_COLD_PERCENTILE` | 0 |
+| `TOXIC` | sampel cukup **dan** net P&L per trade negatif | `-META_PENALTY_TOXIC` |
+| belum berlabel | — | 0 |
+
+`TOXIC` mengalahkan tier lain dan mengabaikan aktivitas sepenuhnya. Syaratnya dua-duanya: sampel
+nyata **dan** rata-rata negatif — "terbukti rugi", bukan "sepi". Penaltinya lebih besar dari bonus
+`HOT` karena kerugiannya tidak simetris: salah menilai meta panas berarti kehilangan satu trade,
+salah menilai meta toxic berarti mengisi posisi di sesuatu yang sudah terukur membakar uang.
+
+**Dua titik "meta dulu".** Nama token tidak tersedia saat discovery — PumpPortal hanya mengirim
+mint, dan feed DexScreener hanya `{chainId, tokenAddress}`. Jadi prioritas meta diterapkan di dua
+tempat yang memang tahu nama:
+
+1. **Skor**, lewat tabel tier di atas. Skornya mengalir ke `MICIN_SIGNAL_SCORE_FLOOR` dan
+   `WHALE_SIGNAL_SCORE_FLOOR` yang sudah ada, jadi token di meta panas melewati floor lebih mudah
+   dan token di meta toxic jatuh di bawahnya tanpa perlu gerbang baru.
+2. **Urutan radar watchlist**, yang mengambil `META_RADAR_OVERSAMPLE` baris lalu mengurutkannya
+   berdasarkan heat sebelum memotong ke 20. Token tanpa label mempertahankan urutan umur aslinya,
+   jadi tidak pernah kelaparan.
+
+**Gerbang `meta_cold`** (`ENABLE_META_GATE`, default **mati**) mengikuti pola shadow-lalu-tegakkan
+yang sama dengan gerbang narasi. Selama mati, setiap kandidat tetap menghasilkan baris log
+`meta_shadow ... wouldReject=...`, dan itulah satu-satunya dasar untuk memutuskan apakah gerbangnya
+layak dinyalakan.
+
+**Sumber sosial eksternal** (`ENABLE_META_SOCIAL_SOURCE`, default **mati**) adalah satu-satunya
+bagian yang butuh kredensial berbayar baru (`X_BEARER_TOKEN`, tier berbayar X API). Tiga sumber
+lainnya berasal dari data yang memang sudah lewat. Saat mati, term sosial menghasilkan seri untuk
+semua label dan karena itu saling menghapus, bukan menyeret skor turun.
+
+| Knob | Nilai | Keterangan |
+| --- | --- | --- |
+| `AI_MODEL_META` | `gpt-5.6-luna` | Model pelabelan batch |
+| `AI_TEMPERATURE_META` | `""` | **Kosongkan.** Model GPT-5 menolak parameter ini dengan 400 |
+| `AI_REASONING_EFFORT_META` | `"none"` | Tanpa ini reasoning token menambah biaya dan latensi |
+| `META_LABEL_BATCH_SIZE` | 40 | Nama per request. Inti dari kenapa pelabelan penuh LLM murah |
+| `META_LABEL_BATCH_INTERVAL_MS` | 20000 | Interval flush buffer kalau belum penuh |
+| `META_LABEL_TIMEOUT_MS` | 12000 | Timeout request pelabelan |
+| `META_LABEL_MAX_PER_HOUR` | 120 | **Plafon biaya keras.** Di atas ini pelabelan berhenti sampai jam berikutnya |
+| `META_POPULATION_SAMPLE_PER_MIN` | 20 | Token gagal-traksi yang tetap dilabeli demi sampel pasar |
+| `META_WINDOW_HOURS` | 12 | Jendela rolling semua agregat |
+| `META_REFRESH_MS` | 120000 | Interval hitung ulang heat. Pembacaan gate selalu dari memori |
+| `META_SIGHTING_DEDUPE_MS` | 300000 | Satu mint dicatat sekali per jendela ini, bukan sekali per detik |
+| `META_MIN_TRADE_SAMPLE` | 8 | Trade tertutup minimum sebelum P&L dipercaya |
+| `META_PNL_WEIGHT` | 0.6 | Bobot P&L setelah sampel cukup |
+| `META_WEIGHT_SIGHTINGS` | 0.3 | Bobot jumlah penampakan |
+| `META_WEIGHT_VOLUME` | 0.4 | Bobot volume 5 menit |
+| `META_WEIGHT_BOOST` | 0.2 | Bobot promosi berbayar |
+| `META_WEIGHT_SOCIAL` | 0.1 | Bobot sinyal sosial eksternal |
+| `META_BONUS_HOT` | 14 | Bonus skor tier `HOT` |
+| `META_BONUS_WARM` | 6 | Bonus skor tier `WARM` |
+| `META_PENALTY_TOXIC` | 18 | Penalti meta yang terbukti rugi |
+| `META_HOT_PERCENTILE` | 70 | Batas bawah `HOT` |
+| `META_COLD_PERCENTILE` | 30 | Batas atas `COLD` |
+| `META_RADAR_OVERSAMPLE` | 60 | Baris yang diambil radar sebelum diurutkan by heat |
+| `ENABLE_META_GATE` | **true** | Reject keras `meta_cold`. Inert sampai sebuah label punya >= `META_MIN_TRADE_SAMPLE` trade tertutup |
+| `ENABLE_META_TREND_REPORT` | true | Laporan meta terjadwal |
+| `META_TREND_REPORT_HOURS` | 6 | Tiap berapa jam laporan dikirim |
+| `ENABLE_META_SOCIAL_SOURCE` | **false** | Sumber sosial eksternal. Butuh `X_BEARER_TOKEN` berbayar |
+| `META_SOCIAL_POLL_MS` | 900000 | Interval polling sosial |
+| `META_SOCIAL_MAX_LABELS` | 10 | Label terpanas yang ditanyakan per siklus |
+
+Perintah Telegram `/meta` menampilkan leaderboard-nya kapan saja, dengan **net P&L per trade sebagai
+angka utama** dan jumlah penampakan sebagai konteks sekunder — bukan sebaliknya.
 
 ### Scanner, watchlist, dan retry
 

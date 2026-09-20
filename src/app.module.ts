@@ -11,6 +11,7 @@ import { TradeModule } from './trade/trade.module';
 import { PriceMonitorModule } from './price-monitor/price-monitor.module';
 import { AIModule } from './ai/ai.module';
 import { TelegramModule } from './telegram/telegram.module';
+import { MetaModule } from './meta/meta.module';
 import { loadRuntimeConfig } from './config/runtime-config';
 
 @Module({
@@ -23,6 +24,7 @@ import { loadRuntimeConfig } from './config/runtime-config';
         ScheduleModule.forRoot(),
         PrismaModule,
         TelegramModule,
+        MetaModule,
         ReportingModule,
         AnalyzerModule,
         ScannerModule,
