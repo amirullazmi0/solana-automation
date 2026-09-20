@@ -23,6 +23,8 @@ import {
 } from '../dto/reporting.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
+import { MetaTrendService } from '../meta/meta-trend.service';
+import { MetaLabelService } from '../meta/meta-label.service';
 import { ScannerService } from '../scanner/scanner.service';
 import { TradeService } from '../trade/trade.service';
 
@@ -238,6 +240,8 @@ export class ReportingService implements OnModuleInit {
                     await this.handleStatusRequest(incomingChatId);
                 } else if (normalizedText === 'watchlist') {
                     await this.handleWatchlistRequest(incomingChatId);
+                } else if (command === '/meta' || normalizedText === 'meta') {
+                    await this.handleMetaRequest(incomingChatId);
                 } else if (command === '/withdraw' || normalizedText === 'withdraw') {
                     await this.handleWithdrawStart(incomingChatId);
                 } else if (this.isSolanaAddress(text)) {
@@ -302,6 +306,7 @@ export class ReportingService implements OnModuleInit {
                     [{ text: '\uD83D\uDCBC Balance' }, { text: '\uD83D\uDCC8 Portfolio' }],
                     [{ text: '\u2699\uFE0F Settings' }, { text: '\uD83D\uDCC8 Win Rate' }],
                     [{ text: '\uD83D\uDC40 Watchlist' }, { text: '\uD83D\uDCB8 Withdraw' }],
+                    [{ text: '������ Meta' }],
                 ],
                 resize_keyboard: true,
             },
@@ -1657,6 +1662,22 @@ export class ReportingService implements OnModuleInit {
                     message: 'AI conviction judge rejected the candidate.',
                     action: 'No buy. Token stays rejected until a fresh radar cycle.',
                 };
+            case 'narrative_weak':
+                return {
+                    status: 'REJECTED',
+                    label: 'REJECTED: narrative_weak',
+                    severity: 'soft_fail',
+                    message: 'The name and social footprint read as template spam.',
+                    action: 'No buy. Token stays rejected until a fresh radar cycle.',
+                };
+            case 'meta_cold':
+                return {
+                    status: 'WAITING',
+                    label: 'WAITING: meta_cold',
+                    severity: 'soft_fail',
+                    message: 'This meta has been losing money over the measured window.',
+                    action: 'No buy. Stays on the watchlist in case the meta heats up.',
+                };
             case 'noisy_pump':
                 return {
                     status: 'REJECTED',
@@ -1851,6 +1872,103 @@ export class ReportingService implements OnModuleInit {
             this.logger.error(
                 `Failed to send telegram message to chat ${destinationChatId} after retries: ${errorMsg}`,
             );
+        }
+    }
+
+    /**
+     * The meta leaderboard, as both a scheduled report and the `/meta` command.
+     *
+     * Ordered by heat but led by money. The headline figure for each row is net P&L per trade, not
+     * how many tokens of that theme the scanner saw -- a meta can be the busiest thing on the chain
+     * and still be the fastest way to lose money, and reporting the busy number first would make
+     * exactly the wrong one look like the win.
+     */
+    private buildMetaReport(): string {
+        const metaTrendService = this.moduleRef.get(MetaTrendService, { strict: false });
+        const metaLabelService = this.moduleRef.get(MetaLabelService, { strict: false });
+
+        const leaderboard = metaTrendService.getLeaderboard();
+        if (leaderboard.length === 0) {
+            return (
+                '🧭 *Meta Trend:* no labelled activity in the window yet.\n' +
+                '_Labels arrive a few minutes after the first tokens are analysed._'
+            );
+        }
+
+        const refreshedAt = metaTrendService.getLastRefreshAt();
+        const ageMin = refreshedAt ? Math.round((Date.now() - refreshedAt) / 60000) : 0;
+
+        const lines = leaderboard.slice(0, 12).map((entry, index) => {
+            const delta = metaTrendService.getRankDelta(entry.label);
+            const arrow = delta === undefined || delta === 0 ? '' : delta > 0 ? ' 🔺' : ' 🔻';
+            const tierIcon =
+                entry.tier === 'HOT'
+                    ? '🔥'
+                    : entry.tier === 'TOXIC'
+                      ? '☠️'
+                      : entry.tier === 'WARM'
+                        ? '🌤'
+                        : '❄️';
+
+            // A label with too few closed trades is shown as such rather than as a P&L of zero,
+            // because "no evidence" and "broke even" are opposite conclusions.
+            const money =
+                entry.sampleSize > 0
+                    ? `$${entry.netPnlPerTrade.toFixed(3)}/trade over ${entry.sampleSize} ` +
+                      `(win ${entry.winRate.toFixed(0)}%)`
+                    : 'no closed trades yet';
+
+            return (
+                `${index + 1}. ${tierIcon} *${entry.label}*${arrow} — ${money}\n` +
+                `    heat ${entry.heatScore.toFixed(0)} · ${entry.reasons.join(' · ')}`
+            );
+        });
+
+        const usage = metaLabelService.getUsageSnapshot();
+        const cost =
+            `\n\n💸 *Labelling spend this run:* ${usage.requests} request(s), ` +
+            `${usage.mints} mint(s), ${usage.promptTokens} in / ${usage.completionTokens} out tokens`;
+
+        return (
+            `🧭 *Meta Trend* _(refreshed ${ageMin}m ago)_\n\n` +
+            lines.join('\n') +
+            cost +
+            '\n\n_Fees are roughly 0.0011 SOL per round trip, so a setup needs to clear that before ' +
+            'any of these numbers are profit._'
+        );
+    }
+
+    private async handleMetaRequest(targetChatId?: string) {
+        await this.sendMessage(this.buildMetaReport(), {}, 0, targetChatId);
+    }
+
+    /**
+     * Scheduled meta report.
+     *
+     * Fires on a fixed schedule rather than `META_TREND_REPORT_CRON`, because `@Cron` reads its
+     * expression at class-decoration time -- before ConfigModule has loaded anything -- so a config
+     * value there would silently be undefined. The knob is honoured by skipping runs that fall
+     * outside the configured interval instead.
+     */
+    @Cron('0 * * * *')
+    async sendMetaTrendReport() {
+        try {
+            const everyHours = Math.max(
+                1,
+                Number.parseInt(this.configService.get<string>('META_TREND_REPORT_HOURS', '6'), 10) ||
+                    6,
+            );
+            if (new Date().getUTCHours() % everyHours !== 0) return;
+
+            const enabled =
+                String(this.configService.get('ENABLE_META_TREND_REPORT', 'true')).toLowerCase() !==
+                'false';
+            if (!enabled) return;
+
+            await this.sendMessage(this.buildMetaReport());
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Meta trend report failed: ${msg}`);
         }
     }
 
