@@ -189,6 +189,7 @@ model Trade {
   targetTakeProfit        Float?
   targetStopLoss          Float?
   targetTrailingDistance  Float?
+  metaLabel               String?
   telegramChat            TelegramChat?       @relation(fields: [telegramChatId], references: [id], onDelete: SetNull)
   aiDecisionSnapshot      AiDecisionSnapshot? @relation(fields: [aiDecisionSnapshotId], references: [id], onDelete: SetNull)
 
@@ -197,6 +198,7 @@ model Trade {
   @@index([route, status, mode])
   @@index([tokenMint, createdAt])
   @@index([telegramChatId, status, mode])
+  @@index([metaLabel, status, mode])
 }
 
 model TokenSafetyProbe {
@@ -308,4 +310,42 @@ model CreatorProfile {
 
   @@index([isBlacklisted])
   @@index([riskScore])
+}
+
+model TokenMetaLabel {
+  tokenMint  String   @id
+  label      String
+  tokenName  String?
+  symbol     String?
+  confidence String?
+  source     String   @default("llm")
+  labeledAt  DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([label, labeledAt])
+}
+
+// One row per sighting, not per token. This is what makes "that meta is busy right now" a
+// measurement instead of a guess: the same mint seen in three separate windows is three pieces of
+// evidence. Pruned outside META_WINDOW_HOURS, so the table stays bounded by traffic, not by time.
+model MetaSighting {
+  id           Int      @id @default(autoincrement())
+  label        String
+  tokenMint    String
+  volume5m     Float?
+  liquidityUsd Float?
+  isBoosted    Boolean  @default(false)
+  seenAt       DateTime @default(now())
+
+  @@index([label, seenAt])
+  @@index([seenAt])
+}
+
+model MetaVocabulary {
+  label       String   @id
+  aliases     String[] @default([])
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  retired     Boolean  @default(false)
 }
