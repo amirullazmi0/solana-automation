@@ -112,6 +112,17 @@ export interface OpenAIChatChoice {
     message?: OpenAIChatChoiceMessage;
 }
 
+/**
+ * Token accounting returned alongside every completion. Optional because not every
+ * OpenAI-compatible endpoint sends it, and nothing here may depend on it being present.
+ */
+export interface OpenAIUsage {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+}
+
 export interface OpenAIChatCompletionResponse {
     choices?: OpenAIChatChoice[];
+    usage?: OpenAIUsage;
 }

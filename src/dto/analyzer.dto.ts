@@ -39,6 +39,8 @@ export interface TokenMetadata {
     awaitingAmmPair?: boolean;
     symbol?: string;
     tokenName?: string;
+    /** Meta the model assigned to this token, carried through so the Trade row can be stamped. */
+    metaLabel?: string;
     volumeSurge?: number;
     volScore?: number;
     zScore?: number;
