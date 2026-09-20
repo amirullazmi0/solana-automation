@@ -196,10 +196,48 @@ describe('computeAcceleration', () => {
         expect(ratio).toBeGreaterThan(1);
     });
 
-    it('still ranks a big new label above a small new one', () => {
-        const small = computeAcceleration({ sightings: 3, recentSightings: 3, ...window });
-        const large = computeAcceleration({ sightings: 30, recentSightings: 30, ...window });
+    it('still ranks a big new label above a small new one, once a baseline exists', () => {
+        // Legitimate only because the span is full: the chain has been watched for twelve hours
+        // and these labels genuinely appeared from nothing inside the last one.
+        const span = { ...window, dataSpanMinutes: 720 };
+        const small = computeAcceleration({ sightings: 3, recentSightings: 3, ...span });
+        const large = computeAcceleration({ sightings: 30, recentSightings: 30, ...span });
         expect(large).toBeGreaterThan(small);
+    });
+
+    it('stays flat while the bot has not been collecting longer than the recent slice', () => {
+        // Regression. Seen in production minutes after a deploy: four labels with 2, 2, 2 and 4
+        // sightings reported 22.00x, 22.00x, 22.00x and 44.00x -- the ratio was exactly
+        // `sightings x 11`, a restated count wearing the units of a rate, and identical constants
+        // across unrelated labels are the same tell volumeSurge gave.
+        for (const [sightings, span] of [
+            [2, 6],
+            [4, 6],
+            [10, 45],
+            [3, 60],
+        ] as const) {
+            expect(
+                computeAcceleration({
+                    sightings,
+                    recentSightings: sightings,
+                    windowMinutes: 720,
+                    recentMinutes: 60,
+                    dataSpanMinutes: span,
+                }),
+            ).toBe(1);
+        }
+    });
+
+    it('starts giving an opinion once the span exceeds the recent slice', () => {
+        const ratio = computeAcceleration({
+            sightings: 10,
+            recentSightings: 8,
+            windowMinutes: 720,
+            recentMinutes: 60,
+            dataSpanMinutes: 180,
+        });
+        expect(ratio).toBeGreaterThan(1);
+        expect(Number.isFinite(ratio)).toBe(true);
     });
 
     it('answers flat when the arithmetic is not meaningful', () => {
@@ -334,5 +372,27 @@ describe('computeHeat toxic threshold', () => {
         });
         expect(heat.get('x')!.toxicThreshold).toBeCloseTo(-0.3);
         expect(heat.get('x')!.reasons.join()).toContain('toxic below');
+    });
+});
+
+describe('computeHeat during the bootstrap period', () => {
+    it('does not let acceleration double-count the level right after a restart', () => {
+        // The production symptom: every sighting sits inside the recent slice, so a broken
+        // acceleration term simply re-ranks labels by count -- and the blend then spends both the
+        // sightings weight AND the acceleration weight on one signal.
+        const boot = { windowMinutes: 720, recentMinutes: 60, dataSpanMinutes: 7 };
+        const heat = computeHeat([
+            base({ label: 'animal', sightings: 4, recentSightings: 4, volumeSum: 3_000, ...boot }),
+            base({ label: 'crypto', sightings: 2, recentSightings: 2, volumeSum: 2_000, ...boot }),
+            base({ label: 'ai', sightings: 2, recentSightings: 2, volumeSum: 1_000, ...boot }),
+            base({ label: 'solana', sightings: 2, recentSightings: 2, volumeSum: 500, ...boot }),
+        ]);
+
+        // Every label ties at flat, so the term contributes a neutral percentile to all of them
+        // and cancels out of the ranking entirely.
+        for (const entry of heat.values()) expect(entry.accelRatio).toBe(1);
+
+        // Ranking still works, driven by the terms that do have evidence.
+        expect(heat.get('animal')!.heatScore).toBeGreaterThan(heat.get('solana')!.heatScore);
     });
 });

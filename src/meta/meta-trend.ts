@@ -26,6 +26,11 @@ export interface MetaAggregate {
     /** Length of the full window and of the recent slice, in minutes. */
     windowMinutes?: number;
     recentMinutes?: number;
+    /**
+     * How long sightings have ACTUALLY been collected for, which after a restart is far less than
+     * the nominal window. Without it the baseline period is assumed rather than observed.
+     */
+    dataSpanMinutes?: number;
     /** Closed LIVE trades bought under this label within the window. */
     trades: number;
     netPnlTotal: number;
@@ -144,14 +149,30 @@ export function computeAcceleration(input: {
     recentSightings: number;
     windowMinutes: number;
     recentMinutes: number;
+    dataSpanMinutes?: number;
 }): number {
     const total = Math.max(0, input.sightings ?? 0);
     const recent = Math.max(0, Math.min(input.recentSightings ?? 0, total));
     const windowMinutes = input.windowMinutes ?? 0;
     const recentMinutes = input.recentMinutes ?? 0;
 
-    const baselineMinutes = windowMinutes - recentMinutes;
-    // A recent slice as long as the window leaves nothing to compare against.
+    // The baseline period is what has actually been observed, not the nominal window. After a
+    // restart the two differ enormously, and assuming the nominal one is what breaks this:
+    // every sighting then falls inside the recent slice, the baseline is empty for every label,
+    // and the floor turns the ratio into `total x (baselineMinutes / recentMinutes)` -- a restated
+    // count wearing the units of a rate. Four labels with 2, 2, 2 and 4 sightings reported
+    // 22.00x, 22.00x, 22.00x and 44.00x, which is the same tell `volumeSurge` gave when it
+    // divided by a fixed bucket count: identical constants across unrelated tokens.
+    //
+    // Worse than useless, because the blend already scores the level separately, so the same
+    // signal was being counted twice at half the activity weight.
+    const observed = Number.isFinite(input.dataSpanMinutes)
+        ? Math.min(windowMinutes, Math.max(0, input.dataSpanMinutes as number))
+        : windowMinutes;
+    const baselineMinutes = observed - recentMinutes;
+
+    // No baseline yet means no opinion. A universal 1.0 ties every label, and percentileRank
+    // scores a universal tie at a neutral 50, so the term cancels out instead of misleading.
     if (recentMinutes <= 0 || baselineMinutes <= 0) return 1;
     if (total === 0) return 1;
 
@@ -214,6 +235,7 @@ export function computeHeat(
             recentSightings: a.recentSightings ?? 0,
             windowMinutes: a.windowMinutes ?? 0,
             recentMinutes: a.recentMinutes ?? 0,
+            dataSpanMinutes: a.dataSpanMinutes,
         }),
     );
 

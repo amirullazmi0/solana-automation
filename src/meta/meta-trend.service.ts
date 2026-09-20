@@ -33,6 +33,8 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
     private readonly logger = new Logger(MetaTrendService.name);
 
     private heat = new Map<string, MetaHeat>();
+    /** Observed collection span, refreshed alongside the aggregates. */
+    private dataSpanMinutes = 0;
     private previousRanking = new Map<string, number>();
     private lastRefreshAt = 0;
 
@@ -275,6 +277,7 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
                     recentSightings: a?.recent ?? 0,
                     windowMinutes,
                     recentMinutes,
+                    dataSpanMinutes: this.dataSpanMinutes,
                     trades: t?.trades ?? 0,
                     netPnlTotal: t?.netPnlTotal ?? 0,
                     wins: t?.wins ?? 0,
@@ -330,6 +333,17 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
             _count: { _all: true },
         });
         const boostByLabel = new Map(boosted.map((row) => [row.label, row._count._all]));
+
+        // How long sightings have actually been collected, which after a restart is minutes rather
+        // than the nominal window. The acceleration term needs the observed span, not the assumed
+        // one, or it degenerates into a restated count.
+        const oldest = await this.prismaService.metaSighting.aggregate({
+            where: { seenAt: { gte: since } },
+            _min: { seenAt: true },
+        });
+        const oldestAt = oldest._min.seenAt?.getTime();
+        const dataSpanMinutes = oldestAt ? (Date.now() - oldestAt) / 60000 : 0;
+        this.dataSpanMinutes = dataSpanMinutes;
 
         return new Map(
             rows.map((row) => [
