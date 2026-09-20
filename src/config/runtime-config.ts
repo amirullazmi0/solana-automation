@@ -127,6 +127,13 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     const narrativeCacheTtlMs = readNumber(config, 'NARRATIVE_CACHE_TTL_MS', 86400000);
     const narrativeTimeoutMs = readNumber(config, 'AI_NARRATIVE_TIMEOUT_MS', 8000);
     const narrativeMinConfidence = readString(config, 'NARRATIVE_MIN_CONFIDENCE', 'high').toLowerCase();
+    const metaPnlWeight = readNumber(config, 'META_PNL_WEIGHT', 0.6);
+    const metaMinTradeSample = readNumber(config, 'META_MIN_TRADE_SAMPLE', 8);
+    const metaHotPercentile = readNumber(config, 'META_HOT_PERCENTILE', 70);
+    const metaColdPercentile = readNumber(config, 'META_COLD_PERCENTILE', 30);
+    const metaLabelBatchSize = readNumber(config, 'META_LABEL_BATCH_SIZE', 40);
+    const metaLabelMaxPerHour = readNumber(config, 'META_LABEL_MAX_PER_HOUR', 120);
+    const metaWindowHours = readNumber(config, 'META_WINDOW_HOURS', 12);
     const bearishReboundMin5mPct = readNumber(config, 'BEARISH_REBOUND_MIN_5M_PCT', 3);
     const aggressiveHolderLiquidityUsd = readNumber(
         config,
@@ -232,6 +239,30 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     }
     if (!['high', 'medium', 'low'].includes(narrativeMinConfidence)) {
         errors.push('NARRATIVE_MIN_CONFIDENCE must be one of high, medium, low.');
+    }
+    // META_PNL_WEIGHT is a share, not a multiplier: above 1 the activity term goes negative and
+    // ranks the quietest metas highest, which is the exact inverse of the intent.
+    if (metaPnlWeight < 0 || metaPnlWeight > 1) {
+        errors.push('META_PNL_WEIGHT must be between 0 and 1; it is the P&L share of the blend.');
+    }
+    // A sample of one makes every single-trade label either the best or the worst meta on the
+    // board, and TOXIC can reject candidates, so the floor is deliberately above 1.
+    if (metaMinTradeSample < 2) {
+        errors.push('META_MIN_TRADE_SAMPLE must be >= 2; one trade cannot characterise a meta.');
+    }
+    if (metaColdPercentile < 0 || metaHotPercentile > 100 || metaColdPercentile >= metaHotPercentile) {
+        errors.push(
+            'META_COLD_PERCENTILE must be >= 0 and strictly below META_HOT_PERCENTILE, which must be <= 100.',
+        );
+    }
+    if (metaLabelBatchSize < 1 || metaLabelBatchSize > 200) {
+        errors.push('META_LABEL_BATCH_SIZE must be between 1 and 200.');
+    }
+    if (metaLabelMaxPerHour < 0) {
+        errors.push('META_LABEL_MAX_PER_HOUR must be >= 0 (0 disables labelling entirely).');
+    }
+    if (metaWindowHours < 1) {
+        errors.push('META_WINDOW_HOURS must be >= 1.');
     }
     if (aggressiveHolderLiquidityUsd < 0) {
         errors.push('AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD must be >= 0.');
