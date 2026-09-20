@@ -30,6 +30,8 @@ export interface MetaAggregate {
     trades: number;
     netPnlTotal: number;
     wins?: number;
+    /** Total fees paid across those trades, in USD. Calibrates the toxic threshold. */
+    feeTotalUsd?: number;
     /** Mention velocity from an external social source; 0 when that source is disabled. */
     socialScore?: number;
 }
@@ -46,6 +48,8 @@ export interface MetaHeat {
     accelRatio: number;
     /** Undefined until the label has enough closed trades to be judged on money. */
     pnlScore?: number;
+    /** The loss per trade this label had to exceed to be called TOXIC. Negative. */
+    toxicThreshold: number;
     reasons: string[];
 }
 
@@ -58,6 +62,10 @@ export interface HeatOptions {
     /** Share of the final score taken by P&L once the sample is large enough. */
     pnlWeight: number;
     minTradeSample: number;
+    /** A loss is only damning at this multiple of what the fees alone cost. */
+    toxicFeeMultiple: number;
+    /** Absolute floor in USD, so a trivial loss is never toxic however cheap the fees were. */
+    toxicMinLossUsd: number;
     hotPercentile: number;
     coldPercentile: number;
 }
@@ -73,6 +81,8 @@ export const DEFAULT_HEAT_OPTIONS: HeatOptions = {
     weightAccel: 0.25,
     pnlWeight: 0.6,
     minTradeSample: 8,
+    toxicFeeMultiple: 1.5,
+    toxicMinLossUsd: 0.2,
     hotPercentile: 70,
     coldPercentile: 30,
 };
@@ -154,6 +164,32 @@ export function computeAcceleration(input: {
 }
 
 /**
+ * How much a meta has to lose per trade before the loss means anything.
+ *
+ * A round trip costs fees whatever happens, and `computeNetProfitUsd` subtracts them, so a meta
+ * whose trades go precisely nowhere still reports a negative net. Treating any negative number as
+ * proof of a bad meta therefore condemns the *average* meta rather than the bad ones -- and with
+ * the gate switched on that would reject most candidates the moment enough samples accumulated,
+ * which is the opposite of selectivity.
+ *
+ * The bar is set from the fees those trades actually paid rather than from a fixed dollar figure,
+ * so it stays correct when position size or the SOL price moves. The absolute floor covers the case
+ * where fee data is missing on older rows: without it, a label with no recorded fees would fall
+ * back to a zero threshold and the original problem returns.
+ */
+export function resolveToxicThreshold(input: {
+    feeTotalUsd: number;
+    trades: number;
+    feeMultiple: number;
+    minLossUsd: number;
+}): number {
+    const avgFeeUsd = safeDivide(Math.abs(input.feeTotalUsd ?? 0), input.trades ?? 0);
+    const fromFees = Math.max(0, input.feeMultiple ?? 0) * avgFeeUsd;
+    const floor = Math.max(0, input.minLossUsd ?? 0);
+    return -Math.max(fromFees, floor);
+}
+
+/**
  * Scores every label against every other label in the same window.
  *
  * Relative by construction: a meta is hot compared to what else is running right now, not against a
@@ -217,6 +253,12 @@ export function computeHeat(
         const netPnlPerTrade = safeDivide(aggregate.netPnlTotal ?? 0, sampleSize);
         const winRate = sampleSize > 0 ? safeDivide(aggregate.wins ?? 0, sampleSize) * 100 : 0;
         const hasSample = sampleSize >= opts.minTradeSample;
+        const toxicThreshold = resolveToxicThreshold({
+            feeTotalUsd: aggregate.feeTotalUsd ?? 0,
+            trades: sampleSize,
+            feeMultiple: opts.toxicFeeMultiple,
+            minLossUsd: opts.toxicMinLossUsd,
+        });
 
         let heatScore = activityScore;
         let pnlScore: number | undefined;
@@ -228,7 +270,10 @@ export function computeHeat(
                 0,
                 100,
             );
-            reasons.push(`pnl ${netPnlPerTrade.toFixed(3)}/trade over ${sampleSize}`);
+            reasons.push(
+                `pnl ${netPnlPerTrade.toFixed(3)}/trade over ${sampleSize} ` +
+                    `(toxic below ${toxicThreshold.toFixed(3)})`,
+            );
         } else {
             reasons.push(`activity only (${sampleSize}/${opts.minTradeSample} trades)`);
         }
@@ -237,13 +282,14 @@ export function computeHeat(
         result.set(aggregate.label, {
             label: aggregate.label,
             heatScore,
-            tier: resolveTier({ heatScore, netPnlPerTrade, hasSample, opts }),
+            tier: resolveTier({ heatScore, netPnlPerTrade, hasSample, toxicThreshold, opts }),
             sampleSize,
             netPnlPerTrade,
             winRate,
             activityScore,
             accelRatio,
             pnlScore,
+            toxicThreshold,
             reasons,
         });
     }
@@ -254,17 +300,19 @@ export function computeHeat(
 /**
  * TOXIC outranks every other tier, and is the one judgement that ignores attention entirely.
  *
- * It requires both a real sample and a negative average -- "proven to lose money", not "quiet". A
- * busy meta that keeps taking money off us is exactly the case a pure attention score gets wrong,
- * and it is the expensive one, so it gets its own tier rather than a merely low score.
+ * It requires a real sample and a loss large enough to mean something -- "proven to lose money",
+ * not "quiet", and not merely "paid the fees". A busy meta that keeps taking money off us is
+ * exactly the case a pure attention score gets wrong, and it is the expensive one, so it gets its
+ * own tier rather than a merely low score.
  */
 function resolveTier(input: {
     heatScore: number;
     netPnlPerTrade: number;
     hasSample: boolean;
+    toxicThreshold: number;
     opts: HeatOptions;
 }): MetaTier {
-    if (input.hasSample && input.netPnlPerTrade < 0) return 'TOXIC';
+    if (input.hasSample && input.netPnlPerTrade < input.toxicThreshold) return 'TOXIC';
     if (input.heatScore >= input.opts.hotPercentile) return 'HOT';
     if (input.heatScore <= input.opts.coldPercentile) return 'COLD';
     return 'WARM';

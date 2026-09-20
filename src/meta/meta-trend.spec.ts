@@ -4,6 +4,7 @@ import {
     computeHeat,
     metaScoreAdjustment,
     percentileRank,
+    resolveToxicThreshold,
 } from './meta-trend';
 
 const base = (over: Partial<MetaAggregate> & { label: string }): MetaAggregate => ({
@@ -247,5 +248,91 @@ describe('computeHeat acceleration term', () => {
         // The snapshot script has no history at all; it must not be reported as accelerating.
         const heat = computeHeat([base({ label: 'dog', sightings: 5, volumeSum: 100 })]);
         expect(heat.get('dog')!.accelRatio).toBe(1);
+    });
+});
+
+describe('resolveToxicThreshold', () => {
+    it('sets the bar from the fees those trades actually paid', () => {
+        // 20 trades, $4 of fees total = $0.20 per trade. At 1.5x, a meta must lose more than
+        // $0.30 per trade before the loss says anything beyond "it paid the spread".
+        const threshold = resolveToxicThreshold({
+            feeTotalUsd: 4,
+            trades: 20,
+            feeMultiple: 1.5,
+            minLossUsd: 0.2,
+        });
+        expect(threshold).toBeCloseTo(-0.3);
+    });
+
+    it('falls back to the absolute floor when fee data is missing', () => {
+        // Older rows have no totalFeesSol. Without the floor the threshold collapses to zero and
+        // every break-even meta becomes toxic again.
+        const threshold = resolveToxicThreshold({
+            feeTotalUsd: 0,
+            trades: 20,
+            feeMultiple: 1.5,
+            minLossUsd: 0.2,
+        });
+        expect(threshold).toBeCloseTo(-0.2);
+    });
+
+    it('takes whichever bar is higher, never the lower one', () => {
+        const threshold = resolveToxicThreshold({
+            feeTotalUsd: 20,
+            trades: 20,
+            feeMultiple: 1.5,
+            minLossUsd: 0.2,
+        });
+        expect(threshold).toBeCloseTo(-1.5);
+    });
+
+    it('never returns a positive bar, whatever it is handed', () => {
+        for (const input of [
+            { feeTotalUsd: -5, trades: 10, feeMultiple: 1.5, minLossUsd: 0.2 },
+            { feeTotalUsd: 5, trades: 0, feeMultiple: -3, minLossUsd: -1 },
+        ]) {
+            expect(resolveToxicThreshold(input)).toBeLessThanOrEqual(0);
+        }
+    });
+});
+
+describe('computeHeat toxic threshold', () => {
+    const feeDrag = { trades: 20, feeTotalUsd: 4 }; // $0.20 per trade
+
+    it('does not condemn a meta that merely paid the fees', () => {
+        // This is the whole reason the threshold exists. Twenty trades that went nowhere show a
+        // net of -$0.20 each purely from fees; calling that TOXIC would reject the average meta
+        // rather than the bad ones, and with the gate on it would choke the bot.
+        const heat = computeHeat(
+            [
+                base({ label: 'flat', sightings: 40, volumeSum: 5_000, netPnlTotal: -4, ...feeDrag }),
+                base({ label: 'other', sightings: 10, volumeSum: 500 }),
+            ],
+            { minTradeSample: 8 },
+        );
+
+        expect(heat.get('flat')!.tier).not.toBe('TOXIC');
+        expect(heat.get('flat')!.netPnlPerTrade).toBeCloseTo(-0.2);
+    });
+
+    it('still condemns a meta losing well beyond its fees', () => {
+        const heat = computeHeat(
+            [
+                base({ label: 'trap', sightings: 40, volumeSum: 5_000, netPnlTotal: -30, ...feeDrag }),
+                base({ label: 'other', sightings: 10, volumeSum: 500 }),
+            ],
+            { minTradeSample: 8 },
+        );
+
+        expect(heat.get('trap')!.tier).toBe('TOXIC');
+        expect(heat.get('trap')!.netPnlPerTrade).toBeCloseTo(-1.5);
+    });
+
+    it('exposes the bar it used so the decision can be audited', () => {
+        const heat = computeHeat([base({ label: 'x', netPnlTotal: -4, ...feeDrag })], {
+            minTradeSample: 8,
+        });
+        expect(heat.get('x')!.toxicThreshold).toBeCloseTo(-0.3);
+        expect(heat.get('x')!.reasons.join()).toContain('toxic below');
     });
 });

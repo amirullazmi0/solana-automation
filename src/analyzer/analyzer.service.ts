@@ -717,7 +717,11 @@ export class AnalyzerService {
             if (metaHeat) {
                 this.logger.log(
                     `[${tokenMint}] meta_shadow label=${metaLabel} tier=${metaHeat.tier} ` +
-                        `heat=${metaHeat.heatScore.toFixed(1)} n=${metaHeat.sampleSize} ` +
+                        `heat=${metaHeat.heatScore.toFixed(1)} accel=${metaHeat.accelRatio.toFixed(2)}x ` +
+                        `n=${metaHeat.sampleSize} pnl=${metaHeat.netPnlPerTrade.toFixed(3)} ` +
+                        // The bar is logged next to the number it judged, so a rejection can be
+                        // checked against the fee drag that set it without re-deriving anything.
+                        `toxicBelow=${metaHeat.toxicThreshold.toFixed(3)} ` +
                         `wouldReject=${metaWouldReject} (${metaHeat.reasons.join('; ')})`,
                 );
             }

@@ -112,6 +112,8 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
             weightAccel: this.readNumber('META_WEIGHT_ACCEL', 0.25, 0, 10),
             pnlWeight: this.readNumber('META_PNL_WEIGHT', 0.6, 0, 1),
             minTradeSample: this.readNumber('META_MIN_TRADE_SAMPLE', 8, 1, 1000),
+            toxicFeeMultiple: this.readNumber('META_TOXIC_FEE_MULTIPLE', 1.5, 0, 20),
+            toxicMinLossUsd: this.readNumber('META_TOXIC_MIN_LOSS_USD', 0.2, 0, 1000),
             hotPercentile: this.readNumber('META_HOT_PERCENTILE', 70, 0, 100),
             coldPercentile: this.readNumber('META_COLD_PERCENTILE', 30, 0, 100),
         };
@@ -276,6 +278,7 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
                     trades: t?.trades ?? 0,
                     netPnlTotal: t?.netPnlTotal ?? 0,
                     wins: t?.wins ?? 0,
+                    feeTotalUsd: t?.feeTotalUsd ?? 0,
                     socialScore: social.get(label) ?? 0,
                 };
             });
@@ -351,7 +354,9 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
      */
     private async loadTradeOutcomes(
         since: Date,
-    ): Promise<Map<string, { trades: number; netPnlTotal: number; wins: number }>> {
+    ): Promise<
+        Map<string, { trades: number; netPnlTotal: number; wins: number; feeTotalUsd: number }>
+    > {
         const rows = await this.prismaService.trade.findMany({
             where: {
                 status: 'CLOSED',
@@ -367,14 +372,31 @@ export class MetaTrendService implements OnModuleInit, OnModuleDestroy {
             },
         });
 
-        const out = new Map<string, { trades: number; netPnlTotal: number; wins: number }>();
+        const out = new Map<
+            string,
+            { trades: number; netPnlTotal: number; wins: number; feeTotalUsd: number }
+        >();
         for (const row of rows) {
             const label = row.metaLabel;
             if (!label) continue;
             const net = computeNetProfitUsd(row);
-            const entry = out.get(label) ?? { trades: 0, netPnlTotal: 0, wins: 0 };
+            // Same conversion computeNetProfitUsd uses internally, kept here because the toxic
+            // threshold needs the fee component on its own, not just folded into the net figure.
+            const solPrice = Number(row.solPriceAtEntry ?? 0);
+            const feeUsd =
+                Number.isFinite(solPrice) && solPrice > 0
+                    ? Number(row.totalFeesSol ?? 0) * solPrice
+                    : 0;
+
+            const entry = out.get(label) ?? {
+                trades: 0,
+                netPnlTotal: 0,
+                wins: 0,
+                feeTotalUsd: 0,
+            };
             entry.trades += 1;
             entry.netPnlTotal += net;
+            entry.feeTotalUsd += Number.isFinite(feeUsd) ? feeUsd : 0;
             if (net > 0) entry.wins += 1;
             out.set(label, entry);
         }

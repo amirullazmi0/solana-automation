@@ -707,15 +707,36 @@ keduanya tidak memberi tahu meta mana yang layak dipilih.
 | Tier | Syarat | Efek ke whale signal score |
 | --- | --- | --- |
 | `HOT` | heat >= `META_HOT_PERCENTILE` | `+META_BONUS_HOT` |
-| `WARM` | di antaranya | `+META_BONUS_WARM` |
+| `WARM` | di antaranya | `+META_BONUS_WARM` (default 0) |
 | `COLD` | heat <= `META_COLD_PERCENTILE` | 0 |
-| `TOXIC` | sampel cukup **dan** net P&L per trade negatif | `-META_PENALTY_TOXIC` |
+| `TOXIC` | sampel cukup **dan** rugi melewati ambang fee (lihat bawah) | `-META_PENALTY_TOXIC` |
 | belum berlabel | — | 0 |
 
-`TOXIC` mengalahkan tier lain dan mengabaikan aktivitas sepenuhnya. Syaratnya dua-duanya: sampel
-nyata **dan** rata-rata negatif — "terbukti rugi", bukan "sepi". Penaltinya lebih besar dari bonus
-`HOT` karena kerugiannya tidak simetris: salah menilai meta panas berarti kehilangan satu trade,
-salah menilai meta toxic berarti mengisi posisi di sesuatu yang sudah terukur membakar uang.
+`TOXIC` mengalahkan tier lain dan mengabaikan aktivitas sepenuhnya. Penaltinya jauh lebih besar dari
+bonus `HOT` karena kerugiannya tidak simetris: salah menilai meta panas berarti kehilangan satu
+trade, salah menilai meta toxic berarti mengisi posisi di sesuatu yang sudah terukur membakar uang.
+
+Asimetri itu disengaja dan arahnya penting: **bonus mengundang token masuk, penalti membuang token
+keluar.** Karena itu default-nya condong ke sisi penalti. Perhatikan skalanya terhadap floor yang
+ada — `WHALE_SIGNAL_SCORE_FLOOR` hanya 8, jadi bonus `HOT` sebesar 14 dulu setara 175% dari floor
+dan bisa meloloskan token tanpa bantuan sinyal lain. Di 8 dia jadi pendorong, bukan penentu.
+
+**Ambang `TOXIC` dikalibrasi dari fee, bukan dari nol.**
+
+```text
+ambang = -max(META_TOXIC_FEE_MULTIPLE x rataFeePerTrade, META_TOXIC_MIN_LOSS_USD)
+TOXIC  = n >= META_MIN_TRADE_SAMPLE  dan  netPnLPerTrade < ambang
+```
+
+Satu putaran beli-jual selalu membayar fee, dan `computeNetProfitUsd` sudah menguranginya. Jadi
+sebuah meta yang trade-nya berakhir persis di tempat yang sama tetap melaporkan net **negatif**
+sebesar fee itu. Memperlakukan negatif apa pun sebagai bukti meta buruk berarti menghukum meta
+**rata-rata**, bukan meta yang jelek — dan dengan gerbang menyala itu akan menolak mayoritas
+kandidat begitu sampelnya terkumpul, kebalikan dari selektivitas.
+
+Ambangnya diambil dari fee yang benar-benar dibayar trade tersebut, bukan angka dolar tetap, supaya
+tetap benar ketika position size atau harga SOL bergerak. Lantai absolutnya menutupi baris lama yang
+`totalFeesSol`-nya kosong: tanpa itu ambangnya runtuh ke nol dan masalahnya kembali.
 
 **Dua titik "meta dulu".** Nama token tidak tersedia saat discovery — PumpPortal hanya mengirim
 mint, dan feed DexScreener hanya `{chainId, tokenAddress}`. Jadi prioritas meta diterapkan di dua
@@ -746,23 +767,25 @@ semua label dan karena itu saling menghapus, bukan menyeret skor turun.
 | `META_LABEL_BATCH_SIZE` | 40 | Nama per request. Inti dari kenapa pelabelan penuh LLM murah |
 | `META_LABEL_BATCH_INTERVAL_MS` | 20000 | Interval flush buffer kalau belum penuh |
 | `META_LABEL_TIMEOUT_MS` | 12000 | Timeout request pelabelan |
-| `META_LABEL_MAX_PER_HOUR` | 120 | **Plafon biaya keras.** Di atas ini pelabelan berhenti sampai jam berikutnya |
+| `META_LABEL_MAX_PER_HOUR` | 60 | **Plafon biaya keras.** Di atas ini pelabelan berhenti sampai jam berikutnya |
 | `META_POPULATION_SAMPLE_PER_MIN` | 20 | Token gagal-traksi yang tetap dilabeli demi sampel pasar |
 | `META_WINDOW_HOURS` | 12 | Jendela rolling semua agregat |
 | `META_REFRESH_MS` | 120000 | Interval hitung ulang heat. Pembacaan gate selalu dari memori |
 | `META_SIGHTING_DEDUPE_MS` | 300000 | Satu mint dicatat sekali per jendela ini, bukan sekali per detik |
-| `META_MIN_TRADE_SAMPLE` | 8 | Trade tertutup minimum sebelum P&L dipercaya |
-| `META_PNL_WEIGHT` | 0.6 | Bobot P&L setelah sampel cukup |
+| `META_MIN_TRADE_SAMPLE` | 12 | Trade tertutup minimum sebelum P&L dipercaya |
+| `META_TOXIC_FEE_MULTIPLE` | 1.5 | Rugi baru berarti di atas sekian kali biaya fee-nya sendiri |
+| `META_TOXIC_MIN_LOSS_USD` | 0.2 | Lantai absolut, dipakai saat data fee tidak ada |
+| `META_PNL_WEIGHT` | 0.7 | Bobot P&L setelah sampel cukup |
 | `META_WEIGHT_SIGHTINGS` | 0.2 | Bobot jumlah penampakan (level) |
 | `META_WEIGHT_VOLUME` | 0.3 | Bobot volume 5 menit |
-| `META_WEIGHT_BOOST` | 0.15 | Bobot promosi berbayar |
+| `META_WEIGHT_BOOST` | 0.1 | Bobot promosi berbayar |
 | `META_WEIGHT_SOCIAL` | 0.1 | Bobot sinyal sosial eksternal |
-| `META_WEIGHT_ACCEL` | 0.25 | Bobot akselerasi. Satu-satunya term yang mendahului meta |
+| `META_WEIGHT_ACCEL` | 0.3 | Bobot akselerasi. Satu-satunya term yang mendahului meta |
 | `META_ACCEL_WINDOW_MIN` | 60 | Panjang irisan "sekarang" yang dibandingkan dengan sisa jendela |
-| `META_BONUS_HOT` | 14 | Bonus skor tier `HOT` |
-| `META_BONUS_WARM` | 6 | Bonus skor tier `WARM` |
-| `META_PENALTY_TOXIC` | 18 | Penalti meta yang terbukti rugi |
-| `META_HOT_PERCENTILE` | 70 | Batas bawah `HOT` |
+| `META_BONUS_HOT` | 8 | Bonus skor tier `HOT`. Ditahan kecil supaya meta tidak bisa meloloskan token sendirian |
+| `META_BONUS_WARM` | **0** | Sengaja nol: `WARM` mengenai mayoritas label, jadi bonus di sini hanya menaikkan throughput |
+| `META_PENALTY_TOXIC` | 20 | Penalti meta yang terbukti rugi |
+| `META_HOT_PERCENTILE` | 80 | Batas bawah `HOT` |
 | `META_COLD_PERCENTILE` | 30 | Batas atas `COLD` |
 | `META_RADAR_OVERSAMPLE` | 60 | Baris yang diambil radar sebelum diurutkan by heat |
 | `ENABLE_META_GATE` | **true** | Reject keras `meta_cold`. Inert sampai sebuah label punya >= `META_MIN_TRADE_SAMPLE` trade tertutup |

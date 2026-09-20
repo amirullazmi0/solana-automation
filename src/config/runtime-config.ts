@@ -129,6 +129,8 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     const narrativeMinConfidence = readString(config, 'NARRATIVE_MIN_CONFIDENCE', 'high').toLowerCase();
     const metaPnlWeight = readNumber(config, 'META_PNL_WEIGHT', 0.6);
     const metaMinTradeSample = readNumber(config, 'META_MIN_TRADE_SAMPLE', 8);
+    const metaToxicFeeMultiple = readNumber(config, 'META_TOXIC_FEE_MULTIPLE', 1.5);
+    const metaToxicMinLossUsd = readNumber(config, 'META_TOXIC_MIN_LOSS_USD', 0.2);
     const metaHotPercentile = readNumber(config, 'META_HOT_PERCENTILE', 70);
     const metaColdPercentile = readNumber(config, 'META_COLD_PERCENTILE', 30);
     const metaLabelBatchSize = readNumber(config, 'META_LABEL_BATCH_SIZE', 40);
@@ -250,6 +252,22 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     // board, and TOXIC can reject candidates, so the floor is deliberately above 1.
     if (metaMinTradeSample < 2) {
         errors.push('META_MIN_TRADE_SAMPLE must be >= 2; one trade cannot characterise a meta.');
+    }
+    // Both bars must be non-negative: a negative one would invert the comparison and mark
+    // PROFITABLE metas toxic, which the gate would then act on.
+    if (metaToxicFeeMultiple < 0) {
+        errors.push('META_TOXIC_FEE_MULTIPLE must be >= 0.');
+    }
+    if (metaToxicMinLossUsd < 0) {
+        errors.push('META_TOXIC_MIN_LOSS_USD must be >= 0; it is a loss size, not a signed P&L.');
+    }
+    // Both at zero restores "any loss is toxic", which condemns every meta that merely paid its
+    // fees -- the behaviour this threshold was added to remove.
+    if (metaToxicFeeMultiple === 0 && metaToxicMinLossUsd === 0) {
+        errors.push(
+            'META_TOXIC_FEE_MULTIPLE and META_TOXIC_MIN_LOSS_USD must not both be 0; ' +
+                'that makes any loss toxic, including plain fee drag.',
+        );
     }
     if (metaColdPercentile < 0 || metaHotPercentile > 100 || metaColdPercentile >= metaHotPercentile) {
         errors.push(
