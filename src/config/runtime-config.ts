@@ -134,6 +134,7 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     const metaLabelBatchSize = readNumber(config, 'META_LABEL_BATCH_SIZE', 40);
     const metaLabelMaxPerHour = readNumber(config, 'META_LABEL_MAX_PER_HOUR', 120);
     const metaWindowHours = readNumber(config, 'META_WINDOW_HOURS', 12);
+    const metaAccelWindowMin = readNumber(config, 'META_ACCEL_WINDOW_MIN', 60);
     const bearishReboundMin5mPct = readNumber(config, 'BEARISH_REBOUND_MIN_5M_PCT', 3);
     const aggressiveHolderLiquidityUsd = readNumber(
         config,
@@ -263,6 +264,13 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     }
     if (metaWindowHours < 1) {
         errors.push('META_WINDOW_HOURS must be >= 1.');
+    }
+    // A recent slice as long as the window leaves no baseline to compare against, which collapses
+    // every label to the same flat ratio -- the exact failure volumeSurge had before it was fixed.
+    if (metaAccelWindowMin < 5 || metaAccelWindowMin >= metaWindowHours * 60) {
+        errors.push(
+            'META_ACCEL_WINDOW_MIN must be >= 5 and strictly less than META_WINDOW_HOURS in minutes.',
+        );
     }
     if (aggressiveHolderLiquidityUsd < 0) {
         errors.push('AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD must be >= 0.');
