@@ -1027,6 +1027,22 @@ export class ReportingService implements OnModuleInit {
         }
     }
 
+    /**
+     * Strips the characters Telegram's legacy Markdown treats as formatting.
+     *
+     * Token symbols are attacker-controlled: anyone can launch a coin called `PUMP_IT` or `*BUY*`.
+     * Interpolated raw into a bold span, an odd number of `_` or `*` leaves an entity unclosed and
+     * Telegram rejects the ENTIRE message with 400 "can't parse entities" -- so one bad symbol
+     * silently kills the whole status report. That is exactly how /status came to return nothing
+     * in production while every other command answered normally.
+     */
+    private stripMarkdown(value: string | null | undefined): string {
+        return String(value ?? '')
+            .replace(/[_*`[\]()~>#+=|{}.!-]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
     async handleStatusRequest(targetChatId?: string) {
         const scannerService = this.moduleRef.get(ScannerService, { strict: false });
         const stats = scannerService.getScannerStatus();
@@ -1035,7 +1051,12 @@ export class ReportingService implements OnModuleInit {
         });
 
         const topRejects = stats.topRejects
-            .map((item) => `${item.reason}: ${item.count}`)
+            // Wrapped in backticks, not interpolated raw. Reject reasons are snake_case, and an
+            // underscore opens italics in Telegram's legacy Markdown -- an odd number of them
+            // leaves an entity unclosed and Telegram rejects the whole message with
+            // "can't parse entities", which is why /status silently returned nothing in
+            // production while every other command answered.
+            .map((item) => `\`${item.reason}\`: ${item.count}`)
             .join(' | ');
         let statusMsg = `🤖 *BOT SYSTEM STATUS*\n`;
         statusMsg += `📡 *Scanner:* \`${stats.active}/${stats.max}\` monitor | \`${stats.seen}\` seen\n`;
@@ -1063,8 +1084,9 @@ export class ReportingService implements OnModuleInit {
                 ? `${profit >= 0 ? '+' : ''}${profit.toFixed(2)}%`
                 : '(N/A)';
             const emoji = profit >= 0 ? '📈' : '📉';
-            const displaySymbol =
+            const rawSymbol =
                 trade.symbol && trade.symbol !== 'UNKNOWN' ? trade.symbol : 'UNKNOWN';
+            const displaySymbol = this.stripMarkdown(rawSymbol) || 'UNKNOWN';
             const modeBadge = trade.targetTakeProfit ? ' 🔥 `[REBOUND & CTO]`' : '';
 
             statusMsg += `Slot ${trade.slotNumber}: *${displaySymbol}*${modeBadge}\n`;

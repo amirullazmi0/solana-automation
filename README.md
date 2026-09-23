@@ -814,17 +814,30 @@ jam dan maksimum 4237 jam. Selama ini mereka ditemukan lalu dibuang.
 
 | Knob | Lama | Baru | Alasan |
 | --- | --- | --- | --- |
-| `MIN_AGE_HOURS` | 0.005 | **6** | 18 detik menjadi 6 jam. Juga mematikan seluruh jalur MICIN (route < 2 jam), sehingga semua knob `MICIN_*` tidak lagi terpakai |
+| `MIN_AGE_HOURS` | 0.005 | **2** | 18 detik menjadi 2 jam. Juga mematikan seluruh jalur MICIN (route < 2 jam), sehingga semua knob `MICIN_*` tidak lagi terpakai. **Jangan dinaikkan tanpa membaca catatan di bawah** |
 | `MAX_AGE_HOURS` | 72 | **2160** | 90 hari. Tanpa ini semua setelan lain percuma |
 | `ESTABLISHED_MAX_AGE_HOURS` | 72 | **2160** | Jalur established ikut dibuka |
 | `MIN_LIQUIDITY_USD` | 15000 | **30000** | Pool cukup dalam agar posisi kecil tidak menggerakkan harga |
-| `MIN_MCAP` | 2000 | **250000** | $2k itu lotere, bukan proyek |
+| `MIN_MCAP` | 2000 | **150000** | $2k itu lotere, bukan proyek. Diturunkan dari 250000 setelah token dengan volume 5m $290k ditolak di mcap $142k |
 | `MIN_VOLUME_USD` | 6 | **2000** | Ambang lama praktis tidak menyaring apa pun |
 | `MIN_BUY_COUNT` | 1 | **20** | Satu pembeli bukan bukti minat |
 | `ANALYZER_MIN_VOLUME_SURGE` | 0.5 | **1.2** | Di 0.5 volume boleh **separuh** baseline dan tetap lolos — itu bukan syarat lonjakan |
 | `MIN_BUY_CONFIDENCE` / `BUY_SELL_RATIO_THRESHOLD` | 0.58 / 1.35 | **0.60 / 1.5** | Dominasi pembeli: lever selektivitas yang gratis di posisi kecil |
 | `MAX_SINGLE_HOLDER_PCT` / `TOP5` / `TOP10` | 10 / 22 / 30 | **6 / 18 / 26** | Konsentrasi holder adalah ukuran rug yang paling langsung |
 | `AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD` | 5000 | **100000** | Query produksi menunjukkan 73% kandidat mendarat di tier holder longgar, jadi tier itulah yang sebenarnya berlaku. Menaikkan ambangnya membuat tier ketat kembali menjadi default |
+
+**Kenapa `MIN_AGE_HOURS` 2 dan bukan 6.** Nilai 6 sempat dipasang dan gagal karena berbenturan
+dengan mekanik lain: sebuah token yang ditolak `too_young` tetap dipertahankan radar dan diperiksa
+ulang sambil menua, tapi `scanner.service.ts` menandainya `FAILED` setelah **51 pemeriksaan**, dan
+radar berjalan tiap ~3 menit. Jatahnya karena itu sekitar **2,5 jam** — token bagus mati kehabisan
+pemeriksaan sebelum sempat mencapai 6 jam, sehingga gerbangnya mustahil dilewati lewat jalur
+menunggu. Log produksi menunjukkan hal ini secara langsung: token dengan likuiditas $47–74k, mcap
+$267k–700k dan dominasi pembeli 60–84% ditolak berulang kali semata karena umurnya menit, lalu
+sebagian berakhir di `Stagnant timeout reached (51 checks)`.
+
+Dua jam melewati jendela rug paling ganas dan tetap mematikan jalur MICIN, tapi masih berada di
+dalam jatah pemeriksaan. Menaikkannya kembali ke atas ~2,5 jam hanya masuk akal bila batas 51
+pemeriksaan itu ikut diubah, atau bila `too_young` dikecualikan dari hitungannya.
 
 **Yang sengaja tidak diubah**, karena produksi membuktikan sebaliknya:
 
