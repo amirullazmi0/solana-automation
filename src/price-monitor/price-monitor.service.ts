@@ -3,6 +3,10 @@ import { ConfigService } from '@nestjs/config';
 import { Interval } from '@nestjs/schedule';
 import { Trade } from '@prisma/client';
 import axios from 'axios';
+import {
+    StopProfitResult,
+    resolveStopProfitPercent,
+} from './fast-stop-price';
 import * as https from 'https';
 import { PrismaService } from '../prisma/prisma.service';
 import { ReportingService } from '../reporting/reporting.service';
@@ -646,6 +650,96 @@ export class PriceMonitorService {
                 }),
             );
         }
+    }
+
+    /**
+     * A second, faster opinion on price, used by the stop loss only.
+     *
+     * The monitor ticks every second but reads DexScreener, whose pair data was measured refreshing
+     * roughly once every 26 seconds (three changes across 84 one-second samples, worst gap 30.3s),
+     * while Jupiter moved about every 6 seconds and the two disagreed by as much as 25% at a given
+     * instant. Polling a number that does not move cannot detect a fall: production stops
+     * configured at -8% recorded an average trigger of -17.1%, and the overshoot was flat across
+     * every entry-liquidity bucket, which rules out slippage and thin pools as the cause.
+     *
+     * Deliberately scoped to the stop loss and nowhere else. `TRAILING_DISTANCE_PERCENT` is 0.8,
+     * a figure only survivable because the stale feed smooths out noise -- trailing exits are the
+     * one profitable path in production (+$15.06 over 26 trades) and feeding them a six-second
+     * price would trip them constantly. Take profit, the hold zone and every guard keep the basis
+     * they were tuned against.
+     */
+    private readonly fastPrices = new Map<string, { priceUsd: number; at: number }>();
+    private readonly fastPriceInFlight = new Set<string>();
+
+    private get fastStopPriceEnabled(): boolean {
+        return (
+            String(this.configService.get('ENABLE_FAST_STOP_PRICE', 'true')).toLowerCase() !==
+            'false'
+        );
+    }
+
+    private get fastStopPriceMaxAgeMs(): number {
+        return Math.max(1000, this.getNumberConfig('FAST_STOP_PRICE_MAX_AGE_MS', 10000));
+    }
+
+    /**
+     * Non-blocking read. Returns undefined until a fresh enough quote exists, and kicks off a
+     * refresh when the cached one has aged out. The stop then simply falls back to the DexScreener
+     * basis, which is exactly today's behaviour -- so an outage here can never make the stop worse
+     * than it already is.
+     */
+    private getFastPriceUsd(tokenMint: string): number | undefined {
+        const entry = this.fastPrices.get(tokenMint);
+        const maxAge = this.fastStopPriceMaxAgeMs;
+        const fresh = entry !== undefined && Date.now() - entry.at <= maxAge;
+
+        if (!fresh) void this.refreshFastPrice(tokenMint);
+        return fresh ? entry.priceUsd : undefined;
+    }
+
+    private async refreshFastPrice(tokenMint: string): Promise<void> {
+        if (this.fastPriceInFlight.has(tokenMint)) return;
+        this.fastPriceInFlight.add(tokenMint);
+        try {
+            const response = await axios.get<Record<string, { usdPrice?: number }>>(
+                `https://lite-api.jup.ag/price/v3?ids=${tokenMint}`,
+                { timeout: 4000, httpsAgent: this.getHttpsAgent() },
+            );
+            const price = Number(response.data?.[tokenMint]?.usdPrice);
+            if (Number.isFinite(price) && price > 0) {
+                this.fastPrices.set(tokenMint, { priceUsd: price, at: Date.now() });
+            }
+        } catch {
+            // No opinion. The caller falls back to the existing basis rather than holding a
+            // position open waiting for a second source that may be down.
+        } finally {
+            this.fastPriceInFlight.delete(tokenMint);
+        }
+    }
+
+    /**
+     * The P&L the stop loss is judged on: the more pessimistic of the two sources.
+     *
+     * One-directional by construction. Taking the minimum means a fresher price can only bring the
+     * stop forward, never hold it back -- a stale or missing quote leaves the decision exactly
+     * where it is today, and a disagreeing one cannot talk the bot out of an exit the current basis
+     * already wants.
+     */
+    private resolveStopProfitPercent(
+        tokenMint: string,
+        entryPriceSol: number,
+        currentSolUsd: number,
+        basisProfitPercent: number,
+    ): StopProfitResult {
+        const enabled = this.fastStopPriceEnabled;
+        return resolveStopProfitPercent({
+            basisProfitPercent,
+            // Only asked for when enabled, so a disabled flag makes no network calls at all.
+            fastPriceUsd: enabled ? this.getFastPriceUsd(tokenMint) : undefined,
+            entryPriceSol,
+            currentSolUsd,
+            enabled,
+        });
     }
 
     private getHttpsAgent() {
@@ -1319,6 +1413,16 @@ export class PriceMonitorService {
         const trailingStopPriceSol = priceBasis.trailingStopPriceSol;
         const profitPercent = ((currentPriceSol - entryPriceSol) / entryPriceSol) * 100;
 
+        // Stop loss alone gets a second, fresher opinion. Everything below this line -- trailing,
+        // take profit, hold zone, guards -- keeps reading `profitPercent` on the basis it was
+        // tuned against.
+        const { stopProfitPercent, fastProfitPercent } = this.resolveStopProfitPercent(
+            trade.tokenMint,
+            entryPriceSol,
+            currentSolUsd,
+            profitPercent,
+        );
+
         const effectiveStopLossPercent =
             trade.targetStopLoss ??
             this.getRouteNumberConfig(
@@ -1716,10 +1820,10 @@ export class PriceMonitorService {
         }
 
         // Route-aware stop loss remains the hard floor after the dynamic hold zone is exhausted.
-        if (profitPercent > -effectiveStopLossPercent) {
+        if (stopProfitPercent > -effectiveStopLossPercent) {
             this.deepStopLossBreaches.delete(trade.id);
         }
-        if (profitPercent <= -effectiveStopLossPercent) {
+        if (stopProfitPercent <= -effectiveStopLossPercent) {
             const deepDropMultiplier = this.getNumberConfig('STOP_LOSS_DEEP_DROP_MULTIPLIER', 2);
             const deepDropConfirmMs = Math.max(
                 0,
@@ -1728,7 +1832,7 @@ export class PriceMonitorService {
             if (
                 deepDropConfirmMs > 0 &&
                 requiresDeepStopConfirmation(
-                    profitPercent,
+                    stopProfitPercent,
                     effectiveStopLossPercent,
                     deepDropMultiplier,
                 )
@@ -1756,7 +1860,10 @@ export class PriceMonitorService {
                 // the persistence below (slTriggeredAt still null) — without this it re-fired every
                 // 2s tick for up to the whole min-hold window while a guard below held the position.
                 this.logger.warn(
-                    `[Slot ${trade.slotNumber}] STOP_LOSS floor crossed. tradeId=${trade.id} pnl=${profitPercent.toFixed(2)}% sl=${effectiveStopLossPercent}% age=${(this.getTradeAgeMs(trade) / 1000).toFixed(1)}s`,
+                    `[Slot ${trade.slotNumber}] STOP_LOSS floor crossed. tradeId=${trade.id} ` +
+                        `pnl=${stopProfitPercent.toFixed(2)}% basis=${profitPercent.toFixed(2)}% ` +
+                        `fast=${fastProfitPercent === undefined ? 'n/a' : fastProfitPercent.toFixed(2) + '%'} ` +
+                        `sl=${effectiveStopLossPercent}% age=${(this.getTradeAgeMs(trade) / 1000).toFixed(1)}s`,
                 );
                 void this.prismaService.trade
                     .updateMany({
@@ -1765,7 +1872,7 @@ export class PriceMonitorService {
                             slTriggeredAt: new Date(),
                             exitTriggerPriceSol: currentPriceSol,
                             exitTriggerPriceUsd: currentPrice,
-                            exitTriggerPnlPercent: profitPercent,
+                            exitTriggerPnlPercent: stopProfitPercent,
                         },
                     })
                     .catch((err) => {

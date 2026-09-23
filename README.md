@@ -798,6 +798,87 @@ semua label dan karena itu saling menghapus, bukan menyeret skor turun.
 Perintah Telegram `/meta` menampilkan leaderboard-nya kapan saja, dengan **net P&L per trade sebagai
 angka utama** dan jumlah penampakan sebagai konteks sekunder — bukan sebaliknya.
 
+### Profil matang
+
+Setelan gerbang sekarang menyasar **token yang sudah bertahan**, bukan token yang baru lahir.
+Perubahan terpentingnya bukan soal memperketat, tapi soal membuka:
+
+`MAX_AGE_HOURS` sebelumnya `72`, dan `analyzer.service.ts` menolak apa pun di atasnya sebagai
+`too_old`. Artinya **tidak satu pun coin berumur lebih dari 3 hari pernah bisa dibeli** — terbukti
+di produksi: dari 65 trade yang bisa dicocokkan umurnya, bucket `>3 hari` berisi **nol** trade,
+sementara 59 di antaranya (91%) adalah token di bawah 2 jam. Pertanyaan "apakah coin matang lebih
+aman" belum pernah benar-benar diuji oleh bot ini.
+
+Feed discovery-nya sendiri memang memuat token matang — sampel 25 token menunjukkan p90 umur 329
+jam dan maksimum 4237 jam. Selama ini mereka ditemukan lalu dibuang.
+
+| Knob | Lama | Baru | Alasan |
+| --- | --- | --- | --- |
+| `MIN_AGE_HOURS` | 0.005 | **6** | 18 detik menjadi 6 jam. Juga mematikan seluruh jalur MICIN (route < 2 jam), sehingga semua knob `MICIN_*` tidak lagi terpakai |
+| `MAX_AGE_HOURS` | 72 | **2160** | 90 hari. Tanpa ini semua setelan lain percuma |
+| `ESTABLISHED_MAX_AGE_HOURS` | 72 | **2160** | Jalur established ikut dibuka |
+| `MIN_LIQUIDITY_USD` | 15000 | **30000** | Pool cukup dalam agar posisi kecil tidak menggerakkan harga |
+| `MIN_MCAP` | 2000 | **250000** | $2k itu lotere, bukan proyek |
+| `MIN_VOLUME_USD` | 6 | **2000** | Ambang lama praktis tidak menyaring apa pun |
+| `MIN_BUY_COUNT` | 1 | **20** | Satu pembeli bukan bukti minat |
+| `ANALYZER_MIN_VOLUME_SURGE` | 0.5 | **1.2** | Di 0.5 volume boleh **separuh** baseline dan tetap lolos — itu bukan syarat lonjakan |
+| `MIN_BUY_CONFIDENCE` / `BUY_SELL_RATIO_THRESHOLD` | 0.58 / 1.35 | **0.60 / 1.5** | Dominasi pembeli: lever selektivitas yang gratis di posisi kecil |
+| `MAX_SINGLE_HOLDER_PCT` / `TOP5` / `TOP10` | 10 / 22 / 30 | **6 / 18 / 26** | Konsentrasi holder adalah ukuran rug yang paling langsung |
+| `AGGRESSIVE_HOLDER_MIN_LIQUIDITY_USD` | 5000 | **100000** | Query produksi menunjukkan 73% kandidat mendarat di tier holder longgar, jadi tier itulah yang sebenarnya berlaku. Menaikkan ambangnya membuat tier ketat kembali menjadi default |
+
+**Yang sengaja tidak diubah**, karena produksi membuktikan sebaliknya:
+
+- `TRAILING_DISTANCE_PERCENT` tetap `0.8` — satu-satunya exit yang menghasilkan uang (+$15,06 dari
+  26 trade). Melebarkannya merusak satu-satunya yang bekerja.
+- `TAKE_PROFIT_PERCENT` tetap `20` — menurunkannya justru **menaikkan** win rate impas, karena fee
+  tetap menjadi porsi lebih besar dari target yang lebih kecil (di posisi $5: 47,8% → 56,5%).
+- `WHALE_SIGNAL_SCORE_FLOOR` tetap `8` — skor ini tidak memprediksi profitabilitas sama sekali
+  (bucket ≥60, 47 trade, tetap rugi -$0,28/trade). Menaikkan floor-nya hanya mengurangi kandidat
+  tanpa memperbaiki seleksi.
+
+**Ekspektasi frekuensi.** Dari sampel feed, hanya ~1 dari 25 token memenuhi gabungan ambang ini.
+Trade akan datang dalam hitungan per minggu, bukan per hari. Itu konsekuensi yang dipilih, bukan
+gejala kesalahan konfigurasi.
+
+### Harga cepat untuk stop loss
+
+`PriceMonitorService` berdetak tiap 1 detik (`@Interval(1000)`), tapi sumber harganya
+`api.dexscreener.com/latest/dex/tokens/` — dan feed itu **hanya memperbarui angkanya sekitar sekali
+tiap 26 detik**. Diukur langsung terhadap 3 token teraktif selama 90 detik: 3 perubahan dari 84
+sampel per detik, jeda terlama 30,3 detik. Jupiter di rentang yang sama bergerak tiap ~6 detik, dan
+selisih harga antara keduanya mencapai **25%** pada satu saat.
+
+Memeriksa 1×/detik sebuah angka yang hanya bergerak 1×/26 detik berarti penurunan tidak bisa
+terdeteksi tepat waktu. Produksi membuktikannya: stop yang disetel `-8%` mencatat rata-rata trigger
+**-17,1%**, dan overshoot itu **rata di semua bucket likuiditas** (-18,7% di bawah $15k, -17,0% di
+$25–50k, n=25). Kerataan itulah yang menyingkirkan slippage dan pool tipis sebagai penyebab, dan
+menyisakan deteksi yang telat. `exitTriggerPnlPercent` direkam di `persistExitTrigger()` pada saat
+**trigger**, bukan saat fill, jadi angka itu memang mengukur deteksi.
+
+Karena itu stop loss — dan **hanya** stop loss — mendapat pendapat kedua dari Jupiter.
+
+```text
+stopProfitPercent = min(pnl_dexscreener, pnl_jupiter)
+```
+
+Satu arah secara konstruksi: mengambil nilai minimum membuat harga yang lebih segar hanya bisa
+**memajukan** stop, tidak pernah menahannya. Kuotasi yang basi, hilang, atau tidak masuk akal
+mengembalikan perilaku ke kondisi sekarang, dan kuotasi yang berbeda pendapat tidak pernah bisa
+membujuk bot keluar dari exit yang sudah diinginkan basis lama. Setiap mode gagal turun ke perilaku
+hari ini, bukan ke posisi rugi yang ditahan terbuka.
+
+**Kenapa hanya stop loss.** `TRAILING_DISTANCE_PERCENT` bernilai 0,8 — angka yang hanya bisa
+bertahan karena feed yang lambat meredam noise. Di produksi, `TRAILING_STOP` adalah satu-satunya
+exit yang menghasilkan uang: 26 trade, **+$15,06**, rata-rata **+32,4%**. Memberinya harga 6 detik
+akan memicunya oleh riak biasa dan menghancurkan satu-satunya jalur yang bekerja. Take profit,
+dynamic hold zone, dan seluruh guard juga tetap memakai basis lama.
+
+| Knob | Nilai | Keterangan |
+| --- | --- | --- |
+| `ENABLE_FAST_STOP_PRICE` | true | Pendapat kedua Jupiter untuk kondisi stop loss |
+| `FAST_STOP_PRICE_MAX_AGE_MS` | 10000 | Di atas ini kuotasi dianggap basi dan diabaikan |
+| `ENABLE_AI_CUTLOSS_DEFENSE` | **false** | Dimatikan eksplisit. Produksi: 4 trade, **-$4,13**, nol menang |
+
 ### Scanner, watchlist, dan retry
 
 | Knob | Nilai | Keterangan |
