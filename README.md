@@ -853,6 +853,92 @@ pemeriksaan itu ikut diubah, atau bila `too_young` dikecualikan dari hitungannya
 Trade akan datang dalam hitungan per minggu, bukan per hari. Itu konsekuensi yang dipilih, bukan
 gejala kesalahan konfigurasi.
 
+### Prediksi arah SOL
+
+Bot memprediksi arah SOL untuk `SOL_PREDICT_HORIZON_MIN` menit ke depan, mencatat setiap prediksi
+sebelum hasilnya diketahui, dan menilainya sendiri setelah horizon lewat.
+
+**Fiturnya dimulai diam.** Prediksi dikumpulkan dan dinilai, tapi **tidak ada pesan yang dikirim**
+sampai rekamnya sendiri membuktikan layak. Itu bukan kehati-hatian dekoratif — backtest sebelum
+rilis, atas 94 prediksi terhadap 24 jam harga SOL nyata, memberi hasil ini:
+
+| | akurasi |
+| --- | --- |
+| Model | 73,4% (69/94) |
+| Baseline "selalu jawab datar" | **78,7%** |
+| Baseline "lanjut arah terakhir" | 68,8% |
+
+Angka 73% itu menipu: dari 94 panggilan, 84 di antaranya `FLAT`, jadi model sekadar menumpang pada
+hal yang sama dengan baseline "diam". Pada sembilan panggilan yang benar-benar menyebut arah,
+**akurasinya 11%**. Karena itu gerbang kirim-pesan tidak dinyalakan tangan.
+
+**Gerbangnya diperoleh, bukan disetel.** `shouldStartAlerting` membuka pengiriman hanya bila dua
+syarat terpenuhi bersamaan:
+
+```text
+total prediksi terselesaikan >= SOL_PREDICT_MIN_SAMPLE
+dan  akurasi >= max(baseline_datar, baseline_lanjut) + SOL_PREDICT_MIN_EDGE_PTS
+```
+
+Lantai sampel mencegah lima tebakan beruntung membuka keran. Marginnya diukur terhadap **baseline
+terbaik**, bukan terhadap 50%, karena mengalahkan lemparan koin tidak berarti apa-apa ketika tidak
+melakukan apa pun sudah bernilai 78%. Saat gerbangnya pertama kali terbuka, bot mengirim satu pesan
+pemberitahuan supaya munculnya prediksi tidak terasa tiba-tiba.
+
+**Sumber sinyalnya**, dan separuhnya adalah milik bot ini sendiri:
+
+| Fitur | Dari | Bisa di-backtest? |
+| --- | --- | --- |
+| Momentum SOL 5m/15m/1j | buffer harga di memori, sampel 30 detik | Ya — dan hasilnya di bawah baseline |
+| Volatilitas SOL | stdev return antar sampel | Ya |
+| Breadth memecoin | rata-rata `Watchlist.priceChange1h`, 30 menit terakhir | **Tidak** |
+| Aliran volume memecoin | `MetaSighting.volume5m`, laju 15 menit terakhir vs baseline 45 menit | **Tidak** |
+| Pangsa promosi berbayar | `MetaSighting.isBoosted` | **Tidak** |
+
+Tiga yang terakhir tidak punya backfill publik — datanya hanya ada di riwayat pemindaian bot
+sendiri. Itu juga alasan fitur ini dikumpulkan dulu alih-alih dibuang: separuh yang belum teruji
+persis separuh yang membedakannya dari prediktor harga biasa.
+
+**Volatilitas tidak pernah menentukan arah.** Dia hanya memangkas keyakinan: skor yang sama di pasar
+yang liar layak dipercaya lebih sedikit daripada di pasar tenang. Memperlakukannya sebagai
+direksional akan membuatnya mendorong ke mana pun tick terakhir kebetulan bergerak.
+
+**Sampling tidak menambah panggilan API.** `getSolPrice()` menyajikan cache dua detik yang sudah
+disegarkan `PriceMonitorService` tiap tick. Pembacaan yang gagal dilewati, tidak dicatat — mencatat
+harga basi sebagai sampel baru akan menciptakan lonjakan palsu begitu feed pulih.
+
+Prediksi disimpan di tabel `SolPrediction`, bukan di memori. Prediksi yang hilang saat restart akan
+membuat akurasi terhitung dari sampel yang memilih dirinya sendiri, dan angka akurasi yang bias
+lebih buruk daripada tidak ada angka sama sekali.
+
+**Fitur ini tidak pernah menyentuh keputusan trading.** Tidak ada gerbang beli, exit, atau sizing
+yang berubah.
+
+| Knob | Nilai | Keterangan |
+| --- | --- | --- |
+| `ENABLE_SOL_PREDICTION` | true | Saklar utama. Mati berarti tidak mencatat dan tidak menilai |
+| `SOL_PREDICT_HORIZON_MIN` | 30 | Prediksi berlaku untuk berapa menit ke depan |
+| `SOL_PREDICT_INTERVAL_MIN` | 15 | Jarak antar prediksi |
+| `SOL_PREDICT_FLAT_BAND_PCT` | 0.5 | Di bawah ini dianggap datar, saat memprediksi maupun menilai |
+| `SOL_PREDICT_MIN_CONFIDENCE` | `medium` | Keyakinan minimum agar sebuah prediksi dikirim |
+| `SOL_PREDICT_ALERT_COOLDOWN_MS` | 1800000 | Jarak minimum antar pesan |
+| `SOL_PREDICT_MIN_SAMPLE` | 50 | **Lantai sampel gerbang.** Di bawah 10 ditolak validasi |
+| `SOL_PREDICT_MIN_EDGE_PTS` | 3 | **Margin gerbang** dalam poin persen di atas baseline terbaik |
+| `SOL_PREDICT_W_MOMENTUM` | 0.35 | Bobot momentum SOL |
+| `SOL_PREDICT_W_BREADTH` | 0.30 | Bobot breadth memecoin |
+| `SOL_PREDICT_W_VOLUME` | 0.25 | Bobot aliran volume memecoin |
+| `SOL_PREDICT_W_BOOST` | 0.10 | Bobot pangsa promosi berbayar |
+
+Memantau tanpa menunggu pesan: baris log `[SolPredict]` dicetak setiap siklus, lengkap dengan arah,
+skor, akurasi berjalan, dan status gerbang. Untuk melihat rekamnya langsung:
+
+```sql
+SELECT confidence, COUNT(*) AS n,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE correct) / COUNT(*), 1) AS hit_rate
+FROM "SolPrediction" WHERE correct IS NOT NULL
+GROUP BY 1 ORDER BY 1;
+```
+
 ### Harga cepat untuk stop loss
 
 `PriceMonitorService` berdetak tiap 1 detik (`@Interval(1000)`), tapi sumber harganya

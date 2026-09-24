@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
-import { Cron } from '@nestjs/schedule';
+import { Cron, Interval } from '@nestjs/schedule';
 import { Connection } from '@solana/web3.js';
 import axios from 'axios';
 import * as https from 'https';
@@ -24,6 +24,18 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 import { MetaTrendService } from '../meta/meta-trend.service';
+import {
+    AccuracySummary,
+    Confidence,
+    Direction,
+    PredictionFeatures,
+    PredictionResult,
+    meetsMinimumConfidence,
+    predictSolDirection,
+    scorePrediction,
+    shouldStartAlerting,
+    summariseAccuracy,
+} from './sol-prediction';
 import { MetaLabelService } from '../meta/meta-label.service';
 import { ScannerService } from '../scanner/scanner.service';
 import { TradeService } from '../trade/trade.service';
@@ -2003,6 +2015,372 @@ export class ReportingService implements OnModuleInit {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`Meta trend report failed: ${msg}`);
         }
+    }
+
+    /**
+     * Rolling SOL price samples, the only history this process keeps.
+     *
+     * In memory rather than in a table because it is cheap to rebuild and worthless once stale: an
+     * hour after a restart it is full again, and the feature guards already refuse to predict
+     * before it covers the windows they need. The predictions themselves DO go to the database,
+     * because those must survive a restart or the hit rate becomes a self-selected sample.
+     */
+    private readonly solSamples: Array<{ at: number; price: number }> = [];
+    private lastSolPredictionAt = 0;
+    private lastSolAlertAt = 0;
+    private solAlertsUnlocked = false;
+
+    private get solPredictionEnabled(): boolean {
+        return (
+            String(this.configService.get('ENABLE_SOL_PREDICTION', 'true')).toLowerCase() !== 'false'
+        );
+    }
+
+    private solPredictNumber(key: string, fallback: number): number {
+        const raw = Number.parseFloat(this.configService.get<string>(key, String(fallback)));
+        return Number.isFinite(raw) ? raw : fallback;
+    }
+
+    /**
+     * Samples SOL every 30 seconds.
+     *
+     * `getSolPrice()` serves a two-second cache (`trade.service.ts`), and PriceMonitorService is
+     * already refreshing it on every tick, so this costs no Jupiter call at all.
+     *
+     * A failed read is skipped rather than recorded. Writing a stale price as a fresh sample would
+     * manufacture a jump the moment the feed recovers, and momentum computed across that jump would
+     * be an artefact of the outage rather than of the market.
+     */
+    @Interval(30_000)
+    async sampleSolPriceForPrediction(): Promise<void> {
+        if (!this.solPredictionEnabled) return;
+        try {
+            const tradeService = this.moduleRef.get(TradeService, { strict: false });
+            const price = await tradeService.getSolPrice();
+            if (!Number.isFinite(price) || price <= 0) return;
+
+            this.solSamples.push({ at: Date.now(), price });
+            const cutoff = Date.now() - 90 * 60 * 1000;
+            while (this.solSamples.length > 0 && this.solSamples[0].at < cutoff) {
+                this.solSamples.shift();
+            }
+        } catch {
+            // No usable price. Skipping the sample is the correct degradation.
+        }
+    }
+
+    /** Percentage change against the newest sample at least `minutesAgo` old, or undefined. */
+    private solChangePct(minutesAgo: number): number | undefined {
+        if (this.solSamples.length < 2) return undefined;
+        const target = Date.now() - minutesAgo * 60 * 1000;
+
+        let reference: { at: number; price: number } | undefined;
+        for (const sample of this.solSamples) {
+            if (sample.at <= target) reference = sample;
+            else break;
+        }
+        // The buffer does not reach back far enough yet. Saying nothing is the whole point of the
+        // guard -- this is the `22.00x` bug from the meta feature in a different costume.
+        if (!reference || !(reference.price > 0)) return undefined;
+
+        const latest = this.solSamples[this.solSamples.length - 1];
+        return ((latest.price - reference.price) / reference.price) * 100;
+    }
+
+    /** Standard deviation of sample-to-sample returns over the last 30 minutes, in percent. */
+    private solVolatilityPct(): number | undefined {
+        const since = Date.now() - 30 * 60 * 1000;
+        const window = this.solSamples.filter((s) => s.at >= since);
+        if (window.length < 5) return undefined;
+
+        const returns: number[] = [];
+        for (let i = 1; i < window.length; i += 1) {
+            const prev = window[i - 1].price;
+            if (prev > 0) returns.push(((window[i].price - prev) / prev) * 100);
+        }
+        if (returns.length < 4) return undefined;
+
+        const mean = returns.reduce((s, v) => s + v, 0) / returns.length;
+        const variance = returns.reduce((s, v) => s + (v - mean) ** 2, 0) / returns.length;
+        return Math.sqrt(variance);
+    }
+
+    /**
+     * The half of the model that is actually this bot's own: a live census of the memecoin market.
+     *
+     * Everyone has the SOL price. Nobody else has hundreds of Solana memecoins scanned per hour
+     * with their volume and one-hour price change already written down. This reads that back.
+     *
+     * Every field is returned as undefined rather than zero when the underlying rows are missing,
+     * because absent evidence and neutral evidence must not look alike to the scorer.
+     */
+    private async collectMemeFeatures(): Promise<{
+        memeBreadthPct?: number;
+        memeVolumeAccel?: number;
+        boostShare?: number;
+    }> {
+        const out: {
+            memeBreadthPct?: number;
+            memeVolumeAccel?: number;
+            boostShare?: number;
+        } = {};
+
+        try {
+            const since = new Date(Date.now() - 30 * 60 * 1000);
+            const breadth = await this.prismaService.watchlist.aggregate({
+                where: { lastCheckedAt: { gte: since }, priceChange1h: { not: null } },
+                _avg: { priceChange1h: true },
+                _count: { _all: true },
+            });
+            // A handful of tokens is not a market. Below that the average is one coin's noise.
+            if (breadth._count._all >= 5 && breadth._avg.priceChange1h !== null) {
+                out.memeBreadthPct = Number(breadth._avg.priceChange1h);
+            }
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[SolPredict] Breadth read failed: ${msg}.`);
+        }
+
+        try {
+            const now = Date.now();
+            const recentSince = new Date(now - 15 * 60 * 1000);
+            const baselineSince = new Date(now - 60 * 60 * 1000);
+
+            const [recent, whole] = await Promise.all([
+                this.prismaService.metaSighting.aggregate({
+                    where: { seenAt: { gte: recentSince } },
+                    _sum: { volume5m: true },
+                    _count: { _all: true },
+                }),
+                this.prismaService.metaSighting.aggregate({
+                    where: { seenAt: { gte: baselineSince } },
+                    _sum: { volume5m: true },
+                    _count: { _all: true },
+                }),
+            ]);
+
+            const recentVol = Number(recent._sum.volume5m ?? 0);
+            const wholeVol = Number(whole._sum.volume5m ?? 0);
+            const baselineVol = wholeVol - recentVol;
+            // Rates, not totals: the recent slice is 15 minutes and the baseline is 45.
+            if (whole._count._all >= 10 && baselineVol > 0) {
+                const recentRate = recentVol / 15;
+                const baselineRate = baselineVol / 45;
+                if (baselineRate > 0) out.memeVolumeAccel = recentRate / baselineRate;
+            }
+
+            const boosted = await this.prismaService.metaSighting.count({
+                where: { seenAt: { gte: recentSince }, isBoosted: true },
+            });
+            if (recent._count._all >= 10) {
+                out.boostShare = boosted / recent._count._all;
+            }
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[SolPredict] Flow read failed: ${msg}.`);
+        }
+
+        return out;
+    }
+
+    /** Grades every prediction whose horizon has passed, then reports the running accuracy. */
+    private async resolveDueSolPredictions(flatBandPct: number): Promise<void> {
+        const due = await this.prismaService.solPrediction.findMany({
+            where: { resolvedAt: null, resolveAt: { lte: new Date() } },
+            take: 50,
+        });
+        if (due.length === 0) return;
+
+        let price: number;
+        try {
+            price = await this.moduleRef.get(TradeService, { strict: false }).getSolPrice();
+        } catch {
+            // Leave them unresolved and try again next cycle. Grading against a price we could not
+            // read would poison the only number that makes this feature accountable.
+            return;
+        }
+        if (!Number.isFinite(price) || price <= 0) return;
+
+        for (const row of due) {
+            try {
+                if (!(row.solPriceAtMade > 0)) continue;
+                const actualChangePct = ((price - row.solPriceAtMade) / row.solPriceAtMade) * 100;
+                const correct = scorePrediction({
+                    direction: row.direction as Direction,
+                    changePct: actualChangePct,
+                    flatBandPct,
+                });
+                await this.prismaService.solPrediction.update({
+                    where: { id: row.id },
+                    data: {
+                        resolvedAt: new Date(),
+                        solPriceAtResolve: price,
+                        actualChangePct,
+                        correct,
+                    },
+                });
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                this.logger.warn(`[SolPredict] Resolve failed for #${row.id}: ${msg}.`);
+            }
+        }
+    }
+
+    private async loadSolAccuracy(flatBandPct: number): Promise<AccuracySummary> {
+        const rows = await this.prismaService.solPrediction.findMany({
+            where: { correct: { not: null }, actualChangePct: { not: null } },
+            orderBy: { madeAt: 'asc' },
+            take: 1000,
+            select: { direction: true, confidence: true, actualChangePct: true, madeAt: true },
+        });
+        return summariseAccuracy(
+            rows.map((r) => ({
+                direction: r.direction as Direction,
+                confidence: r.confidence as Confidence,
+                actualChangePct: Number(r.actualChangePct ?? 0),
+                madeAt: r.madeAt.getTime(),
+            })),
+            flatBandPct,
+        );
+    }
+
+    /**
+     * Makes a call, records it, and sends it only once the record says it is worth sending.
+     *
+     * The alerting gate is measured, not switched on by hand. A pre-ship backtest over 94 calls on
+     * real SOL prices scored 73.4% against a 78.7% always-FLAT baseline, and 11% on the nine calls
+     * where it actually picked a side -- so the feature starts silent and stays silent until its own
+     * production record clears both the sample floor and the margin over the best baseline.
+     */
+    @Cron('*/5 * * * *')
+    async runSolPredictionCycle(): Promise<void> {
+        if (!this.solPredictionEnabled) return;
+
+        try {
+            const flatBandPct = this.solPredictNumber('SOL_PREDICT_FLAT_BAND_PCT', 0.5);
+            await this.resolveDueSolPredictions(flatBandPct);
+
+            const intervalMin = Math.max(1, this.solPredictNumber('SOL_PREDICT_INTERVAL_MIN', 15));
+            if (Date.now() - this.lastSolPredictionAt < intervalMin * 60 * 1000) return;
+
+            const latest = this.solSamples[this.solSamples.length - 1];
+            if (!latest || !(latest.price > 0)) return;
+
+            const features: PredictionFeatures = {
+                solChange5mPct: this.solChangePct(5),
+                solChange15mPct: this.solChangePct(15),
+                solChange60mPct: this.solChangePct(60),
+                solVolatilityPct: this.solVolatilityPct(),
+                ...(await this.collectMemeFeatures()),
+            };
+
+            const horizonMinutes = Math.max(
+                5,
+                this.solPredictNumber('SOL_PREDICT_HORIZON_MIN', 30),
+            );
+            const prediction = predictSolDirection(features, {
+                flatBandPct,
+                weightMomentum: this.solPredictNumber('SOL_PREDICT_W_MOMENTUM', 0.35),
+                weightBreadth: this.solPredictNumber('SOL_PREDICT_W_BREADTH', 0.3),
+                weightVolume: this.solPredictNumber('SOL_PREDICT_W_VOLUME', 0.25),
+                weightBoost: this.solPredictNumber('SOL_PREDICT_W_BOOST', 0.1),
+            });
+
+            // Not enough history yet. Recording a guess here would corrupt the accuracy record,
+            // which is the one thing this feature has going for it.
+            if (!prediction) return;
+
+            this.lastSolPredictionAt = Date.now();
+            await this.prismaService.solPrediction.create({
+                data: {
+                    horizonMinutes,
+                    direction: prediction.direction,
+                    confidence: prediction.confidence,
+                    score: prediction.score,
+                    features: features as unknown as object,
+                    solPriceAtMade: latest.price,
+                    resolveAt: new Date(Date.now() + horizonMinutes * 60 * 1000),
+                },
+            });
+
+            const summary = await this.loadSolAccuracy(flatBandPct);
+            const gate = shouldStartAlerting(summary, {
+                minSample: this.solPredictNumber('SOL_PREDICT_MIN_SAMPLE', 50),
+                minEdgePoints: this.solPredictNumber('SOL_PREDICT_MIN_EDGE_PTS', 3),
+            });
+
+            this.logger.log(
+                `[SolPredict] ${prediction.direction} (${prediction.confidence}) ` +
+                    `score=${prediction.score.toFixed(3)} horizon=${horizonMinutes}m ` +
+                    `akurasi=${summary.hitRate.toFixed(1)}% n=${summary.total} ` +
+                    `gate=${gate.allowed ? 'OPEN' : 'SHUT'} (${gate.reason}) ` +
+                    `[${prediction.reasons.join('; ')}]`,
+            );
+
+            if (!gate.allowed) return;
+            if (!meetsMinimumConfidence(prediction.confidence, this.solPredictMinConfidence())) {
+                return;
+            }
+
+            const cooldownMs = this.solPredictNumber('SOL_PREDICT_ALERT_COOLDOWN_MS', 1_800_000);
+            if (Date.now() - this.lastSolAlertAt < cooldownMs) return;
+            this.lastSolAlertAt = Date.now();
+
+            // One-time announcement the first time the record earns the right to speak, so the
+            // sudden arrival of predictions is never a mystery.
+            if (!this.solAlertsUnlocked) {
+                this.solAlertsUnlocked = true;
+                await this.sendMessage(
+                    '🔓 *Prediksi SOL mulai dikirim*\n' +
+                        `Rekamnya sudah cukup: ${gate.reason}.\n` +
+                        'Sebelum ini prediksi dicatat diam-diam tanpa dikirim.',
+                );
+            }
+
+            await this.sendMessage(
+                this.buildSolPredictionMessage(prediction, features, latest.price, horizonMinutes, summary),
+            );
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Sol prediction cycle failed: ${msg}`);
+        }
+    }
+
+    private solPredictMinConfidence(): Confidence {
+        const raw = String(
+            this.configService.get('SOL_PREDICT_MIN_CONFIDENCE', 'medium'),
+        ).toLowerCase();
+        return raw === 'weak' || raw === 'strong' ? raw : 'medium';
+    }
+
+    private buildSolPredictionMessage(
+        prediction: PredictionResult,
+        features: PredictionFeatures,
+        solPrice: number,
+        horizonMinutes: number,
+        summary: AccuracySummary,
+    ): string {
+        const arrow =
+            prediction.direction === 'UP' ? '📈 NAIK' : prediction.direction === 'DOWN' ? '📉 TURUN' : '➖ DATAR';
+        const pct = (value?: number) => (value === undefined ? 'n/a' : `${value.toFixed(2)}%`);
+        const ratio = (value?: number) => (value === undefined ? 'n/a' : `${value.toFixed(2)}x`);
+
+        return (
+            `🔮 *PREDIKSI SOL* — ${horizonMinutes} menit ke depan\n` +
+            `Arah: *${arrow}*  ·  keyakinan: \`${prediction.confidence}\`\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `SOL \`$${solPrice.toFixed(2)}\`\n` +
+            `  15m ${pct(features.solChange15mPct)} · 1j ${pct(features.solChange60mPct)} · ` +
+            `volatilitas ${pct(features.solVolatilityPct)}\n` +
+            `Memecoin\n` +
+            `  breadth ${pct(features.memeBreadthPct)} · aliran ${ratio(features.memeVolumeAccel)} · ` +
+            `boosted ${features.boostShare === undefined ? 'n/a' : (features.boostShare * 100).toFixed(0) + '%'}\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
+            `Akurasi: *${summary.hitRate.toFixed(1)}%* dari ${summary.total} prediksi\n` +
+            `  pembanding "selalu datar" ${summary.baselineAlwaysFlat.toFixed(1)}% · ` +
+            `"lanjut arah" ${summary.baselinePersistence.toFixed(1)}%\n\n` +
+            `_Bot TIDAK mengubah keputusan beli berdasarkan ini._`
+        );
     }
 
     /**

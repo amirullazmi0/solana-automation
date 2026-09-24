@@ -349,3 +349,35 @@ model MetaVocabulary {
   lastSeenAt  DateTime @default(now())
   retired     Boolean  @default(false)
 }
+
+// Every directional call on SOL, written down before the outcome is known and graded once the
+// horizon passes.
+//
+// Persisted rather than held in memory precisely because the stakes are low: predictions lost to a
+// restart would make the hit rate a figure computed from a self-selected sample, and a biased
+// accuracy number is worse than no accuracy number -- it would make a signal look trustworthy on
+// exactly the runs that happened not to crash.
+//
+// A pre-ship backtest over 94 calls on 24h of real SOL prices scored 73.4% against a 78.7%
+// "always answer FLAT" baseline, and 11% on the nine calls where it actually committed to a
+// direction. The feature therefore starts in shadow: rows accumulate here, nothing is sent.
+model SolPrediction {
+  id                Int       @id @default(autoincrement())
+  madeAt            DateTime  @default(now())
+  horizonMinutes    Int
+  direction         String
+  confidence        String
+  score             Float
+  // The exact feature vector behind the call, so a wrong prediction can be re-read later instead
+  // of merely counted.
+  features          Json
+  solPriceAtMade    Float
+  resolveAt         DateTime
+  resolvedAt        DateTime?
+  solPriceAtResolve Float?
+  actualChangePct   Float?
+  correct           Boolean?
+
+  @@index([resolveAt, resolvedAt])
+  @@index([madeAt])
+}

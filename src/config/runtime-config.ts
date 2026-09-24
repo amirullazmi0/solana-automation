@@ -137,6 +137,15 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     const metaLabelMaxPerHour = readNumber(config, 'META_LABEL_MAX_PER_HOUR', 120);
     const metaWindowHours = readNumber(config, 'META_WINDOW_HOURS', 12);
     const metaAccelWindowMin = readNumber(config, 'META_ACCEL_WINDOW_MIN', 60);
+    const solPredictFlatBandPct = readNumber(config, 'SOL_PREDICT_FLAT_BAND_PCT', 0.5);
+    const solPredictHorizonMin = readNumber(config, 'SOL_PREDICT_HORIZON_MIN', 30);
+    const solPredictMinSample = readNumber(config, 'SOL_PREDICT_MIN_SAMPLE', 50);
+    const solPredictMinEdgePts = readNumber(config, 'SOL_PREDICT_MIN_EDGE_PTS', 3);
+    const solPredictMinConfidence = readString(
+        config,
+        'SOL_PREDICT_MIN_CONFIDENCE',
+        'medium',
+    ).toLowerCase();
     const bearishReboundMin5mPct = readNumber(config, 'BEARISH_REBOUND_MIN_5M_PCT', 3);
     const aggressiveHolderLiquidityUsd = readNumber(
         config,
@@ -285,6 +294,25 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     }
     // A recent slice as long as the window leaves no baseline to compare against, which collapses
     // every label to the same flat ratio -- the exact failure volumeSurge had before it was fixed.
+    // A flat band of zero makes every stray tick a directional "hit", which turns the accuracy
+    // figure -- the only thing holding this feature accountable -- into a measure of rounding.
+    if (solPredictFlatBandPct <= 0) {
+        errors.push('SOL_PREDICT_FLAT_BAND_PCT must be > 0.');
+    }
+    if (solPredictHorizonMin < 5) {
+        errors.push('SOL_PREDICT_HORIZON_MIN must be >= 5.');
+    }
+    // The sample floor and the margin are what stop a lucky run of a few calls from unlocking
+    // alerts. Setting either to zero would let the predictor promote itself on noise.
+    if (solPredictMinSample < 10) {
+        errors.push('SOL_PREDICT_MIN_SAMPLE must be >= 10; fewer cannot distinguish skill from luck.');
+    }
+    if (solPredictMinEdgePts < 0) {
+        errors.push('SOL_PREDICT_MIN_EDGE_PTS must be >= 0.');
+    }
+    if (!['weak', 'medium', 'strong'].includes(solPredictMinConfidence)) {
+        errors.push('SOL_PREDICT_MIN_CONFIDENCE must be one of weak, medium, strong.');
+    }
     if (metaAccelWindowMin < 5 || metaAccelWindowMin >= metaWindowHours * 60) {
         errors.push(
             'META_ACCEL_WINDOW_MIN must be >= 5 and strictly less than META_WINDOW_HOURS in minutes.',
