@@ -40,6 +40,17 @@ export interface PredictionFeatures {
     memeVolumeAccel?: number;
     /** Share of recently seen tokens that were paid promotions, 0..1. */
     boostShare?: number;
+    /**
+     * Buy share of real on-chain SOL order flow, 0..1, from parsed transactions on a deep SOL pool.
+     *
+     * The only feature here that is a cause rather than an effect. Price is what happened after the
+     * orders; this is the orders. Its blind spot is that most SOL turnover is on centralised
+     * exchanges and invisible on chain -- what is visible is the Solana-native slice, which is
+     * exactly the slice that drives memecoins.
+     */
+    solFlowBuyShare?: number;
+    /** Solana network throughput now versus its recent baseline. 1.0 means unchanged. */
+    networkTpsAccel?: number;
 }
 
 export interface PredictionOptions {
@@ -47,6 +58,8 @@ export interface PredictionOptions {
     weightBreadth: number;
     weightVolume: number;
     weightBoost: number;
+    weightSolFlow: number;
+    weightTps: number;
     /** Moves smaller than this count as FLAT, both when predicting and when grading. */
     flatBandPct: number;
     /** |score| needed for each confidence tier. */
@@ -63,10 +76,15 @@ export interface PredictionResult {
 }
 
 export const DEFAULT_PREDICTION_OPTIONS: PredictionOptions = {
-    weightMomentum: 0.35,
-    weightBreadth: 0.3,
-    weightVolume: 0.25,
-    weightBoost: 0.1,
+    // Rebalanced when the on-chain terms were added: the existing weights were shaded down rather
+    // than the new ones piled on top, so the blend still sums to one and the confidence
+    // thresholds keep meaning what they did before.
+    weightMomentum: 0.3,
+    weightBreadth: 0.2,
+    weightVolume: 0.15,
+    weightBoost: 0.05,
+    weightSolFlow: 0.2,
+    weightTps: 0.1,
     flatBandPct: 0.5,
     mediumScore: 0.25,
     strongScore: 0.5,
@@ -161,6 +179,20 @@ export function predictSolDirection(
         const boost = normalise(features.boostShare - 0.15, 0.15);
         contributions.push({ value: boost, weight: Math.max(0, opts.weightBoost) });
         reasons.push(`boost ${boost.toFixed(2)}`);
+    }
+
+    if (isNum(features.solFlowBuyShare)) {
+        // Centred on an even split. A 75% buy share reads as a full positive signal.
+        const flow = normalise(features.solFlowBuyShare - 0.5, 0.25);
+        contributions.push({ value: flow, weight: Math.max(0, opts.weightSolFlow) });
+        reasons.push(`sol flow ${flow.toFixed(2)}`);
+    }
+
+    if (isNum(features.networkTpsAccel)) {
+        // Centred on 1.0. Throughput is activity, and activity picks up before price resolves it.
+        const tps = normalise(features.networkTpsAccel - 1, 0.5);
+        contributions.push({ value: tps, weight: Math.max(0, opts.weightTps) });
+        reasons.push(`tps ${tps.toFixed(2)}`);
     }
 
     const weightTotal = contributions.reduce((sum, c) => sum + c.weight, 0);

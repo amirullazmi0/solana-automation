@@ -158,6 +158,21 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         return this.moduleRef.get(ReportingService, { strict: false });
     }
 
+    /**
+     * Rejects that are a statement about the clock, not about the token.
+     *
+     * A token rejected for being too young is not a worse token than it will be in an hour -- it is
+     * the same token, earlier. Spending a slot of the stagnant budget on that reject makes the age
+     * gate unreachable by the only means that could ever satisfy it: waiting.
+     *
+     * Production proved the cost. With MIN_AGE_HOURS at 6 the bot went seventeen days without a
+     * single buy while still scanning and labelling thousands of tokens, and the watchlist filled
+     * with `stagnant_timeout` -- tokens that ran out of checks long before they ran out of youth.
+     */
+    private isTimeResolvingReject(reason?: string): boolean {
+        return (reason || '').toLowerCase() === 'too_young';
+    }
+
     private isWatchlistCandidateReason(reason?: string): boolean {
         const normalizedReason = (reason || '').toLowerCase();
         return [
@@ -868,11 +883,11 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
             // 🚀 PROTEKSI STAGNANT: Hentikan loop retry jika koin sudah di-check >= 50 kali
             if (existing && existing.checkCount >= 50 && existing.status === 'PENDING') {
                 this.logger.log(
-                    `[${tokenMint}] ⏳ Stagnant timeout reached (${existing.checkCount} checks). Marking as FAILED.`,
+                    `[${tokenMint}] ⏳ Stagnant timeout reached (${existing.checkCount} checks, last=${existing.reason ?? 'unknown'}). Marking as FAILED.`,
                 );
                 await this.updateWatchlistByMint(tokenMint, {
                     status: 'FAILED',
-                    reason: 'stagnant_timeout',
+                    reason: `stagnant_timeout:${existing.reason ?? 'unknown'}`,
                 });
                 this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); // Cooldown 6 jam
                 return;
@@ -968,12 +983,17 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
 
                     // 🚀 STAGNANT TIMEOUT CHECK INSIDE LOOP
                     if (currentItem.checkCount >= 50) {
+                        // Carry the last real blocker forward. Overwriting it with a bare
+                        // `stagnant_timeout` erased the only evidence of WHY a token never passed,
+                        // and production spent seventeen days with the watchlist dominated by that
+                        // reason while the actual cause was invisible.
+                        const stagnantReason = `stagnant_timeout:${currentItem.reason ?? 'unknown'}`;
                         this.logger.log(
-                            `[${tokenMint}] ⏳ Stagnant timeout reached in active loop (${currentItem.checkCount} checks). Marking as FAILED.`,
+                            `[${tokenMint}] ⏳ Stagnant timeout reached in active loop (${currentItem.checkCount} checks, last=${currentItem.reason ?? 'unknown'}). Marking as FAILED.`,
                         );
                         await this.updateWatchlistByMint(tokenMint, {
                             status: 'FAILED',
-                            reason: 'stagnant_timeout',
+                            reason: stagnantReason,
                         });
                         this.seenTokens.set(tokenMint, Date.now() + 6 * 60 * 60 * 1000); // Cooldown 6 jam
                         return;
@@ -1478,6 +1498,15 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             this.logger.debug(
                                 `[${tokenMint}] Token ${tokenMint} skipped: ${result.reason}`,
                             );
+                            // The increment at the top of this iteration is given back when the only
+                            // thing wrong with the token is that it is early. `lastCheckedAt` still
+                            // advanced, so the radar keeps its pacing -- the token simply stops
+                            // ageing out of its own budget while it waits to become eligible.
+                            if (this.isTimeResolvingReject(result.reason)) {
+                                await this.updateWatchlistByMint(tokenMint, {
+                                    checkCount: { decrement: 1 },
+                                });
+                            }
                             this.logger.debug(
                                 `[${tokenMint}] ⏳ Market metric temporary fail (${result.reason}). Exiting active monitor to let background radar handle it.`,
                             );

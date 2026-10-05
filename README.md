@@ -798,6 +798,36 @@ semua label dan karena itu saling menghapus, bukan menyeret skor turun.
 Perintah Telegram `/meta` menampilkan leaderboard-nya kapan saja, dengan **net P&L per trade sebagai
 angka utama** dan jumlah penampakan sebagai konteks sekunder — bukan sebaliknya.
 
+### Jatah pemeriksaan dan `stagnant_timeout`
+
+Sebuah token yang sedang dipantau menaikkan `checkCount` tiap kali radar mengirimnya ulang, dan pada
+hitungan ke-50 ditandai `FAILED` dengan `stagnant_timeout` plus cooldown 6 jam. Radar menjalankan
+ulang baris `PENDING` yang `lastCheckedAt`-nya lebih tua dari 3 menit, jadi jatahnya setara
+**sekitar 2,5 jam** umur pemantauan.
+
+Itu berbenturan fatal dengan gerbang umur. Dengan `MIN_AGE_HOURS: 6`, produksi berjalan
+**17 hari tanpa satu pun pembelian** — scanner tetap hidup, 9.630 token tetap dilabeli, tapi tidak
+ada token yang bisa bertahan cukup lama untuk menjadi layak. Corong watchlist-nya didominasi
+`stagnant_timeout`: token kehabisan jatah pemeriksaan jauh sebelum kehabisan kemudaan.
+
+Dua perbaikan menutup itu:
+
+**`too_young` tidak lagi memakan jatah.** Reject itu adalah pernyataan tentang jam, bukan tentang
+token — token yang ditolak karena terlalu muda bukan token yang lebih buruk, dia token yang sama,
+lebih awal. Increment-nya dikembalikan saat satu-satunya masalah adalah umur, sementara
+`lastCheckedAt` tetap maju sehingga ritme radar tidak berubah. Reject lain (`low_metrics`,
+`zero_liquidity`, `too_old`, `creator_holds_too_much`, `meta_cold`) **tetap** menghabiskan jatah,
+karena menunggu tidak memperbaikinya dan tanpa itu token jelek akan dicoba selamanya.
+
+**`stagnant_timeout` menyimpan penghalang aslinya.** Sebelumnya kolom `reason` ditimpa begitu saja,
+sehingga satu-satunya bukti mengapa sebuah token tidak pernah lolos ikut terhapus — persis yang
+membuat 17 hari itu sulit didiagnosis. Sekarang formatnya `stagnant_timeout:<alasan terakhir>`,
+dan baris lognya ikut mencantumkan `last=`.
+
+Konsekuensi untuk query: alasan ini **tidak lagi sama persis** dengan string `stagnant_timeout`.
+Pakai `reason LIKE 'stagnant_timeout%'`, atau pecah dengan `split_part(reason, ':', 2)` untuk
+melihat penghalang yang sebenarnya.
+
 ### Profil matang
 
 Setelan gerbang sekarang menyasar **token yang sudah bertahan**, bukan token yang baru lahir.
@@ -894,10 +924,27 @@ pemberitahuan supaya munculnya prediksi tidak terasa tiba-tiba.
 | Breadth memecoin | rata-rata `Watchlist.priceChange1h`, 30 menit terakhir | **Tidak** |
 | Aliran volume memecoin | `MetaSighting.volume5m`, laju 15 menit terakhir vs baseline 45 menit | **Tidak** |
 | Pangsa promosi berbayar | `MetaSighting.isBoosted` | **Tidak** |
+| **Order flow SOL on-chain** | Helius, lewat `FlowVolumeService.getHourlyFlowVolume()` pada pool SOL terdalam | **Tidak** |
+| **Throughput jaringan** | `getRecentPerformanceSamples` via RPC Helius | **Tidak** |
 
 Tiga yang terakhir tidak punya backfill publik — datanya hanya ada di riwayat pemindaian bot
 sendiri. Itu juga alasan fitur ini dikumpulkan dulu alih-alih dibuang: separuh yang belum teruji
 persis separuh yang membedakannya dari prediktor harga biasa.
+
+**Dua term on-chain adalah sebab, bukan akibat.** Harga adalah apa yang terjadi *setelah* order
+masuk; order flow adalah order-nya sendiri. `FlowVolumeService` sudah mengklasifikasikan transaksi
+terparsir jadi beli/jual untuk memecoin — di sini alatnya diarahkan ke pool SOL terdalam yang
+ditemukan dari DexScreener, bukan alamat hardcoded, karena pool bisa pindah dan konstanta basi akan
+gagal dengan cara paling buruk: mengembalikan angka yang tetap terlihat masuk akal.
+
+Titik butanya harus disebut: mayoritas perputaran SOL ada di bursa terpusat dan tidak terlihat
+on-chain. Yang terbaca adalah irisan Solana-native — dan itu justru irisan yang menggerakkan
+memecoin.
+
+Pembacaan on-chain dijalankan **paling banyak sekali per siklus prediksi**. Key Helius di produksi
+berada di paket gratis, `HeliusLimiter` bersifat per-proses, dan `FlowVolumeService` punya cache 60
+detik sendiri — jadi ini harus tetap tetesan, bukan polling. Pada satu panggilan per 15 menit,
+biayanya maksimum tiga request terpaginasi per jam.
 
 **Volatilitas tidak pernah menentukan arah.** Dia hanya memangkas keyakinan: skor yang sama di pasar
 yang liar layak dipercaya lebih sedikit daripada di pasar tenang. Memperlakukannya sebagai
@@ -924,10 +971,12 @@ yang berubah.
 | `SOL_PREDICT_ALERT_COOLDOWN_MS` | 1800000 | Jarak minimum antar pesan |
 | `SOL_PREDICT_MIN_SAMPLE` | 50 | **Lantai sampel gerbang.** Di bawah 10 ditolak validasi |
 | `SOL_PREDICT_MIN_EDGE_PTS` | 3 | **Margin gerbang** dalam poin persen di atas baseline terbaik |
-| `SOL_PREDICT_W_MOMENTUM` | 0.35 | Bobot momentum SOL |
-| `SOL_PREDICT_W_BREADTH` | 0.30 | Bobot breadth memecoin |
-| `SOL_PREDICT_W_VOLUME` | 0.25 | Bobot aliran volume memecoin |
-| `SOL_PREDICT_W_BOOST` | 0.10 | Bobot pangsa promosi berbayar |
+| `SOL_PREDICT_W_MOMENTUM` | 0.30 | Bobot momentum SOL |
+| `SOL_PREDICT_W_BREADTH` | 0.20 | Bobot breadth memecoin |
+| `SOL_PREDICT_W_VOLUME` | 0.15 | Bobot aliran volume memecoin |
+| `SOL_PREDICT_W_BOOST` | 0.05 | Bobot pangsa promosi berbayar |
+| `SOL_PREDICT_W_SOLFLOW` | 0.20 | Bobot order flow SOL on-chain |
+| `SOL_PREDICT_W_TPS` | 0.10 | Bobot akselerasi throughput jaringan |
 
 Memantau tanpa menunggu pesan: baris log `[SolPredict]` dicetak setiap siklus, lengkap dengan arah,
 skor, akurasi berjalan, dan status gerbang. Untuk melihat rekamnya langsung:

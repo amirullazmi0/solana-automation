@@ -166,3 +166,41 @@ describe('scanner health telemetry', () => {
         );
     });
 });
+
+describe('time-resolving rejects', () => {
+    const build = () =>
+        new ScannerService(
+            { get: jest.fn((_key: string, fallback?: string | number) => fallback) } as never,
+            {} as never,
+            {} as never,
+            {} as never,
+            {} as never,
+            { markBoosted: () => undefined, getHeatForMint: () => undefined } as never,
+        ) as unknown as { isTimeResolvingReject(reason?: string): boolean };
+
+    it('treats too_young as a statement about the clock, not about the token', () => {
+        // The budget must not be spent on a reject that only waiting can clear. With
+        // MIN_AGE_HOURS at 6 this cost production seventeen days without a single buy: tokens ran
+        // out of checks long before they ran out of youth.
+        expect(build().isTimeResolvingReject('too_young')).toBe(true);
+        expect(build().isTimeResolvingReject('TOO_YOUNG')).toBe(true);
+    });
+
+    it('still spends the budget on rejects that describe a real defect', () => {
+        // These say something is wrong with the token itself. Waiting does not fix them, so they
+        // must keep counting towards the stagnant timeout or a bad token would be retried forever.
+        const scanner = build();
+        for (const reason of [
+            'too_old',
+            'low_metrics',
+            'zero_liquidity',
+            'mcap_too_low',
+            'creator_holds_too_much',
+            'meta_cold',
+            undefined,
+            '',
+        ]) {
+            expect(scanner.isTimeResolvingReject(reason)).toBe(false);
+        }
+    });
+});

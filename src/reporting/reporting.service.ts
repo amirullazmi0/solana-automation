@@ -7,6 +7,8 @@ import axios from 'axios';
 import * as https from 'https';
 import * as TelegramBot from 'node-telegram-bot-api';
 import { DexLimiter } from '../common/dex-limiter';
+import { DexScreenerPair } from '../dto/analyzer.dto';
+import { FlowVolumeService } from '../analyzer/flow-volume.service';
 import { selectBestDexScreenerPair } from '../common/dex-pair';
 import { computeNetProfitUsd } from '../common/fee-utils';
 import { JupiterLimiter, JupiterPriority } from '../common/jupiter-limiter';
@@ -38,7 +40,7 @@ import {
 } from './sol-prediction';
 import { MetaLabelService } from '../meta/meta-label.service';
 import { ScannerService } from '../scanner/scanner.service';
-import { TradeService } from '../trade/trade.service';
+import { TradeService, WRAPPED_SOL_MINT } from '../trade/trade.service';
 
 export { isWithdrawChatAllowed } from '../common/withdraw-guard';
 
@@ -2245,6 +2247,118 @@ export class ReportingService implements OnModuleInit {
     }
 
     /**
+     * The deepest SOL pool DexScreener knows about, cached for an hour.
+     *
+     * Resolved rather than hardcoded. Pool addresses change when a DEX migrates or a deeper pool
+     * appears, and a stale constant would quietly point the flow reader at a pool nobody trades on
+     * any more -- which fails by returning plausible-looking numbers rather than by erroring.
+     */
+    private solPoolAddress?: { address: string; at: number };
+
+    private async resolveSolPoolAddress(): Promise<string | undefined> {
+        const ONE_HOUR = 60 * 60 * 1000;
+        if (this.solPoolAddress && Date.now() - this.solPoolAddress.at < ONE_HOUR) {
+            return this.solPoolAddress.address;
+        }
+
+        try {
+            const response = await DexLimiter.get<{ pairs?: DexScreenerPair[] }>(
+                `https://api.dexscreener.com/latest/dex/tokens/${WRAPPED_SOL_MINT}`,
+                { timeout: 8000, httpsAgent: this.httpsAgent },
+            );
+            const best = (response.data?.pairs ?? [])
+                .filter(
+                    (p) =>
+                        p.chainId === 'solana' &&
+                        p.baseToken?.address?.toLowerCase() === WRAPPED_SOL_MINT.toLowerCase(),
+                )
+                .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+
+            if (best?.pairAddress) {
+                this.solPoolAddress = { address: best.pairAddress, at: Date.now() };
+                return best.pairAddress;
+            }
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[SolPredict] SOL pool lookup failed: ${msg}.`);
+        }
+        return this.solPoolAddress?.address;
+    }
+
+    /**
+     * The two on-chain readings, both of which measure cause rather than effect.
+     *
+     * Deliberately called at most once per prediction cycle. Helius here is the operator's
+     * production key on a free plan, `HeliusLimiter` is per-process, and `FlowVolumeService` keeps
+     * its own 60-second cache -- so this must stay a trickle, not a poll. At one call per fifteen
+     * minutes the flow read costs at most three paginated requests per hour.
+     */
+    private async collectOnChainFeatures(): Promise<{
+        solFlowBuyShare?: number;
+        networkTpsAccel?: number;
+    }> {
+        const out: { solFlowBuyShare?: number; networkTpsAccel?: number } = {};
+
+        try {
+            const poolAddress = await this.resolveSolPoolAddress();
+            if (poolAddress) {
+                const flowVolumeService = this.moduleRef.get(FlowVolumeService, { strict: false });
+                const flow = await flowVolumeService.getHourlyFlowVolume(
+                    WRAPPED_SOL_MINT,
+                    poolAddress,
+                );
+                const total = (flow?.buyVolumeSol ?? 0) + (flow?.sellVolumeSol ?? 0);
+                // A handful of swaps is one trader, not order flow. Below that the share is noise
+                // dressed as a measurement.
+                if (flow && total > 0 && flow.buyCount + flow.sellCount >= 20) {
+                    out.solFlowBuyShare = flow.buyVolumeSol / total;
+                }
+            }
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[SolPredict] On-chain SOL flow read failed: ${msg}.`);
+        }
+
+        try {
+            const samples = await this.getSolanaConnection().getRecentPerformanceSamples(30);
+            const tps = samples
+                .filter((s) => s.samplePeriodSecs > 0)
+                .map((s) => s.numTransactions / s.samplePeriodSecs);
+            // Samples arrive newest-first. Compare the last few minutes against the rest.
+            if (tps.length >= 10) {
+                const recent = tps.slice(0, 3);
+                const baseline = tps.slice(3);
+                const recentMean = recent.reduce((a, b) => a + b, 0) / recent.length;
+                const baselineMean = baseline.reduce((a, b) => a + b, 0) / baseline.length;
+                if (baselineMean > 0) out.networkTpsAccel = recentMean / baselineMean;
+            }
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[SolPredict] TPS read failed: ${msg}.`);
+        }
+
+        return out;
+    }
+
+    private solanaConnection?: Connection;
+
+    /**
+     * Prefers the Helius endpoint over the class's existing `connection`, which is built from
+     * RPC_ENDPOINT and may be a public node. Throughput samples are cheap either way, but the
+     * paid node answers them without competing with everyone else on the free one.
+     */
+    private getSolanaConnection(): Connection {
+        if (!this.solanaConnection) {
+            const url =
+                this.configService.get<string>('SOLANA_RPC_URL')?.trim() ||
+                this.configService.get<string>('RPC_ENDPOINT')?.trim() ||
+                'https://api.mainnet-beta.solana.com';
+            this.solanaConnection = new Connection(url, 'confirmed');
+        }
+        return this.solanaConnection;
+    }
+
+    /**
      * Makes a call, records it, and sends it only once the record says it is worth sending.
      *
      * The alerting gate is measured, not switched on by hand. A pre-ship backtest over 94 calls on
@@ -2272,6 +2386,7 @@ export class ReportingService implements OnModuleInit {
                 solChange60mPct: this.solChangePct(60),
                 solVolatilityPct: this.solVolatilityPct(),
                 ...(await this.collectMemeFeatures()),
+                ...(await this.collectOnChainFeatures()),
             };
 
             const horizonMinutes = Math.max(
@@ -2280,10 +2395,12 @@ export class ReportingService implements OnModuleInit {
             );
             const prediction = predictSolDirection(features, {
                 flatBandPct,
-                weightMomentum: this.solPredictNumber('SOL_PREDICT_W_MOMENTUM', 0.35),
-                weightBreadth: this.solPredictNumber('SOL_PREDICT_W_BREADTH', 0.3),
-                weightVolume: this.solPredictNumber('SOL_PREDICT_W_VOLUME', 0.25),
-                weightBoost: this.solPredictNumber('SOL_PREDICT_W_BOOST', 0.1),
+                weightMomentum: this.solPredictNumber('SOL_PREDICT_W_MOMENTUM', 0.3),
+                weightBreadth: this.solPredictNumber('SOL_PREDICT_W_BREADTH', 0.2),
+                weightVolume: this.solPredictNumber('SOL_PREDICT_W_VOLUME', 0.15),
+                weightBoost: this.solPredictNumber('SOL_PREDICT_W_BOOST', 0.05),
+                weightSolFlow: this.solPredictNumber('SOL_PREDICT_W_SOLFLOW', 0.2),
+                weightTps: this.solPredictNumber('SOL_PREDICT_W_TPS', 0.1),
             });
 
             // Not enough history yet. Recording a guess here would corrupt the accuracy record,
@@ -2375,6 +2492,9 @@ export class ReportingService implements OnModuleInit {
             `Memecoin\n` +
             `  breadth ${pct(features.memeBreadthPct)} · aliran ${ratio(features.memeVolumeAccel)} · ` +
             `boosted ${features.boostShare === undefined ? 'n/a' : (features.boostShare * 100).toFixed(0) + '%'}\n` +
+            `On-chain\n` +
+            `  beli SOL ${features.solFlowBuyShare === undefined ? 'n/a' : (features.solFlowBuyShare * 100).toFixed(0) + '%'} · ` +
+            `tps ${ratio(features.networkTpsAccel)}\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `Akurasi: *${summary.hitRate.toFixed(1)}%* dari ${summary.total} prediksi\n` +
             `  pembanding "selalu datar" ${summary.baselineAlwaysFlat.toFixed(1)}% · ` +

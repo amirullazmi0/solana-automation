@@ -263,3 +263,41 @@ describe('shouldStartAlerting', () => {
         expect(Number.isNaN(decision.edgePoints)).toBe(false);
     });
 });
+
+describe('on-chain features', () => {
+    it('lets real SOL order flow push the call', () => {
+        // Order flow is the one input that is a cause rather than an effect: these are the swaps
+        // that move the price, not the price that resulted from them.
+        const buying = predictSolDirection({ solChange15mPct: 0, solFlowBuyShare: 0.8 })!;
+        const selling = predictSolDirection({ solChange15mPct: 0, solFlowBuyShare: 0.2 })!;
+
+        expect(buying.score).toBeGreaterThan(0);
+        expect(selling.score).toBeLessThan(0);
+    });
+
+    it('treats an even order-flow split as no opinion', () => {
+        const even = predictSolDirection({ solChange15mPct: 0, solFlowBuyShare: 0.5 })!;
+        expect(even.score).toBeCloseTo(0);
+        expect(even.direction).toBe('FLAT');
+    });
+
+    it('reads rising network throughput as risk-on and falling as risk-off', () => {
+        const busy = predictSolDirection({ solChange15mPct: 0, networkTpsAccel: 1.6 })!;
+        const quiet = predictSolDirection({ solChange15mPct: 0, networkTpsAccel: 0.5 })!;
+
+        expect(busy.score).toBeGreaterThan(0);
+        expect(quiet.score).toBeLessThan(0);
+    });
+
+    it('ignores on-chain terms that are absent rather than scoring them as neutral votes', () => {
+        // Absent evidence must not dilute the terms that do have something to say.
+        const withFlow = predictSolDirection({ solChange15mPct: 2, solFlowBuyShare: 0.5 })!;
+        const withoutFlow = predictSolDirection({ solChange15mPct: 2 })!;
+        expect(Math.abs(withoutFlow.score)).toBeGreaterThan(Math.abs(withFlow.score));
+    });
+
+    it('still refuses to predict when only on-chain features exist', () => {
+        // The SOL 15-minute change remains mandatory. On-chain flow alone is not a prediction.
+        expect(predictSolDirection({ solFlowBuyShare: 0.9, networkTpsAccel: 2 })).toBeUndefined();
+    });
+});
