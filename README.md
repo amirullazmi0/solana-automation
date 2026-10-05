@@ -828,6 +828,13 @@ Konsekuensi untuk query: alasan ini **tidak lagi sama persis** dengan string `st
 Pakai `reason LIKE 'stagnant_timeout%'`, atau pecah dengan `split_part(reason, ':', 2)` untuk
 melihat penghalang yang sebenarnya.
 
+**Alasan reject sekarang benar-benar tersimpan.** Penulisan `reason` di dasar loop pemantauan tidak
+pernah tercapai dari jalur reject metrik pasar, karena cabang itu `return` lebih dulu — sehingga
+jalur reject yang paling sering dipakai (`too_young`, `low_metrics`, `mcap_too_low`) selalu
+meninggalkan kolom `reason` kosong. Produksi menunjukkan akibatnya: `stagnant_timeout:unknown` untuk
+50 token dalam tiga jam, dengan penyebab sebenarnya tak terlihat. Alasannya kini ditulis sebelum
+keluar.
+
 ### Profil matang
 
 Setelan gerbang sekarang menyasar **token yang sudah bertahan**, bukan token yang baru lahir.

@@ -1502,11 +1502,17 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                             // thing wrong with the token is that it is early. `lastCheckedAt` still
                             // advanced, so the radar keeps its pacing -- the token simply stops
                             // ageing out of its own budget while it waits to become eligible.
-                            if (this.isTimeResolvingReject(result.reason)) {
-                                await this.updateWatchlistByMint(tokenMint, {
-                                    checkCount: { decrement: 1 },
-                                });
-                            }
+                            // Persist the blocker before leaving. The write further down this loop
+                            // is never reached from here, so until now the single most common
+                            // reject path left `reason` null -- which is why production showed
+                            // `stagnant_timeout:unknown` for 50 tokens in three hours and the real
+                            // cause stayed invisible.
+                            await this.updateWatchlistByMint(tokenMint, {
+                                reason: result.reason,
+                                ...(this.isTimeResolvingReject(result.reason)
+                                    ? { checkCount: { decrement: 1 } }
+                                    : {}),
+                            });
                             this.logger.debug(
                                 `[${tokenMint}] ⏳ Market metric temporary fail (${result.reason}). Exiting active monitor to let background radar handle it.`,
                             );
