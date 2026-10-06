@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#0a0e14" />
+<title>Zona Supply &amp; Demand</title>
+<!-- Absolut, bukan relatif: `/dashboard` tanpa garis miring akan membuat path relatif meleset ke root. -->
+<link rel="stylesheet" href="/dashboard/style.css" />
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<header>
+  <div class="titlebar">
+    <h1>Zona Supply &amp; Demand</h1>
+    <span id="status">siap</span>
+  </div>
+  <div class="controls">
+    <input id="key" type="password" placeholder="x-api-key" autocomplete="off" />
+    <input id="mint" placeholder="tempel alamat mint…" autocomplete="off" />
+    <button id="go">Cari</button>
+    <button id="reload">Muat ulang</button>
+  </div>
+  <div class="tfrow"><div id="tfbar"></div><div id="ztfbar"></div></div>
+</header>
+
+<main>
+  <section class="panel side">
+    <div id="tabs" class="tabs"></div>
+    <div id="coins"></div>
+    <div id="filterinfo" class="footnote"></div>
+  </section>
+
+  <section class="panel">
+    <div id="head"><span class="muted">pilih coin dulu</span></div>
+    <div id="tags"></div>
+    <div id="verdict" style="display:none"></div>
+    <div id="predict" style="display:none"></div>
+    <div id="chartwrap">
+      <div id="chart"></div>
+      <div id="bands"></div>
+    </div>
+    <div id="stats"></div>
+    <div id="plans"></div>
+    <div id="zones" class="zones"></div>
+    <div id="warn" class="note"></div>
+  </section>
+</main>
+
+<script src="/dashboard/app.js"></script>
+</body>
+</html>
