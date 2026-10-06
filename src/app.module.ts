@@ -12,6 +12,7 @@ import { PriceMonitorModule } from './price-monitor/price-monitor.module';
 import { AIModule } from './ai/ai.module';
 import { TelegramModule } from './telegram/telegram.module';
 import { MetaModule } from './meta/meta.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 import { loadRuntimeConfig } from './config/runtime-config';
 
 @Module({
@@ -25,6 +26,7 @@ import { loadRuntimeConfig } from './config/runtime-config';
         PrismaModule,
         TelegramModule,
         MetaModule,
+        DashboardModule,
         ReportingModule,
         AnalyzerModule,
         ScannerModule,
