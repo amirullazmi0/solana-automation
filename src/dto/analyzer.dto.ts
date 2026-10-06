@@ -25,6 +25,8 @@ export interface DexScreenerPair {
     info?: {
         socials?: SocialLink[];
         websites?: Website[];
+        /** Logo token, dikirim DexScreener untuk pair yang punya profil. */
+        imageUrl?: string;
     };
     baseToken?: { address?: string; symbol?: string; name?: string };
 }
