@@ -26,6 +26,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
 import { MetaTrendService } from '../meta/meta-trend.service';
+import { ZoneDigestService } from '../dashboard/zone-digest.service';
 import {
     AccuracySummary,
     Confidence,
@@ -50,16 +51,17 @@ export function buildStartupUpdateAnnouncement(): {
 } {
     return {
         message:
-            `🚀 *MSOULMATION NOW TRADES THE META*\n` +
+            `📊 *BUY AND SELL BANDS ARE LIVE*\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `✨ A fresh update is now live.\n\n` +
-            `🧭 *Meta detection* — every token is sorted into its theme\n` +
-            `📈 *Rising metas get priority* — measured by launch rate, not hype\n` +
-            `☠️ *Losing metas get pushed down* — judged on your own realised P&L\n` +
-            `🛡️ *All existing safety checks still run first*\n` +
-            `⚡ *Sharper entry and exit protection*\n\n` +
+            `🟢 *Buy band* — the demand zone price keeps bouncing off\n` +
+            `🔴 *Sell band* — the supply zone price keeps stalling at\n` +
+            `📈 *Ranked by reward-to-risk* — room above divided by room below\n` +
+            `🧭 *Meta detection still runs* — themes are sorted and scored\n` +
+            `🛡️ *All existing safety checks still run first*\n\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
-            `💬 Send /meta anytime to see which themes are running.\n` +
+            `💬 Send /zones for the bands, /meta for the themes.\n` +
+            `👀 Bands are view only — the bot does not trade them, you decide.\n` +
             `✅ Your wallet and chat trading settings remain unchanged.\n` +
             `📲 The upgraded protection is active now.`,
         options: {
@@ -257,6 +259,12 @@ export class ReportingService implements OnModuleInit {
                     await this.handleWatchlistRequest(incomingChatId);
                 } else if (command === '/meta' || normalizedText === 'meta') {
                     await this.handleMetaRequest(incomingChatId);
+                } else if (
+                    command === '/zones' ||
+                    normalizedText === 'zones' ||
+                    normalizedText === 'zona'
+                ) {
+                    await this.handleZonesRequest(incomingChatId);
                 } else if (command === '/withdraw' || normalizedText === 'withdraw') {
                     await this.handleWithdrawStart(incomingChatId);
                 } else if (this.isSolanaAddress(text)) {
@@ -321,7 +329,8 @@ export class ReportingService implements OnModuleInit {
                     [{ text: '\uD83D\uDCBC Balance' }, { text: '\uD83D\uDCC8 Portfolio' }],
                     [{ text: '\u2699\uFE0F Settings' }, { text: '\uD83D\uDCC8 Win Rate' }],
                     [{ text: '\uD83D\uDC40 Watchlist' }, { text: '\uD83D\uDCB8 Withdraw' }],
-                    [{ text: '������ Meta' }],
+                    [{ text: '🧭 Meta' }],
+                    [{ text: '📊 Zones' }],
                 ],
                 resize_keyboard: true,
             },
@@ -1987,6 +1996,157 @@ export class ReportingService implements OnModuleInit {
 
     private async handleMetaRequest(targetChatId?: string) {
         await this.sendMessage(this.buildMetaReport(), {}, 0, targetChatId);
+    }
+
+    /**
+     * Prices here span eight orders of magnitude, from SOL at $120 to a memecoin at $0.00000012, so
+     * a fixed number of decimals is wrong at one end or the other. Significant digits are right at
+     * both.
+     */
+    private formatZonePrice(value: number): string {
+        if (!Number.isFinite(value) || value <= 0) return '?';
+        return value >= 1 ? value.toFixed(4) : value.toPrecision(4);
+    }
+
+    /**
+     * Supply and demand bands for the coins worth planning a trade around, as both a scheduled
+     * report and the `/zones` command.
+     *
+     * Viewing only. Nothing here places an order, moves a stop, or changes a gate -- the bands are
+     * drawn for you to act on by hand. That restraint matters because Shved S&D was designed for
+     * deep, mature markets, and whether its levels mean anything on a token nine hours old is a
+     * question only real trades can answer.
+     *
+     * So every row carries its candle count and age. A band drawn from 45 bars of a brand new token
+     * looks exactly as authoritative as one drawn from a week of history, and the reader has to be
+     * able to tell them apart.
+     */
+    private async buildZoneReport(): Promise<string> {
+        const digest = await this.moduleRef.get(ZoneDigestService, { strict: false }).build();
+
+        if (digest.entries.length === 0) {
+            const why = digest.skipped.length
+                ? digest.skipped
+                      .map((s) => `${this.stripMarkdown(s.symbol)} (${this.stripMarkdown(s.why)})`)
+                      .join(', ')
+                : 'no candidate cleared the liquidity floor';
+            return (
+                '📊 *Supply & Demand:* no coin has usable bands right now.\n' +
+                `_Checked ${digest.scanned}: ${why}._`
+            );
+        }
+
+        const lines = digest.entries.slice(0, 6).map((entry, index) => {
+            const symbol = this.stripMarkdown(entry.symbol) || 'UNKNOWN';
+            const age = entry.ageHours !== undefined ? `${entry.ageHours.toFixed(0)}h` : '?';
+            const liq = entry.liquidityUsd
+                ? `$${Math.round(entry.liquidityUsd).toLocaleString('en-US')}`
+                : '?';
+
+            const buy = entry.buyZone
+                ? `$${this.formatZonePrice(entry.buyZone.low)} - ` +
+                  `$${this.formatZonePrice(entry.buyZone.high)} ` +
+                  `(${entry.buyDistancePct?.toFixed(1)}%, ${entry.buyZone.strength.toLowerCase()})`
+                : 'none';
+            // The sign comes from the number, never from a hardcoded prefix. A literal `+` turned a
+            // straddling band's -7.1% into "+-7.1%", printed as confidently as a real target.
+            const signed = (pct?: number) =>
+                pct === undefined ? '?' : `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
+            const sell = entry.sellZone
+                ? `$${this.formatZonePrice(entry.sellZone.low)} - ` +
+                  `$${this.formatZonePrice(entry.sellZone.high)} ` +
+                  `(${signed(entry.sellDistancePct)}, ${entry.sellZone.strength.toLowerCase()})`
+                : 'none';
+            // Price inside a band is the most useful line on the row and the easiest to misread as
+            // a target, so it is phrased as a position rather than an instruction.
+            const inside = entry.insideZone
+                ? `\n    ⚠️ inside $${this.formatZonePrice(entry.insideZone.low)} - ` +
+                  `$${this.formatZonePrice(entry.insideZone.high)} ` +
+                  `(${entry.insideZone.strength.toLowerCase()}) right now`
+                : '';
+
+            // Reward-to-risk leads the row because it is the only figure that compares two coins. A
+            // band 1% below price with 20% of room above is a completely different proposition from
+            // one 15% below with 2% above, and the two look identical if you print only the edges.
+            const rr = entry.rewardRisk !== undefined ? `${entry.rewardRisk.toFixed(1)}:1` : 'one-sided';
+
+            // The verdict leads, because it is the only part a reader can act on without doing
+            // arithmetic. It comes from the same function the web page uses, so the two surfaces
+            // cannot disagree about the same chart.
+            const verdict: Record<string, string> = {
+                IN_BUY_ZONE: '🟢 IN THE BUY ZONE',
+                NEAR_BUY: '🟢 nearly at the buy zone',
+                WAIT: '⏳ wait, still far above the buy zone',
+                NEAR_SELL: '⚠️ do not chase, close to the sell zone',
+                IN_SELL_ZONE: '🔴 IN THE SELL ZONE',
+                NO_PLAN: '⚪️ no floor below price',
+            };
+
+            return (
+                `${index + 1}. *${symbol}* — ${verdict[entry.action] ?? entry.action}\n` +
+                `    ${rr} · $${this.formatZonePrice(entry.price)}\n` +
+                `    🟢 buy ${buy}\n` +
+                `    🔴 sell ${sell}${inside}\n` +
+                `    ${entry.candleCount} candles · ${age} old · ${liq} liq · ${entry.source}`
+            );
+        });
+
+        const skipped = digest.skipped.length
+            ? `\n\n⚪️ _Skipped ${digest.skipped.length}: ` +
+              `${digest.skipped.map((s) => this.stripMarkdown(s.symbol)).join(', ')}._`
+            : '';
+
+        return (
+            '📊 *Supply & Demand Zones*\n' +
+            '_Buy near the green band, sell near the red one._\n\n' +
+            lines.join('\n\n') +
+            skipped +
+            '\n\n_View only -- the bot does not trade these. Bands come from 5m candles and need at ' +
+            'least 41 of them, so a very new token shows nothing rather than a guess._'
+        );
+    }
+
+    private async handleZonesRequest(targetChatId?: string) {
+        // Six serial GeckoTerminal calls at 2.5 s apart, so roughly fifteen seconds pass before
+        // anything appears. Without this the command just looks broken.
+        await this.sendMessage(
+            '📊 Reading candles and drawing bands, about 15 seconds...',
+            {},
+            0,
+            targetChatId,
+        );
+        await this.sendMessage(await this.buildZoneReport(), {}, 0, targetChatId);
+    }
+
+    /**
+     * Scheduled zone report.
+     *
+     * Fixed cron expression with the interval gated inside, for the same reason `sendMetaTrendReport`
+     * does it: `@Cron` reads its argument at class-decoration time, before ConfigModule has loaded
+     * anything, so a config value there would silently be undefined.
+     *
+     * Offset half an hour from the meta report so the two never queue their DexScreener lookups
+     * against each other.
+     */
+    @Cron('30 * * * *')
+    async sendZoneReport() {
+        try {
+            const enabled =
+                String(this.configService.get('ENABLE_ZONE_REPORT', 'true')).toLowerCase() !==
+                'false';
+            if (!enabled) return;
+
+            const everyHours = Math.max(
+                1,
+                Number.parseInt(this.configService.get<string>('ZONE_REPORT_HOURS', '6'), 10) || 6,
+            );
+            if (new Date().getUTCHours() % everyHours !== 0) return;
+
+            await this.sendMessage(await this.buildZoneReport());
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.error(`Zone report failed: ${msg}`);
+        }
     }
 
     /**

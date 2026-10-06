@@ -10,13 +10,19 @@ describe('startup update announcement', () => {
     it('builds a complete English update message with working menu actions', () => {
         const announcement = buildStartupUpdateAnnouncement();
 
-        expect(announcement.message).toContain('MSOULMATION NOW TRADES THE META');
-        expect(announcement.message).toContain('Meta detection');
-        expect(announcement.message).toContain('Rising metas get priority');
-        expect(announcement.message).toContain('Losing metas get pushed down');
-        // The command has to be discoverable from the broadcast: it is the only place most chats
-        // will ever be told the leaderboard exists.
+        expect(announcement.message).toContain('BUY AND SELL BANDS ARE LIVE');
+        expect(announcement.message).toContain('Buy band');
+        expect(announcement.message).toContain('Sell band');
+        expect(announcement.message).toContain('Ranked by reward-to-risk');
+        // Meta did not go away when zones shipped, and a broadcast that omits it reads as a removal.
+        expect(announcement.message).toContain('Meta detection still runs');
+        // Commands have to be discoverable from the broadcast: it is the only place most chats will
+        // ever be told either surface exists.
+        expect(announcement.message).toContain('/zones');
         expect(announcement.message).toContain('/meta');
+        // The bands do not trade themselves, and a broadcast that leaves that implicit would have
+        // chats believing the bot started entering on supply and demand levels.
+        expect(announcement.message).toContain('view only');
         // Kept deliberately across releases so a deploy does not read as a config reset.
         expect(announcement.message).toContain('wallet and chat trading settings remain unchanged');
         expect(announcement.options.reply_markup).toEqual({
