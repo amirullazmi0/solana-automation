@@ -225,12 +225,28 @@ describe('ReportingService.dashboardRow', () => {
     // is malformed. A half-configured base would therefore not produce a dead button, it would
     // silently delete every token alert this bot sends -- the same failure mode as the unescaped
     // underscore in /status.
+    // A bare hostname is what a person actually has in hand, and demanding the scheme would turn a
+    // forgotten "https://" into a silently missing button.
+    it('accepts a bare hostname and assumes https', () => {
+        const row = rowFor('msoulmation.apps.arulize.com') as Array<Array<{ url: string }>>;
+        expect(row[0][0].url).toBe(
+            'https://msoulmation.apps.arulize.com/dashboard/?mint=So11111111111111111111111111111111111111112',
+        );
+    });
+
+    it('keeps an explicit http scheme instead of upgrading it', () => {
+        const row = rowFor('http://192.168.1.10:3100') as Array<Array<{ url: string }>>;
+        expect(row[0][0].url).toContain('http://192.168.1.10:3100/dashboard/?mint=');
+    });
+
     it('emits nothing rather than a broken url', () => {
         expect(rowFor(undefined)).toEqual([]);
         expect(rowFor('')).toEqual([]);
         expect(rowFor('   ')).toEqual([]);
+        // A space cannot appear in a host and is the shape of a sentence typed into the field.
         expect(rowFor('not a url')).toEqual([]);
-        expect(rowFor('msoulmation.apps.arulize.com')).toEqual([]);
+        // No dot and not localhost: a typo, and a typo here is an outage rather than a dead button.
+        expect(rowFor('msoulmation')).toEqual([]);
     });
 
     // A javascript: or file: base parses fine and would ship a button Telegram either rejects or,

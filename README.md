@@ -1334,7 +1334,7 @@ lokal, hanya key yang **tidak** ada di `config.json` (`PORT`, `API_SECRET_KEY`,
 | `ENABLE_ZONE_REPORT` | true | Report zona terjadwal ke Telegram |
 | `DASHBOARD_MIN_AGE_HOURS` | 24 | Umur minimal pair untuk masuk daftar. 0 mematikan saringan umur. Tidak berlaku di tab Watchlist |
 | `DASHBOARD_REQUIRE_RUGCHECK` | true | Wajib lolos RugCheck tanpa risiko danger. Token yang tidak bisa dicek **dibuang**, bukan diloloskan |
-| `DASHBOARD_PUBLIC_URL` | `""` | Alamat publik app, misal `https://msoulmation.apps.arulize.com`. Mengaktifkan tombol **Zone Dashboard** di alert token Telegram. Kosong atau tidak valid berarti tombolnya tidak muncul sama sekali |
+| `DASHBOARD_PUBLIC_URL` | `""` | Alamat publik app. Hostname telanjang cukup, misal `msoulmation.apps.arulize.com` (dianggap https). Mengaktifkan tombol **Zone Dashboard** di alert token Telegram. Kosong atau tidak valid berarti tombolnya tidak muncul sama sekali |
 | `ZONE_REPORT_HOURS` | 6 | Interval report, digerbangi di dalam fungsi karena `@Cron` dievaluasi sebelum ConfigModule memuat apa pun |
 
 ### Scanner, watchlist, dan retry

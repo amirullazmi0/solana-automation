@@ -25,6 +25,7 @@ import {
 } from '../dto/reporting.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramWorkspaceService } from '../telegram/telegram-workspace.service';
+import { resolveDashboardBase } from '../common/dashboard-url';
 import { MetaTrendService } from '../meta/meta-trend.service';
 import { ZoneDigestService } from '../dashboard/zone-digest.service';
 import {
@@ -1073,27 +1074,16 @@ export class ReportingService implements OnModuleInit {
      * unusable `DASHBOARD_PUBLIC_URL` simply means the alerts look exactly as they did before.
      */
     private dashboardRow(tokenMint: string): TelegramBot.InlineKeyboardButton[][] {
-        const raw = String(this.configService.get('DASHBOARD_PUBLIC_URL', '')).trim();
-        if (!raw) return [];
+        const base = resolveDashboardBase(
+            this.configService.get<string>('DASHBOARD_PUBLIC_URL', ''),
+        );
+        if (!base) return [];
 
-        let base: URL;
-        try {
-            base = new URL(raw);
-        } catch {
-            this.logger.warn(`[Dashboard] DASHBOARD_PUBLIC_URL is not a valid URL: ${raw}.`);
-            return [];
-        }
-        if (base.protocol !== 'http:' && base.protocol !== 'https:') {
-            this.logger.warn(`[Dashboard] DASHBOARD_PUBLIC_URL must be http or https: ${raw}.`);
-            return [];
-        }
-
-        const root = `${base.origin}${base.pathname.replace(/\/+$/, '')}`;
         return [
             [
                 {
                     text: '\u{1F4C8} Zone Dashboard',
-                    url: `${root}/dashboard/?mint=${encodeURIComponent(tokenMint)}`,
+                    url: `${base}/dashboard/?mint=${encodeURIComponent(tokenMint)}`,
                 },
             ],
         ];

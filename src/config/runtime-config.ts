@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
+import { resolveDashboardBase } from '../common/dashboard-url';
 
 type RuntimeConfig = Record<string, unknown>;
 
@@ -413,23 +414,11 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     // Validated at boot as well as at use. Telegram rejects the WHOLE message with a 400 when one
     // button url is malformed, so a typo here would silently delete every token alert rather than
     // produce one dead button -- and the alerts are how the bot is observed at all.
-    const dashboardPublicUrl = String(
-        (config as ConfigReader).get?.('DASHBOARD_PUBLIC_URL', '') ??
-            (config as RuntimeConfig).DASHBOARD_PUBLIC_URL ??
-            '',
-    ).trim();
-    if (dashboardPublicUrl) {
-        let parsed: URL | undefined;
-        try {
-            parsed = new URL(dashboardPublicUrl);
-        } catch {
-            parsed = undefined;
-        }
-        if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
-            errors.push(
-                'DASHBOARD_PUBLIC_URL must be a full http or https URL, e.g. https://host.example.com.',
-            );
-        }
+    const dashboardPublicUrl = readString(config, 'DASHBOARD_PUBLIC_URL', '');
+    if (dashboardPublicUrl.trim() && !resolveDashboardBase(dashboardPublicUrl)) {
+        errors.push(
+            'DASHBOARD_PUBLIC_URL must be a hostname or http(s) URL, e.g. host.example.com.',
+        );
     }
 
     const spendableCapital = totalCapital - reserveAmount;

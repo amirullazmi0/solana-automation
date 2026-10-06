@@ -246,5 +246,5 @@
     "ZONE_REPORT_HOURS": 6,
     "DASHBOARD_MIN_AGE_HOURS": 24,
     "DASHBOARD_REQUIRE_RUGCHECK": true,
-    "DASHBOARD_PUBLIC_URL": ""
+    "DASHBOARD_PUBLIC_URL": "https://msoulmation.apps.arulize.com/"
 }
