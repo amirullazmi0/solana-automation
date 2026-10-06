@@ -353,6 +353,64 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
         errors.push('ZERO_LIQUIDITY_ACTIVE_RETRY_MAX_AGE_MIN must be >= 0.');
     }
 
+    // --- Zone dashboard -------------------------------------------------------------------
+    // The candle window and the fractal periods are tied together: the algorithm refuses to draw a
+    // zone from fewer than 2*pSlow + 11 bars, so a limit below that guarantees an empty chart while
+    // still spending the API call.
+    const dashboardCandleTf = readNumber(config, 'DASHBOARD_CANDLE_TF', 5);
+    const dashboardCandleLimit = readNumber(config, 'DASHBOARD_CANDLE_LIMIT', 300);
+    const dashboardCacheTtlMs = readNumber(config, 'DASHBOARD_CACHE_TTL_MS', 60000);
+    const dashboardMinLiquidityUsd = readNumber(config, 'DASHBOARD_MIN_LIQUIDITY_USD', 25000);
+    const geckoMinDelayMs = readNumber(config, 'GECKO_MIN_DELAY_MS', 2500);
+    const shvedFuzzFactor = readNumber(config, 'SHVED_FUZZ_FACTOR', 0.75);
+    const shvedFastFactor = readNumber(config, 'SHVED_FAST_FACTOR', 3);
+    const shvedSlowFactor = readNumber(config, 'SHVED_SLOW_FACTOR', 6);
+    const zoneReportHours = readNumber(config, 'ZONE_REPORT_HOURS', 6);
+    const dashboardMinAgeHours = readNumber(config, 'DASHBOARD_MIN_AGE_HOURS', 24);
+
+    if (!Number.isInteger(dashboardCandleTf) || dashboardCandleTf < 1) {
+        errors.push('DASHBOARD_CANDLE_TF must be an integer >= 1 (minutes per candle).');
+    }
+    if (!Number.isInteger(dashboardCandleLimit) || dashboardCandleLimit < 50 || dashboardCandleLimit > 1000) {
+        errors.push('DASHBOARD_CANDLE_LIMIT must be an integer between 50 and 1000.');
+    }
+    // Below ten seconds the cache stops protecting the rate limit, which is the only reason it
+    // exists: a page that redraws every few seconds would then fetch every few seconds.
+    if (dashboardCacheTtlMs < 10000) {
+        errors.push('DASHBOARD_CACHE_TTL_MS must be >= 10000; below that the rate-limit cache stops working.');
+    }
+    if (dashboardMinLiquidityUsd < 0) {
+        errors.push('DASHBOARD_MIN_LIQUIDITY_USD must be >= 0.');
+    }
+    // GeckoTerminal's free tier is roughly 30 requests per minute and six consecutive calls were
+    // enough to earn a 429 in testing, so anything under two seconds invites being throttled.
+    if (geckoMinDelayMs < 2000) {
+        errors.push('GECKO_MIN_DELAY_MS must be >= 2000; GeckoTerminal returns 429 below that pace.');
+    }
+    // Fuzz scales the band half-width off ATR. At zero every zone collapses to a single price that
+    // nothing ever touches, so hits stay at zero and no zone is ever VERIFIED.
+    if (shvedFuzzFactor <= 0 || shvedFuzzFactor > 5) {
+        errors.push('SHVED_FUZZ_FACTOR must be > 0 and <= 5; it scales the band width off ATR.');
+    }
+    // calcFractalPeriod floors its input, so anything below 1 yields a zero-width fractal and the
+    // algorithm returns nothing at all. Fast must stay below slow or the confirmation is inverted.
+    if (shvedFastFactor < 1 || shvedSlowFactor < 1) {
+        errors.push('SHVED_FAST_FACTOR and SHVED_SLOW_FACTOR must both be >= 1.');
+    }
+    if (shvedFastFactor >= shvedSlowFactor) {
+        errors.push(
+            'SHVED_FAST_FACTOR must be strictly below SHVED_SLOW_FACTOR; the slow fractal is what confirms the fast one.',
+        );
+    }
+    if (!Number.isInteger(zoneReportHours) || zoneReportHours < 1 || zoneReportHours > 24) {
+        errors.push('ZONE_REPORT_HOURS must be an integer between 1 and 24.');
+    }
+    // A negative floor would admit pairs DexScreener reports as created in the future, which is how
+    // a bad `pairCreatedAt` would otherwise slip a brand-new token past the maturity gate.
+    if (dashboardMinAgeHours < 0) {
+        errors.push('DASHBOARD_MIN_AGE_HOURS must be >= 0 (0 disables the age floor).');
+    }
+
     const spendableCapital = totalCapital - reserveAmount;
     const requiredCapital = positionSizeUsd * totalSlots;
     if (spendableCapital < requiredCapital) {

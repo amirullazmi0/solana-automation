@@ -1034,6 +1034,292 @@ dynamic hold zone, dan seluruh guard juga tetap memakai basis lama.
 | `FAST_STOP_PRICE_MAX_AGE_MS` | 10000 | Di atas ini kuotasi dianggap basi dan diabaikan |
 | `ENABLE_AI_CUTLOSS_DEFENSE` | **false** | Dimatikan eksplisit. Produksi: 4 trade, **-$4,13**, nol menang |
 
+### Zona supply & demand (dashboard + report)
+
+Port dari Pine Script **Shved Supply and Demand v1.5** ke `src/dashboard/shved-zones.ts`, sebagai
+modul murni tanpa I/O seperti `meta-trend.ts` dan `fast-stop-price.ts`. Fungsinya menggambar
+**ambang bawah (beli)** dan **ambang atas (jual)** dari fractal harga dan ATR.
+
+**Lihat-saja, dan dipaksa begitu oleh test.** Tidak ada satu pun jalur beli, exit, atau sizing yang
+membaca zona ini. Seluruh proses beli/jual tetap di Telegram. `dashboard.controller.spec.ts`
+menegaskannya terhadap teks sumber, bukan terhadap perilaku: ketiga route harus `@Get`, tidak boleh
+ada satu pun penyebutan `TradeService`, `Keypair`, `sendTransaction`, atau `JupiterLimiter` di
+`src/dashboard/`, dan tidak boleh ada operasi tulis Prisma. Yang dicegah bukan bug hari ini — hari
+ini memang tidak ada jalur trade sama sekali — melainkan edit di masa depan yang diam-diam
+menambahkannya. Reviewer bisa melewatkan satu baris import; test ini tidak. Shved S&D
+dirancang untuk pasar matang; apakah levelnya berarti sesuatu pada memecoin umur jam adalah
+pertanyaan yang hanya bisa dijawab hasil trade, jadi menyambungkannya ke keputusan uang adalah
+keputusan terpisah yang butuh bukti lebih dulu.
+
+Dua permukaan, satu sumber:
+
+| Permukaan | Alamat |
+| --- | --- |
+| Halaman web | `GET /dashboard` (statis, `public/index.html`) |
+| Daftar coin | `GET /dashboard/api/coins` |
+| Candle + zona | `GET /dashboard/api/zones/:mint` |
+| Harga saja (poll cepat) | `GET /dashboard/api/price/:mint` |
+| Telegram | perintah `/zones`, tombol **📊 Zones**, dan cron terjadwal |
+
+Ketiga route API dijaga header `x-api-key` dengan pola inline yang sama seperti `app.controller.ts`,
+termasuk sifat **fail-closed**-nya: `API_SECRET_KEY` kosong berarti **selalu 401**. Berbeda dari
+webhook Helius yang sengaja membalas `200 OK` saat auth gagal agar Helius tidak menonaktifkan diri —
+di sini auth gagal harus benar-benar 401, karena aplikasi ini publik dan route ini memaparkan
+watchlist.
+
+#### Sumber candle
+
+Bot tidak punya sumber OHLC lain; semua pembacaan harga di tempat lain adalah snapshot spot. Candle
+diambil dari **GeckoTerminal**, lewat `GeckoLimiter` — antrean serial terpisah yang mencerminkan
+`HeliusLimiter`. Lane terpisah itu disengaja: `DexLimiter` adalah satu jalur serial untuk anggaran
+DexScreener, dan menyalurkan trafik chart ke sana akan membuat **setiap pencarian harga di aplikasi
+mengantre di belakang penggambaran chart** — dan pencarian harga itulah yang dipakai trade.
+
+Dua jebakan yang sudah menggigit, keduanya menghasilkan angka yang terlihat masuk akal:
+
+- **`token=<mint>` itu wajib, bukan pemanis.** Tanpa itu GeckoTerminal memberi harga sisi mana pun
+  yang dianggapnya base pool. Untuk pool TOKEN/TOKEN itu sisi yang salah: pool USEFUL/USELESS
+  mengembalikan USELESS di $0,23 padahal USEFUL diperdagangkan di $0,000126 — meleset **1.800x** dan
+  tetap menghasilkan zona yang kelihatan wajar. `CandleService` juga menyilang-periksa harga candle
+  terakhir terhadap harga DexScreener dan membuang deret yang rasionya di luar 0,2x–5x.
+- **Ambang harga absolut mematikan sebagian besar memecoin.** Sumber Pine memakai
+  `fastUp[ii] > 0.001` untuk menentukan apakah sebuah bar membawa fractal, karena ditulis untuk
+  forex dan saham yang tidak punya harga sekecil itu. Di Solana mayoritas memecoin ada di bawahnya:
+  ABU di $0,00022 dan USEFUL di $0,00013 gagal tes itu di **setiap bar**, jadi tidak ada fractal yang
+  pernah dikenali dan keduanya melaporkan **nol zona** dari 300 candle penuh — yang terbaca sebagai
+  vonis tentang pasarnya, bukan sebagai bug. Sekarang keberadaan fractal disimpan di array boolean
+  tersendiri, dan `shved-zones.spec.ts` menguji invarian skala dari 1e-2 sampai 1e-8.
+
+#### Penjaga
+
+- **Minimum `2*pSlow + 11` bar (41 pada default).** Di bawah itu fungsinya mengembalikan array
+  kosong, bukan zona meyakinkan dari tujuh batang lilin. Ini regresi langsung dari bug `22.00x` di
+  fitur meta, yang melaporkan konstanta palsu dengan penuh keyakinan karena mengasumsikan jendela
+  yang belum teramati.
+- **Zona yang batas bawahnya menyentuh nol dibuang, bukan dijepit.** Itu terjadi saat setengah-lebar
+  ATR melampaui seluruh harga token — terukur 2 bar dari 293 pada USEFUL. Pita selebar itu tidak
+  mengatakan "levelnya di sini", dia mengatakan "di mana saja", dan menjepitnya hanya akan membuat
+  persentase jaraknya tampak seperti informasi.
+- **Satu pita tidak pernah jadi sisi beli dan sisi jual sekaligus.** Sisi beli harus seluruhnya di
+  bawah harga, sisi jual seluruhnya di atas. Versi longgarnya menguji `z.low < price` dan
+  `z.high > price`, dan pita yang mengangkangi harga memenuhi keduanya: swordcat di $0,002846 di
+  dalam pita $0,002643–$0,002911 melaporkan "beli di sini, jual di sini" dengan jarak jual **-7,1%**
+  dan reward-to-risk **-3,1:1** — perintah menjual di bawah harga sekarang. Pita yang memuat harga
+  sekarang dilaporkan terpisah sebagai **"di dalam zona"**: itu posisi, bukan target.
+- **Umur token dan jumlah candle selalu ikut di setiap baris**, di web maupun di Telegram. Pita dari
+  45 bar token baru terlihat sama berwibawanya dengan pita dari riwayat seminggu, dan pembaca harus
+  bisa membedakannya.
+
+#### Timeframe dan vonis "beli kapan"
+
+Chart punya tujuh timeframe: **1m, 5m, 15m, 1j, 4j, 12j, 1h**. Bukan daftar bebas — GeckoTerminal
+menerima bucket (`minute`/`hour`/`day`) plus `aggregate` dari daftar tetap, jadi **10m dan 30m tidak
+ada di hulu** dan memintanya mengembalikan error, bukan aproksimasi terdekat. Permintaan di luar
+daftar di-snap ke yang terdekat, dan jawabannya selalu menyebut timeframe mana yang benar-benar
+dipakai (`timeframeMinutes`), supaya chart tidak pernah diam-diam menggambar sesuatu yang lain.
+
+Refresh candle mengikuti timeframe: sekitar setengah bar, dibatasi minimal 30 detik dan maksimal 5
+menit. Chart 1m tetap hidup, chart 1 jam berhenti meminta bar yang mustahil berubah. Harga tetap
+poll 5 detik lewat `DexLimiter` yang cache-nya hitungan detik.
+
+`zone-advice.ts` menerjemahkan posisi harga jadi **satu kata**, dan ini modul murni dengan test
+sendiri karena di sinilah "beli kapan" sebenarnya diputuskan:
+
+| Vonis | Artinya |
+| --- | --- |
+| `IN_BUY_ZONE` | Harga sedang di dalam pita permintaan — ini entry yang dicari chart ini |
+| `NEAR_BUY` | Dalam 2% dari tepi pita beli |
+| `WAIT` | Pita beli masih jauh di bawah |
+| `NEAR_SELL` | Dalam 2% dari pita jual — jangan kejar |
+| `IN_SELL_ZONE` | Harga di dalam pita penawaran — beli di sini berarti bayar harga yang orang lain pakai untuk jual |
+| `NO_PLAN` | Tidak ada lantai di bawah harga. Bukan kegagalan: mengatakannya lebih berguna daripada mengarang level |
+
+Dua hal yang sengaja: berdiri **di dalam** pita menang atas pembacaan jarak mana pun, dan kedekatan
+ke **penawaran diperiksa lebih dulu** daripada ke permintaan — di range sempit keduanya bisa benar
+sekaligus, dan plafon yang menentukan apakah layak bertindak. Ambang 2% itu **bukan knob**: pitanya
+sudah punya lebar sendiri dari ATR, jadi toleransi kedua di atasnya cuma akan jadi cara membuat
+vonis berkata sesuai keinginan pembacanya.
+
+Vonis yang sama dipakai halaman web dan report Telegram, dari fungsi yang sama. Menghitungnya dua
+kali adalah cara dua permukaan berakhir berbeda pendapat soal satu chart, dan yang pertama dibuka
+pembaca jadi yang dipercaya.
+
+#### Timeframe zona dipisah dari timeframe chart
+
+Mengganti timeframe chart dulu diam-diam mengganti **periode yang dianalisis**, bukan cuma cara
+menggambarnya. `DASHBOARD_CANDLE_LIMIT` bernilai 300 di semua timeframe, jadi 1m mencakup 5 jam,
+5m mencakup 25 jam, 1j mencakup 12,5 hari, dan 4j mencakup 50 hari.
+
+Level 5 jam terakhir memang bukan level 12 hari terakhir, jadi pitanya melompat tiap ganti
+timeframe — yang terbaca seperti angkanya berubah sendiri, bukan seperti jendela datanya yang
+berpindah.
+
+Karena itu `?ztf=` memilih timeframe zona secara terpisah, default **60 menit**: pita ditarik dari
+candle 1 jam dan tidak bergerak saat chart di-zoom ke 1m untuk mencari entry. Itu cara level biasa
+dipakai — tarik di timeframe besar, eksekusi di timeframe kecil. Fetch kedua hanya terjadi kalau
+kedua timeframe berbeda, dan kalau GeckoTerminal menolak, perhitungannya jatuh kembali ke candle
+chart, bukan menghilangkan zonanya.
+
+Jawaban selalu membawa `zoneTimeframeMinutes` dan `zoneHistoryHours`, dan footer zona menyebut
+keduanya: "8 zona dari candle 1j, mencakup 12 hari riwayat". Dua angka itu sebelumnya tidak terlihat
+sama sekali, padahal "level 5 jam terakhir" dan "level 12 hari terakhir" tampil identik di layar.
+
+#### Saringan kematangan
+
+Daftar coin dulu tidak menyaring kematangan sama sekali. Sumber feed-nya adalah
+`token-boosts/latest/v1` — token yang **pemiliknya membayar DexScreener untuk promosi**, jadi kolam
+kandidatnya adalah siapa yang beriklan, bukan siapa yang matang. Dan baris dari watchlist bot
+melewati lantai likuiditas sepenuhnya, sehingga daftar dipimpin token umur 0,3 jam dengan likuiditas
+**$0**, sementara `ZoneDigestService` untuk Telegram selalu menerapkan lantai itu — web dan Telegram
+bisa merekomendasikan coin berbeda.
+
+Sekarang kandidat harus lolos tiga hal: likuiditas >= `DASHBOARD_MIN_LIQUIDITY_USD`, umur >=
+`DASHBOARD_MIN_AGE_HOURS`, dan RugCheck tanpa risiko danger bila `DASHBOARD_REQUIRE_RUGCHECK` aktif.
+Umur diperiksa lebih dulu karena gratis sementara RugCheck tidak: tiap penyintas memakan satu request
+di antrean `RiskService`.
+
+Token yang **tidak bisa dijawab** RugCheck dibuang, bukan diloloskan. Inti gerbangnya adalah bahwa
+sesuatu sudah diperiksa, dan meloloskan yang tidak diketahui membuat daftar "bersih" berarti "bersih
+atau belum diperiksa" — kebingungan yang sama yang dicegah tag `BELUM DICEK`.
+
+Lantai ini **tidak** berlaku di tab Watchlist, karena dua tab menjawab pertanyaan berbeda. "Apa yang
+layak dibuat chart" harus membuang kolam tanpa kedalaman; "apa yang sedang diawasi bot" justru harus
+menampilkannya, karena di situlah alasan tolaknya terbaca. Jumlah yang disaring ikut di jawaban dan
+tampil di bawah daftar, sebab daftar pendek tanpa penjelasan terbaca sebagai "tidak ada yang
+terjadi", padahal belasan kandidat diperiksa lalu ditolak.
+
+#### Tag risiko dan peluang
+
+`risk-tags.ts` memberi label pada token, dan dua aturan menentukan seluruh isinya.
+
+**Klaim keamanan hanya dibuat dari sumber keamanan.** Tag rug datang dari report RugCheck sendiri,
+dinilai oleh fungsi yang sudah dipakai jalur beli — `selectBlockingDangerRisks`, `isMarketLpSafe`,
+`DEFAULT_MAX_NORMALISED_RISK_SCORE` — jadi dashboard dan bot tidak bisa sampai pada kesimpulan
+berlawanan tentang token yang sama. Tidak ada tag aman yang disimpulkan dari pergerakan harga, karena
+pergerakan harga tidak bisa melihat mint authority.
+
+**Diam tidak pernah dibaca sebagai bersih.** Kalau RugCheck tidak menjawab, tokennya diberi tag
+`BELUM DICEK`, bukan dibiarkan polos. Peringatan yang absen dan pemeriksaan yang lulus terlihat
+identik di layar, dan itu kebingungan termahal yang bisa ditimbulkan halaman ini. `POTENSIAL` butuh
+verdict `CLEAR`, bukan sekadar tidak adanya peringatan, dan tidak pernah muncul berdampingan dengan
+tag merah — label hijau di sebelah label merah adalah cara pembaca akhirnya mempercayai yang hijau.
+
+| Tag | Dasarnya |
+| --- | --- |
+| `POTENSIAL` | untung:rugi >= 2, likuiditas >= $25k, >= 50% beli, umur >= 6 jam, riwayat tidak tipis, RugCheck bersih |
+| `RISIKO RUG` | Risiko level danger dari RugCheck, kecuali yang sudah ditegakkan bot sendiri |
+| `LP TIDAK TERKUNCI` | Tidak ada satu pun market dengan LP terkunci >= 90% |
+| `SKOR RISIKO TINGGI` | `score_normalised` di atas 60 |
+| `BELUM DICEK` | RugCheck tidak menjawab — **bukan** berarti aman |
+| `RAMAI` / `SEPI` | Volume 24 jam dibanding likuiditas, bukan dolar mentah |
+| `LIKUIDITAS TIPIS` | Di bawah $15k |
+| `MASIH BARU` | Umur di bawah 24 jam |
+| `PENJUAL DOMINAN` | Beli di bawah 40% dari trade 1 jam |
+| `DITOLAK BOT` | Alasan tolak terakhir dari watchlist. Informasi, bukan bahaya |
+
+RugCheck dipanggil lewat `RiskService` dengan antrean dan cache sendiri (10 menit, 1 menit untuk
+kegagalan). Lane terpisah karena alasan yang sama seperti `GeckoLimiter`: analyzer memanggil RugCheck
+di jalur beli, dan pengunjung yang klik-klik coin tidak boleh menaruh request di depan keputusan
+membelanjakan uang.
+
+#### Rencana trade
+
+`trade-plans.ts` memasangkan tiap pita beli dengan pita jual di atasnya. Chart sudah menemukan lebih
+dari satu zona di tiap sisi, dan menampilkan hanya pasangan terdekat membuang sisa petanya.
+
+Angka utamanya sengaja yang **paling pesimis**: dari puncak pita beli ke dasar pita jual — versi
+terburuk dari trade yang masih bisa disebut berhasil, yaitu beli di harga paling tidak menguntungkan
+dalam zona dan jual di harga pertama tempat penawaran muncul. Versi optimisnya ikut di sebelahnya,
+bukan menggantikannya.
+
+Rencana diurutkan berdasarkan **seberapa terjangkau entry-nya**, bukan seberapa besar hasilnya. Entry
+40% di bawah harga dengan target gemilang itu bookmark, bukan rencana, dan mengurutkan berdasarkan
+hasil akan menaruhnya di atas yang benar-benar bisa ditindaklanjuti hari ini. Rencana dengan untung
+di bawah 2% dibuang: satu round trip memakan sekitar 0,0011 SOL sebelum slippage, jadi itu rencana
+untuk membayar fee.
+
+#### Prediksi posisi berikutnya
+
+`next-move.ts` membaca empat sinyal yang boleh saling bertentangan, dan pertentangannya justru
+intinya: **confidence di sini adalah jumlah sinyal yang sepakat**, bukan penilaian di atasnya. Tiga
+dari tiga kuat, dua dari tiga sedang, sisanya lemah, dan suara imbang menghasilkan `FLAT` — bukan
+tebakan ke arah mayoritas yang terdengar yakin.
+
+| Sinyal | Isinya |
+| --- | --- |
+| Momentum | Perubahan 10 bar terakhir |
+| Posisi antar-pita | Pita mana yang lebih dekat dari harga sekarang |
+| Tekanan trade | Porsi beli dari trade 1 jam |
+| Pita yang ditempati | Berdiri di permintaan menunjuk naik, di penawaran menunjuk turun |
+
+Perkiraan waktu memakai **rata-rata pergerakan absolut per bar**, bukan pergerakan bersih: pasar yang
+berayun 5% ke dua arah lalu berakhir datar itu cepat, dan ukuran berbasis net akan menyebutnya diam
+lalu melaporkan keabadian. Prediksi dihitung dari seri yang sama dengan pitanya, bukan seri chart —
+kalau zona dikunci di timeframe lebih besar, momentum yang menilainya harus diukur di timeframe itu
+juga.
+
+**Belum punya rekam jejak, dan halaman mengatakannya.** `sol-prediction.ts` baru boleh mengirim alert
+setelah mengalahkan baseline `baselineAlwaysFlat` dan `baselinePersistence`; yang ini belum pernah
+diadu dengan apa pun. Sampai ada penilaian, ini pendapat terstruktur dan tidak boleh ditampilkan
+lebih dari itu.
+
+#### Catatan tampilan
+
+- **Zona digambar sebagai area, bukan garis.** Zona supply adalah rentang harga, dan dua garis tipis
+  memaksa pembaca menyusun ulang pita yang sudah dihitung indikatornya. lightweight-charts 4.1 tidak
+  punya primitif kotak, jadi dipakai overlay DOM di atas `priceToCoordinate`.
+- **Candle terakhir bergerak mengikuti harga live.** Tanpa ini chart hanya berubah saat `loadZones`
+  jalan — 2,5 menit di timeframe 5m, dan cache candle 60 detik membuat poll di dalamnya
+  mengembalikan data identik, jadi harga di teks berdetak sementara lilinnya diam. Batas sebenarnya
+  ada di hulu: feed DexScreener hanya bergerak sekitar sekali tiap 26 detik.
+- **Sumbu harga mengikuti besaran harga.** Default lightweight-charts 2 desimal, yang membuat setiap
+  label jadi `0.00` untuk token di $0,000126 — grafik yang sumbunya nol semua terlihat seperti bug
+  chart padahal datanya benar.
+- **Waktu memakai zona waktu browser**, bukan UTC bawaan dan bukan WIB yang di-hardcode.
+- **Tab Watchlist** menampilkan coin yang sedang diawasi bot beserta alasan tolak terakhirnya.
+  Hitungan di tab adalah jumlah baris watchlist, yang bisa lebih besar dari daftar coin saat
+  DexScreener belum punya pair-nya — daftar kosong dengan hitungan bukan nol berarti "bot mengawasi
+  sesuatu yang belum bisa dibuat chart", bukan "bot tidak mengawasi apa pun".
+- **State ada di URL** (`?mint=&tf=&ztf=&tab=`), dipasang dengan `replaceState` supaya tombol back
+  tetap keluar halaman dan tidak terjebak menelusuri tiap klik timeframe. Refresh dan bookmark
+  memulihkan coin yang sama; `localStorage` hanya cadangan kalau URL-nya polos.
+- **Tombol salin mint** punya jalur cadangan `execCommand`, karena `navigator.clipboard` hanya ada di
+  secure context dan dashboard ini sering dibuka lewat `http://` di IP LAN.
+- Frontend-nya tiga berkas statis di `public/` tanpa build step: `index.html`, `style.css`, `app.js`.
+  Tanpa React dan tanpa Tailwind secara sengaja — repo ini tidak punya pipeline frontend sama sekali,
+  dan menambah build step berarti deploy CapRover harus ikut menjalankannya.
+
+Report Telegram mengurutkan coin berdasarkan **reward-to-risk** — jarak ke pita jual dibagi jarak ke
+pita beli — karena itu satu-satunya angka yang membandingkan dua coin. Pita 1% di bawah harga dengan
+ruang 20% di atas adalah proposisi yang sama sekali berbeda dari pita 15% di bawah dengan 2% di
+atas, dan keduanya terlihat identik kalau yang dicetak hanya tepi pitanya.
+
+Digest dibatasi **6 coin** (hardcoded, bukan knob: itu konsekuensi rate limit, bukan preferensi).
+Dengan jeda serial 2,5 detik, satu report memakan waktu sekitar 15 detik.
+
+**`config.json` menang atas environment variable.** `ConfigModule.forRoot` memuat
+`loadRuntimeConfig` lewat `load:`, dan untuk setiap key yang ada di `config.json` nilai env
+**diabaikan**. Jadi `ENABLE_DASHBOARD=false npx nest start` tidak mematikan apa pun — knob-nya harus
+diubah di `config.json`. Ini berlaku untuk semua knob, bukan hanya milik dashboard: saat menjalankan
+lokal, hanya key yang **tidak** ada di `config.json` (`PORT`, `API_SECRET_KEY`,
+`TELEGRAM_BOT_TOKEN`, `DATABASE_URL`, `PUMPPORTAL_API_KEY`) yang benar-benar bisa ditimpa dari env.
+
+| Knob | Nilai | Keterangan |
+| --- | --- | --- |
+| `ENABLE_DASHBOARD` | true | Menyajikan `public/` di `/dashboard`. Saat `false`, ketiga route API membalas **404** — flag ini menamai seluruh fitur, dan dashboard yang "mati" tapi API-nya masih memaparkan watchlist adalah kejutan yang justru ingin dicegah kill switch |
+| `DASHBOARD_CANDLE_TF` | 5 | Menit per candle, dipakai sebagai default saat `?tf=` tidak diberikan. Hanya 1, 5, 15, 60, 240, 720, 1440 yang ada di hulu; selain itu di-snap ke yang terdekat |
+| `DASHBOARD_CANDLE_LIMIT` | 300 | Jumlah candle yang diambil, 50–1000 |
+| `DASHBOARD_CACHE_TTL_MS` | 60000 | Cache per (mint, timeframe). Di bawah 10000 cache berhenti melindungi rate limit |
+| `DASHBOARD_MIN_LIQUIDITY_USD` | 25000 | Lantai likuiditas untuk kandidat dari feed |
+| `GECKO_MIN_DELAY_MS` | 2500 | Jeda antar panggilan GeckoTerminal. Di bawah 2000 memicu 429 |
+| `SHVED_FUZZ_FACTOR` | 0.75 | Lebar pita sebagai kelipatan ATR/2 |
+| `SHVED_FAST_FACTOR` | 3 | Periode fractal cepat, `floor(f)*2 + floor(floor(f)/2)` → 7 |
+| `SHVED_SLOW_FACTOR` | 6 | Periode fractal lambat → 15. Harus di atas fast; fractal lambat yang mengonfirmasi yang cepat |
+| `ENABLE_ZONE_REPORT` | true | Report zona terjadwal ke Telegram |
+| `DASHBOARD_MIN_AGE_HOURS` | 24 | Umur minimal pair untuk masuk daftar. 0 mematikan saringan umur. Tidak berlaku di tab Watchlist |
+| `DASHBOARD_REQUIRE_RUGCHECK` | true | Wajib lolos RugCheck tanpa risiko danger. Token yang tidak bisa dicek **dibuang**, bukan diloloskan |
+| `ZONE_REPORT_HOURS` | 6 | Interval report, digerbangi di dalam fungsi karena `@Cron` dievaluasi sebelum ConfigModule memuat apa pun |
+
 ### Scanner, watchlist, dan retry
 
 | Knob | Nilai | Keterangan |
