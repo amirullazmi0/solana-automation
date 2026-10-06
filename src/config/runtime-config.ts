@@ -410,6 +410,27 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     if (dashboardMinAgeHours < 0) {
         errors.push('DASHBOARD_MIN_AGE_HOURS must be >= 0 (0 disables the age floor).');
     }
+    // Validated at boot as well as at use. Telegram rejects the WHOLE message with a 400 when one
+    // button url is malformed, so a typo here would silently delete every token alert rather than
+    // produce one dead button -- and the alerts are how the bot is observed at all.
+    const dashboardPublicUrl = String(
+        (config as ConfigReader).get?.('DASHBOARD_PUBLIC_URL', '') ??
+            (config as RuntimeConfig).DASHBOARD_PUBLIC_URL ??
+            '',
+    ).trim();
+    if (dashboardPublicUrl) {
+        let parsed: URL | undefined;
+        try {
+            parsed = new URL(dashboardPublicUrl);
+        } catch {
+            parsed = undefined;
+        }
+        if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+            errors.push(
+                'DASHBOARD_PUBLIC_URL must be a full http or https URL, e.g. https://host.example.com.',
+            );
+        }
+    }
 
     const spendableCapital = totalCapital - reserveAmount;
     const requiredCapital = positionSizeUsd * totalSlots;

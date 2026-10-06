@@ -1144,6 +1144,22 @@ Vonis yang sama dipakai halaman web dan report Telegram, dari fungsi yang sama. 
 kali adalah cara dua permukaan berakhir berbeda pendapat soal satu chart, dan yang pertama dibuka
 pembaca jadi yang dipercaya.
 
+#### Tombol dashboard di alert Telegram
+
+Setiap alert token — radar watchlist, input mint manual, sinyal beli, dan alert posisi — membawa
+tombol **Zone Dashboard** yang membuka token itu langsung di halaman zona, memakai `?mint=` yang
+sama dengan state URL halamannya.
+
+Tombolnya **tidak muncul** kalau `DASHBOARD_PUBLIC_URL` kosong atau tidak bisa diurai sebagai http
+atau https, dan itu disengaja. Telegram memvalidasi tiap `url` yang diberikan dan menolak **seluruh
+pesan** dengan 400 kalau satu saja rusak — jadi base yang setengah jadi bukan menghasilkan satu
+tombol mati, melainkan **menghapus diam-diam semua alert token** yang dikirim bot ini. Itu mode
+kegagalan yang sama dengan underscore tidak ter-escape di `/status`. Karena itu URL-nya divalidasi
+dua kali: saat boot oleh `validateConfig`, dan lagi saat tiap tombol dibangun.
+
+Catatan pemakaian: halaman dashboard tetap meminta `x-api-key` sekali per browser. Buka tombolnya di
+HP, tempel key sekali, dan halaman mengingatnya di localStorage untuk seterusnya.
+
 #### Timeframe zona dipisah dari timeframe chart
 
 Mengganti timeframe chart dulu diam-diam mengganti **periode yang dianalisis**, bukan cuma cara
@@ -1318,6 +1334,7 @@ lokal, hanya key yang **tidak** ada di `config.json` (`PORT`, `API_SECRET_KEY`,
 | `ENABLE_ZONE_REPORT` | true | Report zona terjadwal ke Telegram |
 | `DASHBOARD_MIN_AGE_HOURS` | 24 | Umur minimal pair untuk masuk daftar. 0 mematikan saringan umur. Tidak berlaku di tab Watchlist |
 | `DASHBOARD_REQUIRE_RUGCHECK` | true | Wajib lolos RugCheck tanpa risiko danger. Token yang tidak bisa dicek **dibuang**, bukan diloloskan |
+| `DASHBOARD_PUBLIC_URL` | `""` | Alamat publik app, misal `https://msoulmation.apps.arulize.com`. Mengaktifkan tombol **Zone Dashboard** di alert token Telegram. Kosong atau tidak valid berarti tombolnya tidak muncul sama sekali |
 | `ZONE_REPORT_HOURS` | 6 | Interval report, digerbangi di dalam fungsi karena `@Cron` dievaluasi sebelum ConfigModule memuat apa pun |
 
 ### Scanner, watchlist, dan retry

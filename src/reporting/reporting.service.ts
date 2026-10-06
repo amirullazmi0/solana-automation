@@ -421,6 +421,7 @@ export class ReportingService implements OnModuleInit {
                     { text: 'RugCheck', url: `https://rugcheck.xyz/tokens/${item.tokenMint}` },
                     { text: 'Solscan', url: `https://solscan.io/token/${item.tokenMint}` },
                 ],
+                ...this.dashboardRow(item.tokenMint),
             ];
 
             await this.sendMessage(
@@ -451,6 +452,7 @@ export class ReportingService implements OnModuleInit {
                 { text: 'DexScreener', url: `https://dexscreener.com/solana/${mint}` },
             ],
             [{ text: 'RugCheck', url: `https://rugcheck.xyz/tokens/${mint}` }],
+            ...this.dashboardRow(mint),
         ];
 
         await this.sendMessage(
@@ -1059,6 +1061,44 @@ export class ReportingService implements OnModuleInit {
      * silently kills the whole status report. That is exactly how /status came to return nothing
      * in production while every other command answered normally.
      */
+    /**
+     * A button row that opens one token on the zone dashboard, or nothing at all.
+     *
+     * Nothing is the important case. Telegram validates every `url` it is handed and rejects the
+     * WHOLE message with a 400 when one is malformed, so a half-configured base would not produce a
+     * dead button -- it would silently delete every token alert this bot sends. That is the same
+     * failure mode as the unescaped underscore in /status, and it cost a day to find the first time.
+     *
+     * So the base is required to parse as http or https before any button is built, and an unset or
+     * unusable `DASHBOARD_PUBLIC_URL` simply means the alerts look exactly as they did before.
+     */
+    private dashboardRow(tokenMint: string): TelegramBot.InlineKeyboardButton[][] {
+        const raw = String(this.configService.get('DASHBOARD_PUBLIC_URL', '')).trim();
+        if (!raw) return [];
+
+        let base: URL;
+        try {
+            base = new URL(raw);
+        } catch {
+            this.logger.warn(`[Dashboard] DASHBOARD_PUBLIC_URL is not a valid URL: ${raw}.`);
+            return [];
+        }
+        if (base.protocol !== 'http:' && base.protocol !== 'https:') {
+            this.logger.warn(`[Dashboard] DASHBOARD_PUBLIC_URL must be http or https: ${raw}.`);
+            return [];
+        }
+
+        const root = `${base.origin}${base.pathname.replace(/\/+$/, '')}`;
+        return [
+            [
+                {
+                    text: '\u{1F4C8} Zone Dashboard',
+                    url: `${root}/dashboard/?mint=${encodeURIComponent(tokenMint)}`,
+                },
+            ],
+        ];
+    }
+
     private stripMarkdown(value: string | null | undefined): string {
         return String(value ?? '')
             .replace(/[_*`[\]()~>#+=|{}.!-]/g, ' ')
@@ -1243,7 +1283,9 @@ export class ReportingService implements OnModuleInit {
 
         const options: TelegramBot.SendMessageOptions = {
             reply_markup: {
-                inline_keyboard: [row1, row2, row3].filter((r) => r.length > 0),
+                inline_keyboard: [row1, row2, row3, ...this.dashboardRow(tokenMint)].filter(
+                    (r) => r.length > 0,
+                ),
             },
         };
 
@@ -1448,6 +1490,7 @@ export class ReportingService implements OnModuleInit {
                 { text: 'RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` },
                 { text: 'Solscan', url: `https://solscan.io/token/${tokenMint}` },
             ],
+            ...this.dashboardRow(tokenMint),
         ].filter((row) => row.length > 0);
 
         await this.sendMessage(
@@ -1851,6 +1894,7 @@ export class ReportingService implements OnModuleInit {
                 { text: '📊 DexScreener', url: `https://dexscreener.com/solana/${tokenMint}` },
             ],
             [{ text: '🛡️ RugCheck', url: `https://rugcheck.xyz/tokens/${tokenMint}` }],
+            ...this.dashboardRow(tokenMint),
         ];
 
         await this.sendMessage(message, {

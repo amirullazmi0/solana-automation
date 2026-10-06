@@ -194,3 +194,55 @@ describe('ReportingService.sendPriceMissAlert', () => {
         expect(message).not.toContain('No live trade was opened');
     });
 });
+
+describe('ReportingService.dashboardRow', () => {
+    /** Reaches the private helper directly: it is the piece that can break every token alert. */
+    function rowFor(configured: string | undefined, mint = 'So11111111111111111111111111111111111111112') {
+        const service = Object.create(ReportingService.prototype) as ReportingService;
+        Object.assign(service, {
+            configService: {
+                get: (_key: string, fallback?: unknown) => (configured === undefined ? fallback : configured),
+            },
+            logger: { warn: jest.fn(), error: jest.fn(), log: jest.fn() },
+        });
+        return (service as unknown as { dashboardRow(m: string): unknown[] }).dashboardRow(mint);
+    }
+
+    it('builds a button pointing at the mint on the dashboard', () => {
+        const row = rowFor('https://msoulmation.apps.arulize.com') as Array<Array<{ text: string; url: string }>>;
+        expect(row).toHaveLength(1);
+        expect(row[0][0].url).toBe(
+            'https://msoulmation.apps.arulize.com/dashboard/?mint=So11111111111111111111111111111111111111112',
+        );
+    });
+
+    it('does not double the slash when the base already ends in one', () => {
+        const row = rowFor('https://example.com/') as Array<Array<{ url: string }>>;
+        expect(row[0][0].url).toContain('https://example.com/dashboard/?mint=');
+    });
+
+    // Telegram validates every url it is handed and rejects the WHOLE message with a 400 when one
+    // is malformed. A half-configured base would therefore not produce a dead button, it would
+    // silently delete every token alert this bot sends -- the same failure mode as the unescaped
+    // underscore in /status.
+    it('emits nothing rather than a broken url', () => {
+        expect(rowFor(undefined)).toEqual([]);
+        expect(rowFor('')).toEqual([]);
+        expect(rowFor('   ')).toEqual([]);
+        expect(rowFor('not a url')).toEqual([]);
+        expect(rowFor('msoulmation.apps.arulize.com')).toEqual([]);
+    });
+
+    // A javascript: or file: base parses fine and would ship a button Telegram either rejects or,
+    // worse, renders.
+    it('refuses a scheme that is not http or https', () => {
+        expect(rowFor('javascript:alert(1)')).toEqual([]);
+        expect(rowFor('file:///etc/passwd')).toEqual([]);
+        expect(rowFor('ftp://example.com')).toEqual([]);
+    });
+
+    it('escapes the mint rather than pasting it into the query raw', () => {
+        const row = rowFor('https://example.com', 'a b&c') as Array<Array<{ url: string }>>;
+        expect(row[0][0].url).toContain('mint=a%20b%26c');
+    });
+});
