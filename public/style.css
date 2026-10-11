@@ -28,6 +28,7 @@
 
 body {
   margin: 0;
+  overflow-x: clip;
   background: var(--bg);
   background-image:
     radial-gradient(1100px 500px at 12% -10%, #11202b 0%, transparent 60%),
@@ -85,7 +86,7 @@ button:hover { border-color: var(--dim); background: var(--panel-hi); }
 #tfbar {
   display: flex; gap: 6px; overflow-x: auto;
   scrollbar-width: none; -webkit-overflow-scrolling: touch;
-  margin: 0 calc(var(--gutter) * -1); padding: 2px var(--gutter);
+  min-width: 0; padding: 2px 0;
 }
 #tfbar::-webkit-scrollbar { display: none; }
 .tf {
@@ -95,7 +96,10 @@ button:hover { border-color: var(--dim); background: var(--panel-hi); }
 .tf.on { border-color: transparent; color: #04211c; background: var(--accent); font-weight: 650; }
 .tf.on:hover { background: var(--accent); }
 
-.tfrow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.tfrow {
+  display: grid; gap: 8px; min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
 .ztf {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; color: var(--muted); white-space: nowrap;
@@ -109,11 +113,12 @@ button:hover { border-color: var(--dim); background: var(--panel-hi); }
 
 /* ---------------- layout ---------------- */
 main {
-  display: grid; gap: 14px;
+  display: grid; gap: 14px; min-width: 0;
   padding: 14px var(--gutter) 40px;
   max-width: 1500px; margin: 0 auto;
 }
 .panel {
+  min-width: 0;
   background: linear-gradient(180deg, var(--panel) 0%, var(--bg-soft) 100%);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius); padding: 14px;
@@ -308,7 +313,8 @@ main {
   background: var(--line-soft); border: 1px solid var(--line-soft);
   border-radius: 10px; overflow: hidden;
 }
-.stat { background: var(--bg-soft); padding: 9px 11px; }
+.stat { background: var(--bg-soft); padding: 9px 11px; min-width: 0; }
+.stat-v { overflow-wrap: anywhere; }
 .stat-k {
   color: var(--dim); font-size: 10px; font-weight: 650;
   letter-spacing: .07em; text-transform: uppercase;
@@ -333,7 +339,7 @@ main {
 .zone.sell { border-left-color: var(--sell); }
 .zone.inside { border-left-color: var(--warn); }
 .zone-label { font-weight: 650; font-size: 13px; letter-spacing: .02em; }
-.zone-range { font-family: var(--mono); font-size: 13px; }
+.zone-range { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
 .zone.buy .zone-label { color: var(--buy); }
 .zone.sell .zone-label { color: var(--sell); }
 .zone.inside .zone-label { color: var(--warn); }
@@ -341,6 +347,24 @@ main {
 .note { color: var(--warn); font-size: 12.5px; margin-top: 10px; }
 .muted { color: var(--muted); }
 .footnote { color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+
+/* ---------------- layar sempit ---------------- */
+@media (max-width: 420px) {
+  :root { --gutter: 12px; }
+  .controls { display: grid; grid-template-columns: 1fr 1fr; }
+  .controls input { grid-column: 1 / -1; }
+  #chart { height: clamp(240px, 52vh, 380px); }
+  .big { font-size: 22px; }
+  #head { gap: 6px 12px; }
+  .coin { width: 150px; }
+  /* Mint pendek pun bisa mendorong baris; dibiarkan membungkus sendiri. */
+  .mintbox { flex-wrap: wrap; }
+}
+
+/* Dua kolom baru layak mulai di sini; di bawahnya sel statistik jadi terlalu sempit untuk angka. */
+@media (max-width: 359px) {
+  #stats { grid-template-columns: minmax(0, 1fr); }
+}
 
 /* ---------------- wide screens ---------------- */
 @media (min-width: 560px) {
@@ -354,7 +378,7 @@ main {
   /* With a column of its own the shelf becomes a list again, which reads better vertically. */
   #coins { display: grid; gap: 8px; overflow: visible; max-height: 70vh; overflow-y: auto; }
   .coin { width: auto; }
-  #tfbar { margin: 0; padding: 0; }
+  .tfrow { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
   #stats { grid-template-columns: repeat(4, 1fr); }
 }
 @media (min-width: 1200px) {

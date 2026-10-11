@@ -2055,7 +2055,10 @@ export class ReportingService implements OnModuleInit {
      * looks exactly as authoritative as one drawn from a week of history, and the reader has to be
      * able to tell them apart.
      */
-    private async buildZoneReport(): Promise<string> {
+    private async buildZoneReport(): Promise<{
+        message: string;
+        options: TelegramBot.SendMessageOptions;
+    }> {
         const digest = await this.moduleRef.get(ZoneDigestService, { strict: false }).build();
 
         if (digest.entries.length === 0) {
@@ -2064,10 +2067,12 @@ export class ReportingService implements OnModuleInit {
                       .map((s) => `${this.stripMarkdown(s.symbol)} (${this.stripMarkdown(s.why)})`)
                       .join(', ')
                 : 'no candidate cleared the liquidity floor';
-            return (
-                '📊 *Supply & Demand:* no coin has usable bands right now.\n' +
-                `_Checked ${digest.scanned}: ${why}._`
-            );
+            return {
+                message:
+                    '📊 *Supply & Demand:* no coin has usable bands right now.\n' +
+                    `_Checked ${digest.scanned}: ${why}._`,
+                options: {},
+            };
         }
 
         const lines = digest.entries.slice(0, 6).map((entry, index) => {
@@ -2121,7 +2126,8 @@ export class ReportingService implements OnModuleInit {
                 `    ${rr} · $${this.formatZonePrice(entry.price)}\n` +
                 `    🟢 buy ${buy}\n` +
                 `    🔴 sell ${sell}${inside}\n` +
-                `    ${entry.candleCount} candles · ${age} old · ${liq} liq · ${entry.source}`
+                `    ${entry.candleCount} candles · ${age} old · ${liq} liq · ${entry.source}\n` +
+                `    \`${entry.mint}\``
             );
         });
 
@@ -2130,14 +2136,34 @@ export class ReportingService implements OnModuleInit {
               `${digest.skipped.map((s) => this.stripMarkdown(s.symbol)).join(', ')}._`
             : '';
 
-        return (
-            '📊 *Supply & Demand Zones*\n' +
-            '_Buy near the green band, sell near the red one._\n\n' +
-            lines.join('\n\n') +
-            skipped +
-            '\n\n_View only -- the bot does not trade these. Bands come from 5m candles and need at ' +
-            'least 41 of them, so a very new token shows nothing rather than a guess._'
-        );
+        // One button per coin, numbered to match the rows. Telegram squeezes a row of long labels
+        // into ellipses, so three per row keeps every symbol readable on a phone.
+        const buttons: TelegramBot.InlineKeyboardButton[][] = [];
+        let row: TelegramBot.InlineKeyboardButton[] = [];
+        digest.entries.slice(0, 6).forEach((entry, index) => {
+            const link = this.dashboardRow(entry.mint)[0]?.[0];
+            if (!link) return;
+            row.push({
+                text: `${index + 1}. ${this.stripMarkdown(entry.symbol) || 'UNKNOWN'}`,
+                url: link.url as string,
+            });
+            if (row.length === 3) {
+                buttons.push(row);
+                row = [];
+            }
+        });
+        if (row.length > 0) buttons.push(row);
+
+        return {
+            message:
+                '📊 *Supply & Demand Zones*\n' +
+                '_Buy near the green band, sell near the red one._\n\n' +
+                lines.join('\n\n') +
+                skipped +
+                '\n\n_View only -- the bot does not trade these. Bands come from 5m candles and need ' +
+                'at least 41 of them, so a very new token shows nothing rather than a guess._',
+            options: buttons.length > 0 ? { reply_markup: { inline_keyboard: buttons } } : {},
+        };
     }
 
     private async handleZonesRequest(targetChatId?: string) {
@@ -2149,7 +2175,8 @@ export class ReportingService implements OnModuleInit {
             0,
             targetChatId,
         );
-        await this.sendMessage(await this.buildZoneReport(), {}, 0, targetChatId);
+        const report = await this.buildZoneReport();
+        await this.sendMessage(report.message, report.options, 0, targetChatId);
     }
 
     /**
@@ -2176,7 +2203,8 @@ export class ReportingService implements OnModuleInit {
             );
             if (new Date().getUTCHours() % everyHours !== 0) return;
 
-            await this.sendMessage(await this.buildZoneReport());
+            const report = await this.buildZoneReport();
+            await this.sendMessage(report.message, report.options);
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             this.logger.error(`Zone report failed: ${msg}`);
