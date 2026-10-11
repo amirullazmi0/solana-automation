@@ -246,5 +246,8 @@
     "ZONE_REPORT_HOURS": 6,
     "DASHBOARD_MIN_AGE_HOURS": 24,
     "DASHBOARD_REQUIRE_RUGCHECK": true,
+    "ENABLE_PAPER_TRADING": true,
+    "PAPER_MAX_HOLD_MINUTES": 240,
+    "PAPER_ROUND_TRIP_FEE_SOL": 0.0011,
     "DASHBOARD_PUBLIC_URL": "https://msoulmation.apps.arulize.com/"
 }

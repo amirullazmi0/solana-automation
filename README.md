@@ -1034,6 +1034,77 @@ dynamic hold zone, dan seluruh guard juga tetap memakai basis lama.
 | `FAST_STOP_PRICE_MAX_AGE_MS` | 10000 | Di atas ini kuotasi dianggap basi dan diabaikan |
 | `ENABLE_AI_CUTLOSS_DEFENSE` | **false** | Dimatikan eksplisit. Produksi: 4 trade, **-$4,13**, nol menang |
 
+### Paper trading: setiap keputusan meninggalkan bukti
+
+Sebelum ini, keputusan beli menghasilkan satu alert Telegram lalu selesai. Tidak ada yang pernah
+tahu apa yang terjadi sesudahnya — dan `meta-trend`, satu-satunya bagian bot ini yang belajar dari
+P&L nyata, tidak punya data sama sekali selama trading nyata menganggur.
+
+Sekarang setiap sinyal beli menulis baris `Trade` dengan `mode: 'PAPER'`, **lepas dari `dryRun`**:
+
+| `dryRun` | Yang tercatat |
+| --- | --- |
+| `true` | Hanya baris PAPER |
+| `false` | Trade LIVE **dan** baris PAPER dari keputusan yang sama |
+
+Yang kedua bukan duplikasi sia-sia: selisih antara fill nyata dan fill simulasi adalah **pengukuran
+langsung slippage dan fee**, bukan asumsi tentang keduanya.
+
+#### Simulasi harus salah ke arah yang merugikan, bukan yang menyenangkan
+
+Dua hal menentukan apakah itu berlaku, dan keduanya dimodelkan di `paper-trade.ts`:
+
+- **Fee ditagih di kedua kaki.** Satu round trip ~0,0011 SOL — **2,6%** dari posisi $5 dan **6,6%**
+  dari posisi $2. Simulasi yang melewatkannya mengubah strategi merugi jadi terlihat menang, tepat
+  di ukuran posisi yang dipakai bot ini. `PAPER_ROUND_TRIP_FEE_SOL` divalidasi harus > 0 karena nol
+  adalah satu-satunya setelan yang membuat simulasi berbohong ke arah menyenangkan.
+- **Slippage dibebankan ke pembeli.** Fill di harga quote adalah fill yang tidak pernah didapat
+  siapa pun, dan selisihnya paling lebar justru di token cepat yang memang diseleksi gerbang momentum.
+
+Urutan exit **mencerminkan monitor asli persis**: panic −55% → stop loss → take profit → trailing.
+Mengevaluasi take profit sebelum stop loss akan mengukur strategi yang berbeda dari yang berjalan.
+
+Ambang dibandingkan dengan epsilon, dan itu memperbaiki bug nyata: kenaikan tepat 20% menghitung
+sebagai **19,999999999999996** dalam floating point, sehingga take profit yang disetel 20% tidak
+menyala di 20%. Dia akan menyala di tick berikutnya kalau harga terus naik, dan **tidak pernah**
+kalau harga berbalik tepat di target — persis saat exit itu paling penting.
+
+#### Kenapa ini aman
+
+Baris PAPER menggambarkan token yang tidak pernah dibeli. Kalau jalur jual mengambilnya, bot akan
+mencoba menjual posisi yang tidak ada.
+
+Itu tidak mungkin terjadi secara **struktural**, bukan karena janji. `PaperTradeService` tidak punya
+referensi ke `TradeService`, wallet, Jupiter, atau penandatanganan apa pun. Dan setiap jalur yang
+menjual sudah memfilter `mode: 'LIVE'`:
+
+```
+price-monitor.service.ts:474   where: { status: 'OPEN', mode: 'LIVE' }
+trade.service.ts:909, :919     where: { status: 'OPEN', mode: 'LIVE' }
+reporting.service.ts:1103      where: { status: 'OPEN', mode: 'LIVE' }
+```
+
+Filter itu panjangnya satu kata dan gampang terhapus saat merapikan hal lain, jadi
+`paper-trade.service.spec.ts` menegaskannya terhadap teks sumber — termasuk bahwa service-nya tidak
+pernah menyentuh jalur uang, dan `slotNumber: 0` supaya simulasi tidak pernah memblokir trade nyata.
+Slot itu modal; simulasi yang memakannya membalikkan tujuannya sendiri.
+
+P&L paper lewat `computeNetProfitUsd` yang sama dengan trade nyata, bukan definisi kedua yang bisa
+menyimpang.
+
+#### Yang tidak bisa diberikan simulasi ini
+
+Dia **tidak tahu apakah swap-nya akan terisi**. Entry paper selalu berhasil; entry nyata ditolak
+kalau harga bergerak melewati toleransi slippage. Jadi angkanya berguna untuk **arah dan
+perbandingan** — meta mana yang merugi, exit mana yang bekerja, apakah target 20% terlalu jauh —
+bukan sebagai dolar yang seharusnya didapat.
+
+| Knob | Nilai | Keterangan |
+| --- | --- | --- |
+| `ENABLE_PAPER_TRADING` | true | Mencatat dan menyelesaikan trade simulasi |
+| `PAPER_MAX_HOLD_MINUTES` | 240 | Posisi yang tidak mencapai ambang apa pun ditutup. Nol dilarang: posisi terbuka tidak menyumbang apa pun ke rata-rata trade tertutup |
+| `PAPER_ROUND_TRIP_FEE_SOL` | 0.0011 | Fee round trip. Harus > 0 |
+
 ### Zona supply & demand (dashboard + report)
 
 Port dari Pine Script **Shved Supply and Demand v1.5** ke `src/dashboard/shved-zones.ts`, sebagai

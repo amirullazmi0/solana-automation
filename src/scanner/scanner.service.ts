@@ -6,6 +6,7 @@ import * as WebSocket from 'ws';
 import * as https from 'https';
 import { AnalyzerService } from '../analyzer/analyzer.service';
 import { MetaTrendService } from '../meta/meta-trend.service';
+import { PaperTradeService } from '../trade/paper-trade.service';
 import { EstablishedAnalyzerService } from '../analyzer/established-analyzer.service';
 import { TradeService } from '../trade/trade.service';
 import { ReportingService } from '../reporting/reporting.service';
@@ -774,6 +775,57 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
         }
     }
 
+    /**
+     * Writes a simulated entry for a buy decision.
+     *
+     * Never throws and never blocks. This sits directly on the buy path, and a simulation that can
+     * break a real trade is worse than having no simulation at all.
+     */
+    private async recordPaperTrade(
+        tokenMint: string,
+        metadata: { priceUsd?: number; symbol?: string; metaLabel?: string; liquidity?: number; marketCap?: number; pairAddress?: string } | undefined,
+        activeChats: Array<{
+            id: number;
+            settings?: { positionSizeUsd?: number; slippageOnSol?: number } | null;
+        }>,
+    ): Promise<void> {
+        try {
+            const priceUsd = metadata?.priceUsd;
+            if (!priceUsd || !(priceUsd > 0)) return;
+
+            const paperTradeService = this.moduleRef.get(PaperTradeService, { strict: false });
+            const tradeService = this.moduleRef.get(TradeService, { strict: false });
+            const solPriceUsd = await tradeService.getSolPrice();
+            if (!(solPriceUsd > 0)) return;
+
+            const chat = activeChats[0];
+            const positionSizeUsd =
+                chat?.settings?.positionSizeUsd ??
+                Number.parseFloat(this.configService.get<string>('POSITION_SIZE_USD', '5'));
+            const slippageBps =
+                chat?.settings?.slippageOnSol !== undefined
+                    ? Math.max(1, Math.round(chat.settings.slippageOnSol * 10000))
+                    : Number.parseInt(this.configService.get<string>('SLIPPAGE_BPS', '100'), 10);
+
+            await paperTradeService.open({
+                tokenMint,
+                symbol: metadata?.symbol,
+                priceUsd,
+                solPriceUsd,
+                positionSizeUsd,
+                slippageBps,
+                metaLabel: metadata?.metaLabel,
+                liquidity: metadata?.liquidity,
+                marketCap: metadata?.marketCap,
+                pairAddress: metadata?.pairAddress,
+                telegramChatId: chat?.id,
+            });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            this.logger.warn(`[Paper] Could not record ${tokenMint}: ${msg}.`);
+        }
+    }
+
     private async updateWatchlistByMint(
         tokenMint: string,
         data: Prisma.WatchlistUpdateManyMutationInput,
@@ -1244,6 +1296,14 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         let signalOnlySent = false;
                         const signalObservedAt = Date.now();
                         const signalPriceUsd = result.metadata?.priceUsd;
+
+                        // Record the decision as a paper trade, once per signal rather than once
+                        // per chat, and before the dry-run branch — the simulation exists to learn
+                        // from the decision, which was made whether or not anyone acted on it.
+                        //
+                        // Sizing comes from the first active chat so the simulation measures the
+                        // setup actually in use, falling back to config when no chat has settings.
+                        await this.recordPaperTrade(tokenMint, result.metadata, activeChats);
 
                         for (const chat of activeChats) {
                             const chatDryRun = chat.settings?.dryRun ?? true;

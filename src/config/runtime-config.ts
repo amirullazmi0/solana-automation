@@ -368,6 +368,8 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     const shvedSlowFactor = readNumber(config, 'SHVED_SLOW_FACTOR', 6);
     const zoneReportHours = readNumber(config, 'ZONE_REPORT_HOURS', 6);
     const dashboardMinAgeHours = readNumber(config, 'DASHBOARD_MIN_AGE_HOURS', 24);
+    const paperMaxHoldMinutes = readNumber(config, 'PAPER_MAX_HOLD_MINUTES', 240);
+    const paperRoundTripFeeSol = readNumber(config, 'PAPER_ROUND_TRIP_FEE_SOL', 0.0011);
 
     if (!Number.isInteger(dashboardCandleTf) || dashboardCandleTf < 1) {
         errors.push('DASHBOARD_CANDLE_TF must be an integer >= 1 (minutes per candle).');
@@ -410,6 +412,16 @@ export function validateConfig(config: ConfigReader | RuntimeConfig): string[] {
     // a bad `pairCreatedAt` would otherwise slip a brand-new token past the maturity gate.
     if (dashboardMinAgeHours < 0) {
         errors.push('DASHBOARD_MIN_AGE_HOURS must be >= 0 (0 disables the age floor).');
+    }
+    // Zero would leave simulated positions open forever, and an open position contributes nothing
+    // to any average over closed trades -- the simulation would run and still teach nothing.
+    if (paperMaxHoldMinutes < 1) {
+        errors.push('PAPER_MAX_HOLD_MINUTES must be >= 1; without a timeout paper positions never close.');
+    }
+    // A zero fee is the one setting that makes the simulation lie in the flattering direction: at
+    // a $2 position the round trip is 6.6% of the position, enough to invert the sign of a result.
+    if (paperRoundTripFeeSol <= 0) {
+        errors.push('PAPER_ROUND_TRIP_FEE_SOL must be > 0; a fee-free simulation flatters every result.');
     }
     // Validated at boot as well as at use. Telegram rejects the WHOLE message with a 400 when one
     // button url is malformed, so a typo here would silently delete every token alert rather than
