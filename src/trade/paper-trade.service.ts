@@ -72,6 +72,30 @@ export class PaperTradeService {
     }
 
     /**
+     * Exit rules resolved per route, mirroring `getRouteNumberConfig` in PriceMonitorService.
+     *
+     * Without this the simulation measures a strategy nobody runs. The base config says a 12% stop
+     * and a 0.8% trail, while a MICIN trade actually runs an 8% stop and a 4% trail -- so paper
+     * results would describe exits the live bot would never have taken, and every conclusion drawn
+     * from them would be about an imaginary strategy.
+     *
+     * The key names are duplicated rather than imported because PriceMonitorService sits on the
+     * money path and this service deliberately has no reference to it. `paper-trade.service.spec.ts`
+     * asserts both sides use the same keys, so the duplication cannot drift unnoticed.
+     */
+    private routeNumber(
+        route: string | null | undefined,
+        micinKey: string,
+        whaleKey: string,
+        fallbackKey: string,
+        fallback: number,
+    ): number {
+        if (route === 'MICIN') return this.num(micinKey, fallback);
+        if (route === 'WHALE') return this.num(whaleKey, fallback);
+        return this.num(fallbackKey, fallback);
+    }
+
+    /**
      * Records a simulated entry for a buy decision.
      *
      * Never throws into the caller. This sits on the buy path, and a simulation that can break a
@@ -182,10 +206,33 @@ export class PaperTradeService {
                     entryFillPriceUsd,
                     currentPriceUsd,
                     highestPriceUsd,
-                    targetTakeProfitPercent: trade.targetTakeProfit ?? this.num('TAKE_PROFIT_PERCENT', 20),
-                    targetStopLossPercent: trade.targetStopLoss ?? this.num('STOP_LOSS_PERCENT', 12),
+                    targetTakeProfitPercent:
+                        trade.targetTakeProfit ??
+                        this.routeNumber(
+                            trade.route,
+                            'MICIN_TAKE_PROFIT_PERCENT',
+                            'WHALE_TAKE_PROFIT_PERCENT',
+                            'TAKE_PROFIT_PERCENT',
+                            20,
+                        ),
+                    targetStopLossPercent:
+                        trade.targetStopLoss ??
+                        this.routeNumber(
+                            trade.route,
+                            'MICIN_STOP_LOSS_PERCENT',
+                            'WHALE_STOP_LOSS_PERCENT',
+                            'STOP_LOSS_PERCENT',
+                            12,
+                        ),
                     targetTrailingDistancePercent:
-                        trade.targetTrailingDistance ?? this.num('TRAILING_DISTANCE_PERCENT', 0.8),
+                        trade.targetTrailingDistance ??
+                        this.routeNumber(
+                            trade.route,
+                            'MICIN_TRAILING_DISTANCE_PERCENT',
+                            'WHALE_TRAILING_DISTANCE_PERCENT',
+                            'TRAILING_DISTANCE_PERCENT',
+                            0.8,
+                        ),
                     ageMinutes,
                     maxHoldMinutes: this.maxHoldMinutes,
                 });

@@ -55,3 +55,8 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Kunci dan kredensial. Abaikan seluruh isi kecuali README-nya: berkas baru aman secara
+# default, kebalikan dari mendaftar nama satu per satu di mana yang lupa didaftarkan bocor.
+.secrets/*
+!.secrets/README.md

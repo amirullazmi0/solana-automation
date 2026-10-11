@@ -783,7 +783,17 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
      */
     private async recordPaperTrade(
         tokenMint: string,
-        metadata: { priceUsd?: number; symbol?: string; metaLabel?: string; liquidity?: number; marketCap?: number; pairAddress?: string } | undefined,
+        metadata:
+            | {
+                  priceUsd?: number;
+                  symbol?: string;
+                  metaLabel?: string;
+                  liquidity?: number;
+                  marketCap?: number;
+                  pairAddress?: string;
+                  route?: 'MICIN' | 'WHALE';
+              }
+            | undefined,
         activeChats: Array<{
             id: number;
             settings?: { positionSizeUsd?: number; slippageOnSol?: number } | null;
@@ -814,6 +824,10 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                 solPriceUsd,
                 positionSizeUsd,
                 slippageBps,
+                // Carried so the simulation resolves the same per-route exit rules the live
+                // monitor would: a MICIN trade stops at 8% and trails at 4%, not the 12% and 0.8%
+                // the base config would otherwise supply.
+                route: metadata?.route,
                 metaLabel: metadata?.metaLabel,
                 liquidity: metadata?.liquidity,
                 marketCap: metadata?.marketCap,

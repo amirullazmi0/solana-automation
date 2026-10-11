@@ -86,3 +86,53 @@ describe('paper trades cannot be sold', () => {
         expect(codeOf('trade/paper-trade.service.ts')).toContain('computeNetProfitUsd');
     });
 });
+
+/**
+ * The simulation must measure the strategy that is actually running.
+ *
+ * The base config says a 12% stop and a 0.8% trail; a MICIN trade runs an 8% stop and a 4% trail.
+ * A paper trade resolving the base values would describe exits the live bot would never have taken,
+ * and every conclusion drawn from it would be about an imaginary strategy.
+ *
+ * The key names are duplicated across the two services on purpose -- PriceMonitorService sits on the
+ * money path and the paper service deliberately cannot reference it -- so this is what stops the
+ * duplication drifting.
+ */
+describe('paper exits follow the same rules as live exits', () => {
+    const read = (file: string) => readFileSync(resolve(__dirname, '..', file), 'utf8');
+
+    const ROUTE_KEYS = [
+        ['MICIN_STOP_LOSS_PERCENT', 'WHALE_STOP_LOSS_PERCENT', 'STOP_LOSS_PERCENT'],
+        ['MICIN_TAKE_PROFIT_PERCENT', 'WHALE_TAKE_PROFIT_PERCENT', 'TAKE_PROFIT_PERCENT'],
+        ['MICIN_TRAILING_DISTANCE_PERCENT', 'WHALE_TRAILING_DISTANCE_PERCENT', 'TRAILING_DISTANCE_PERCENT'],
+    ];
+
+    it('resolves every exit threshold from the same config keys the monitor uses', () => {
+        const paper = read('trade/paper-trade.service.ts');
+        const monitor = read('price-monitor/price-monitor.service.ts');
+
+        for (const group of ROUTE_KEYS) {
+            for (const key of group) {
+                expect({ key, paper: paper.includes(key), monitor: monitor.includes(key) }).toEqual({
+                    key,
+                    paper: true,
+                    monitor: true,
+                });
+            }
+        }
+    });
+
+    // Falling back to the base config regardless of route is the specific mistake this guards:
+    // it looks correct and silently simulates a different stop.
+    it('never reads a bare base threshold without a route lookup beside it', () => {
+        const paper = read('trade/paper-trade.service.ts');
+        for (const [micin, , base] of ROUTE_KEYS) {
+            const baseIndex = paper.indexOf(`'${base}'`);
+            const micinIndex = paper.indexOf(`'${micin}'`);
+            expect({ base, routeAware: micinIndex > -1 && micinIndex < baseIndex }).toEqual({
+                base,
+                routeAware: true,
+            });
+        }
+    });
+});

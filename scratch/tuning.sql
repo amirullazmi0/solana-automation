@@ -76,7 +76,7 @@ gerbang AS (
 --    membedakan menang tipis dari kalah tipis di ukuran posisi ini.
 uang_exit AS (
     SELECT
-        mode || ' / ' || COALESCE("exitReason", '(tanpa alasan)') AS baris,
+        mode::text || ' / ' || COALESCE("exitReason", '(tanpa alasan)') AS baris,
         COUNT(*) AS jumlah,
         ROUND(SUM("netProfitUsd")::numeric, 2) AS net,
         ROUND(100.0 * COUNT(*) FILTER (WHERE "netProfitUsd" > 0) / NULLIF(COUNT(*), 0)) AS menang
@@ -86,7 +86,7 @@ uang_exit AS (
 -- 6. Meta mana yang merugi. Diurut dari paling merugi: itu yang perlu dimatikan lebih dulu.
 uang_meta AS (
     SELECT
-        mode || ' / ' || COALESCE("metaLabel", '(tanpa label)') AS baris,
+        mode::text || ' / ' || COALESCE("metaLabel", '(tanpa label)') AS baris,
         COUNT(*) AS jumlah,
         ROUND(SUM("netProfitUsd")::numeric, 2) AS net,
         ROUND(100.0 * COUNT(*) FILTER (WHERE "netProfitUsd" > 0) / NULLIF(COUNT(*), 0)) AS menang
@@ -114,7 +114,7 @@ uang_liq AS (
 --    jadi ini mengukur kecepatan deteksi, bukan slippage.
 stop AS (
     SELECT
-        mode AS baris,
+        mode::text AS baris,
         COUNT(*) AS jumlah,
         ROUND(AVG("targetStopLoss")::numeric, 1) AS disetel,
         ROUND(AVG("exitTriggerPnlPercent")::numeric, 1) AS terpicu
