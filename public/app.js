@@ -44,7 +44,12 @@ let tf = Number(params.get('tf') || localStorage.getItem('zoneTf') || 5);
 // yang terbaca seperti angkanya berubah sendiri.
 //
 // Default dikunci di 1 jam: tarik level di timeframe besar, cari entry di timeframe kecil.
-let ztf = Number(params.get('ztf') || localStorage.getItem('zoneZtf') || 60);
+// `auto` memilih timeframe zona dari umur token, dan itu default-nya.
+//
+// Mengunci di 1 jam memperbaiki pita yang melompat saat chart di-zoom, tapi diam-diam menggantinya
+// dengan masalah lebih buruk: 41 bar candle 1 jam butuh token berumur 41 jam, sementara watchlist
+// bot hampir seluruhnya token 0-2 jam. Pitanya bukan jarang untuk mereka, tapi MUSTAHIL.
+let ztf = params.get('ztf') || localStorage.getItem('zoneZtf') || 'auto';
 let tab = params.get('tab') || localStorage.getItem('zoneTab') || 'all';
 let watchlistCount = null;
 
@@ -376,13 +381,15 @@ function renderTabs() {
 }
 
 function renderZoneTf() {
-  const opts = TIMEFRAMES.map(
-    (t) => '<option value="' + t.m + '"' + (t.m === ztf ? ' selected' : '') + '>' + t.label + '</option>',
-  ).join('');
+  const opts =
+    '<option value="auto"' + (ztf === 'auto' ? ' selected' : '') + '>otomatis</option>' +
+    TIMEFRAMES.map(
+      (t) => '<option value="' + t.m + '"' + (String(t.m) === String(ztf) ? ' selected' : '') + '>' + t.label + '</option>',
+    ).join('');
   $('ztfbar').innerHTML =
     '<label class="ztf">zona dari <select id="ztfsel">' + opts + '</select></label>';
   $('ztfsel').onchange = (e) => {
-    ztf = Number(e.target.value);
+    ztf = e.target.value === 'auto' ? 'auto' : Number(e.target.value);
     localStorage.setItem('zoneZtf', ztf);
     syncUrl();
     if (selected) restartPolling();
@@ -434,7 +441,9 @@ let freshSelection = true;
 async function loadZones() {
   if (!selected) return;
   try {
-    const d = await api('/zones/' + selected + '?tf=' + tf + '&ztf=' + ztf);
+    const d = await api(
+      '/zones/' + selected + '?tf=' + tf + (ztf === 'auto' ? '' : '&ztf=' + ztf),
+    );
     $('warn').textContent = '';
 
     if (d.problem) {
@@ -540,6 +549,20 @@ async function loadPrice() {
   }
 }
 
+// Jendela yang lebih panjang dari umur token tidak pernah benar-benar diukur: DexScreener
+// mengembalikan angka yang sama untuk 6 jam dan 24 jam pada pair berumur dua jam, dan mencetak
+// "+1924% / +1924%" menyajikan artefak jendela yang belum ada sebagai dua pengukuran terpisah.
+function changeWindows(p) {
+  const age = p.ageHours;
+  const cellFor = (value, hours, label) =>
+    age != null && age < hours
+      ? '<span class="muted" title="token baru ' + age.toFixed(0) + ' jam, jendela ' + label +
+        ' belum terisi">belum ' + label + '</span>'
+      : '<span class="' + pctClass(value) + '">' + fmtPct(value) + '</span>';
+
+  return cellFor(p.priceChange6h, 6, '6j') + ' / ' + cellFor(p.priceChange24h, 24, '24j');
+}
+
 function renderStats(p) {
   const cell = (k, v, extra) =>
     '<div class="stat"><div class="stat-k">' + k + '</div><div class="stat-v">' + v + '</div>' +
@@ -567,11 +590,7 @@ function renderStats(p) {
         ' <small>' + fmtInt(p.buys5m) + ' / ' + fmtInt(p.sells5m) + '</small>',
     ) +
     pressure(p.buyShare1h, p.buys1h, p.sells1h) +
-    cell(
-      'Perubahan 6j / 24j',
-      '<span class="' + pctClass(p.priceChange6h) + '">' + fmtPct(p.priceChange6h) + '</span> / ' +
-        '<span class="' + pctClass(p.priceChange24h) + '">' + fmtPct(p.priceChange24h) + '</span>',
-    );
+    cell('Perubahan 6j / 24j', changeWindows(p));
 }
 
 // ---------------------------------------------------------------- tag risiko

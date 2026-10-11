@@ -356,7 +356,12 @@ main {
   #chart { height: clamp(240px, 52vh, 380px); }
   .big { font-size: 22px; }
   #head { gap: 6px 12px; }
-  .coin { width: 150px; }
+  /* 150px tidak cukup untuk ikon, simbol, tag meta, dan tombol salin sekaligus: simbolnya yang
+     kalah dan terpotong habis, padahal itu satu-satunya cara mengenali kartunya. Tombol salin
+     turun ke barisnya sendiri. */
+  .coin { width: 168px; }
+  .coin-top { flex-wrap: wrap; }
+  .coin-top .copy { margin-left: 0; }
   /* Mint pendek pun bisa mendorong baris; dibiarkan membungkus sendiri. */
   .mintbox { flex-wrap: wrap; }
 }

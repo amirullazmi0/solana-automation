@@ -15,6 +15,8 @@ export interface CandleResult {
     liquidityUsd?: number;
     /** Token logo, carried through so the chart header can show it without a second lookup. */
     imageUrl?: string;
+    /** Buy share of 1h trade count, 0-100, so the predictor can read flow without a second fetch. */
+    buyShare1h?: number;
     /** The timeframe actually used, which may differ from the one asked for. */
     timeframeMinutes?: number;
     /** Set when the series was rejected, so callers can say why instead of showing an empty chart. */
@@ -34,6 +36,47 @@ interface CacheEntry {
  * are DNS-hijacked to an ISP block page on this network, which surfaces as a certificate error for
  * `internetsehatku.com` rather than as an honest refusal.
  */
+/** Buy share of trade count, or undefined when nothing traded — never a misleading zero. */
+function buyShareOf(buys?: number, sells?: number): number | undefined {
+    const total = (buys ?? 0) + (sells ?? 0);
+    return total > 0 ? ((buys ?? 0) / total) * 100 : undefined;
+}
+
+/**
+ * The largest timeframe whose minimum bar count actually fits inside the token's life.
+ *
+ * Pinning the zone timeframe stopped the bands jumping whenever the chart timeframe changed, but
+ * a fixed 1h default quietly replaced that problem with a worse one: the algorithm needs 41 bars,
+ * so hourly candles require a token at least 41 hours old. The bot's watchlist is almost entirely
+ * tokens between zero and two hours old, which means the bands were not merely rare for them --
+ * they were impossible, and the page said "0 zona" forever without saying why.
+ *
+ * Choosing from age keeps both properties: the bands still do not move when the chart is zoomed,
+ * and they can exist on a token young enough for the bot to care about.
+ */
+export function pickZoneTimeframe(
+    ageHours: number | undefined,
+    minimumBars: number,
+    timeframes: ReadonlyArray<{ minutes: number }> = CandleService.TIMEFRAMES,
+): number {
+    const ageMinutes = Number.isFinite(ageHours) && (ageHours as number) > 0
+        ? (ageHours as number) * 60
+        : 0;
+
+    const sorted = [...timeframes].sort((a, b) => a.minutes - b.minutes);
+    const smallest = sorted[0]?.minutes ?? 1;
+
+    // An unknown age falls back to the smallest timeframe rather than the largest: too fine is a
+    // noisy chart, too coarse is no chart at all.
+    if (ageMinutes <= 0) return smallest;
+
+    let chosen = smallest;
+    for (const tf of sorted) {
+        if (tf.minutes * minimumBars <= ageMinutes) chosen = tf.minutes;
+    }
+    return chosen;
+}
+
 @Injectable()
 export class CandleService {
     private readonly logger = new Logger(CandleService.name);
@@ -133,6 +176,7 @@ export class CandleService {
             ageHours: pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : undefined,
             liquidityUsd: pair.liquidity?.usd,
             imageUrl: pair.info?.imageUrl,
+            buyShare1h: buyShareOf(pair.txns?.h1?.buys, pair.txns?.h1?.sells),
             timeframeMinutes: tf.minutes,
         };
 

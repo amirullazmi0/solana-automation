@@ -5,7 +5,7 @@ import { DexScreenerPair } from '../dto/analyzer.dto';
 import { MetaLabelService } from '../meta/meta-label.service';
 import { MetaTrendService } from '../meta/meta-trend.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { CandleService } from './candle.service';
+import { CandleService, pickZoneTimeframe } from './candle.service';
 import { RiskService } from './risk.service';
 import { buildRiskTags } from './risk-tags';
 import { busiestFromFeed, lookupPairs } from './pair-lookup';
@@ -305,9 +305,15 @@ export class DashboardController {
         // A second fetch only when the zone timeframe differs, and only when it actually returns
         // something: a rate-limited zone series must fall back to the chart's own candles rather
         // than leave the page with no bands at all.
-        const zoneTf = Number.parseInt(ztf ?? '', 10);
+        // `auto` and an absent value both mean "pick from the token's age", which is the only
+        // setting that can produce bands on a token the bot actually watches.
+        const requestedZoneTf = Number.parseInt(ztf ?? '', 10);
+        const zoneTf = Number.isFinite(requestedZoneTf)
+            ? requestedZoneTf
+            : pickZoneTimeframe(result.ageHours, minimumCandles());
+
         let zoneSource = result;
-        if (Number.isFinite(zoneTf) && zoneTf !== result.timeframeMinutes) {
+        if (zoneTf !== result.timeframeMinutes) {
             const higher = await this.candleService.getCandles(mint, zoneTf);
             if (!higher.problem && higher.candles.length > 0) zoneSource = higher;
         }
@@ -355,6 +361,7 @@ export class DashboardController {
                 buyZone: nearest.support,
                 sellZone: nearest.resistance,
                 insideZone: nearest.inside,
+                buyShare1h: result.buyShare1h,
                 candleCount: zoneSource.candles.length,
                 minimumCandles: minimumCandles(),
             }),
@@ -476,6 +483,12 @@ export class DashboardController {
             priceChange24h: pair?.priceChange?.h24,
             liquidityUsd: pair?.liquidity?.usd,
             marketCap: pair?.fdv,
+            // Needed to hide change windows longer than the token has existed. DexScreener returns
+            // the same figure for 6h and 24h on a two-hour-old pair, and printing "+1924% / +1924%"
+            // presents an artefact of a missing window as two independent measurements.
+            ageHours: pair?.pairCreatedAt
+                ? (Date.now() - pair.pairCreatedAt) / 3_600_000
+                : undefined,
             volume5m: pair?.volume?.m5,
             volume1h: pair?.volume?.h1,
             volume24h: pair?.volume?.h24,

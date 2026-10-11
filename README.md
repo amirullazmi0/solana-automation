@@ -1241,11 +1241,30 @@ Level 5 jam terakhir memang bukan level 12 hari terakhir, jadi pitanya melompat 
 timeframe — yang terbaca seperti angkanya berubah sendiri, bukan seperti jendela datanya yang
 berpindah.
 
-Karena itu `?ztf=` memilih timeframe zona secara terpisah, default **60 menit**: pita ditarik dari
-candle 1 jam dan tidak bergerak saat chart di-zoom ke 1m untuk mencari entry. Itu cara level biasa
-dipakai — tarik di timeframe besar, eksekusi di timeframe kecil. Fetch kedua hanya terjadi kalau
-kedua timeframe berbeda, dan kalau GeckoTerminal menolak, perhitungannya jatuh kembali ke candle
-chart, bukan menghilangkan zonanya.
+Karena itu `?ztf=` memilih timeframe zona secara terpisah dari timeframe chart: pita tidak bergerak
+saat chart di-zoom ke 1m untuk mencari entry. Itu cara level biasa dipakai — tarik di timeframe
+besar, eksekusi di timeframe kecil.
+
+**Defaultnya `otomatis`, dipilih dari umur token, dan itu bukan kenyamanan melainkan koreksi.**
+Versi pertama mengunci di 60 menit, yang memperbaiki pita melompat tetapi diam-diam menggantinya
+dengan masalah lebih buruk:
+
+| Timeframe zona | Umur token minimum agar 41 bar terisi |
+| --- | --- |
+| 1m | 0,7 jam |
+| 5m | 3,4 jam |
+| 15m | 10,2 jam |
+| **1j** | **41 jam** |
+| 4j | 164 jam |
+
+Watchlist bot hampir seluruhnya token berumur 0–2 jam. Dengan default 1 jam, pita bagi mereka bukan
+jarang — **mustahil**, dan halaman menulis "0 zona" selamanya tanpa menyebut alasannya. Terlihat
+langsung di produksi: DOPE umur 2 jam hanya punya 3 bar.
+
+`pickZoneTimeframe` memilih timeframe terbesar yang 41 barnya masih muat di umur token, jatuh ke 1m
+saat umurnya tidak diketahui — terlalu halus itu chart berisik, terlalu kasar itu tidak ada chart
+sama sekali. Fetch kedua hanya terjadi kalau timeframe zona berbeda dari chart, dan kalau
+GeckoTerminal menolak, perhitungannya jatuh kembali ke candle chart alih-alih menghilangkan zonanya.
 
 Jawaban selalu membawa `zoneTimeframeMinutes` dan `zoneHistoryHours`, dan footer zona menyebut
 keduanya: "8 zona dari candle 1j, mencakup 12 hari riwayat". Dua angka itu sebelumnya tidak terlihat
@@ -1363,6 +1382,10 @@ lebih dari itu.
   label jadi `0.00` untuk token di $0,000126 — grafik yang sumbunya nol semua terlihat seperti bug
   chart padahal datanya benar.
 - **Waktu memakai zona waktu browser**, bukan UTC bawaan dan bukan WIB yang di-hardcode.
+- **Jendela perubahan harga yang lebih panjang dari umur token disembunyikan.** DexScreener
+  mengembalikan angka yang sama untuk 6 jam dan 24 jam pada pair berumur dua jam, dan produksi
+  menampilkan `+1924% / +1924%` — artefak jendela yang belum terisi, disajikan sebagai dua
+  pengukuran terpisah.
 - **Tab Watchlist** menampilkan coin yang sedang diawasi bot beserta alasan tolak terakhirnya.
   Hitungan di tab adalah jumlah baris watchlist, yang bisa lebih besar dari daftar coin saat
   DexScreener belum punya pair-nya — daftar kosong dengan hitungan bukan nol berarti "bot mengawasi
