@@ -1053,10 +1053,10 @@ export class AnalyzerService {
 
             // 🚀 EARLY REJECT: Cek filter murah dulu sebelum kalkulasi mahal
             if (liquidity < minLiq) {
-                logMarketMetricReject('low_metrics');
+                logMarketMetricReject('low_metrics:liquidity');
                 return {
                     passed: false,
-                    reason: 'low_metrics',
+                    reason: 'low_metrics:liquidity',
                     liquidity,
                     marketCap,
                     symbol,
@@ -1065,10 +1065,10 @@ export class AnalyzerService {
                 };
             }
             if (volume5m < minVol) {
-                logMarketMetricReject('low_metrics');
+                logMarketMetricReject('low_metrics:volume5m');
                 return {
                     passed: false,
-                    reason: 'low_metrics',
+                    reason: 'low_metrics:volume5m',
                     liquidity,
                     marketCap,
                     symbol,
@@ -1077,10 +1077,10 @@ export class AnalyzerService {
                 };
             }
             if (buys5m < minBuys) {
-                logMarketMetricReject('low_metrics');
+                logMarketMetricReject('low_metrics:buys5m');
                 return {
                     passed: false,
-                    reason: 'low_metrics',
+                    reason: 'low_metrics:buys5m',
                     liquidity,
                     marketCap,
                     symbol,

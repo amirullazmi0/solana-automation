@@ -1701,14 +1701,28 @@ export class ReportingService implements OnModuleInit {
                     message: 'Volume acceleration is not strong enough yet.',
                     action: 'No buy. Continue monitoring for stronger momentum.',
                 };
+            // The three gates that used to share the name `low_metrics` now say which one fired,
+            // so the message can too. The bare name is still handled, because rows written before
+            // the split keep it and a stored reason outlives the code that wrote it.
             case 'low_metrics':
+            case 'low_metrics:liquidity':
+            case 'low_metrics:volume5m':
+            case 'low_metrics:buys5m': {
+                const detail: Record<string, string> = {
+                    'low_metrics:liquidity': 'Pool depth is below MIN_LIQUIDITY_USD.',
+                    'low_metrics:volume5m': 'Five-minute volume is below MIN_VOLUME_USD.',
+                    'low_metrics:buys5m': 'Too few buys in the last five minutes.',
+                };
                 return {
                     status: 'REJECTED',
-                    label: 'REJECTED: low_metrics',
+                    label: `REJECTED: ${normalizedReason}`,
                     severity: 'soft_fail',
-                    message: 'Momentum or quality metrics are still below threshold.',
+                    message:
+                        detail[normalizedReason] ??
+                        'Momentum or quality metrics are still below threshold.',
                     action: 'No buy. Skip for now and wait for a fresh radar cycle.',
                 };
+            }
             case 'low_vol_score':
                 return {
                     status: 'WAITING',
