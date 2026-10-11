@@ -1051,6 +1051,34 @@ export class AnalyzerService {
                 };
             }
 
+            // 🛡️ HARD REJECT: MCap di atas MAX_MCAP tidak akan pernah lolos, jadi vonisnya harus
+            // dijatuhkan SEBELUM gerbang mana pun yang bisa menolak sementara.
+            //
+            // `mcap_too_high` adalah satu-satunya penolakan permanen di blok ini, tetapi dulu
+            // diperiksa paling akhir. Akibatnya token yang tersandung gerbang sementara lebih dulu
+            // tidak pernah mencapai vonis permanennya dan kembali setiap siklus radar. Produksi
+            // membuktikannya: USDC — sebuah stablecoin dengan mcap $9,35 miliar, 187x di atas
+            // MAX_MCAP — menghabiskan 50 kali pemeriksaan dan berakhir sebagai
+            // `stagnant_timeout:low_metrics`, bukan sebagai penolakan permanen pada percobaan
+            // pertama. Jatah pemeriksaan itu seharusnya dipakai kandidat yang masih mungkin lolos.
+            //
+            // Hanya sisi ATAS yang dipindahkan ke depan. `mcap_too_low` bersifat sementara — token
+            // kecil bisa tumbuh — dan payload lengkapnya butuh volScore serta zScore yang baru
+            // dihitung setelah gerbang-gerbang berikutnya.
+            if (marketCap > maxMCap) {
+                logMarketMetricReject('mcap_too_high');
+                return {
+                    passed: false,
+                    reason: 'mcap_too_high',
+                    permanent: true,
+                    marketCap,
+                    symbol,
+                    pairCreatedAt,
+                    socials,
+                    liquidity,
+                };
+            }
+
             // 🚀 EARLY REJECT: Cek filter murah dulu sebelum kalkulasi mahal
             if (liquidity < minLiq) {
                 logMarketMetricReject('low_metrics:liquidity');
@@ -1117,13 +1145,13 @@ export class AnalyzerService {
             const priceChange1h = pair.priceChange?.h1 || 0;
             const priceChange5m = pair.priceChange?.m5 || 0;
 
-            if (marketCap < minMCap || marketCap > maxMCap) {
-                const isPerm = marketCap > maxMCap; // MCap kegedean baru permanent
-                logMarketMetricReject(marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low');
+            // Sisi atas sudah ditolak permanen jauh di atas, jadi di sini hanya tersisa yang kecil.
+            if (marketCap < minMCap) {
+                logMarketMetricReject('mcap_too_low');
                 return {
                     passed: false,
-                    reason: marketCap > maxMCap ? 'mcap_too_high' : 'mcap_too_low',
-                    permanent: isPerm,
+                    reason: 'mcap_too_low',
+                    permanent: false,
                     marketCap,
                     symbol,
                     pairCreatedAt,

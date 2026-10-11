@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import { DexScreenerPair } from '../dto/analyzer.dto';
 import { DexLimiter } from '../common/dex-limiter';
 import {
@@ -187,5 +189,52 @@ describe('aggressive-high market gates', () => {
 
         expect(service.checkHolderConcentration(rugCheckData as never, 9_999)).toBe(false);
         expect(service.checkHolderConcentration(rugCheckData as never, 10_000)).toBe(true);
+    });
+});
+
+describe('market metric gate ordering', () => {
+    const source = readFileSync(resolve(__dirname, 'analyzer.service.ts'), 'utf8');
+
+    /** Urutan kemunculan tiap alasan di dalam sumber. */
+    const at = (reason: string) => source.indexOf(`reason: '${reason}'`);
+
+    // `mcap_too_high` adalah satu-satunya penolakan PERMANEN di blok ini. Dulu diperiksa paling
+    // akhir, sehingga token yang tersandung gerbang sementara lebih dulu tidak pernah mencapai
+    // vonis permanennya dan kembali tiap siklus radar. Produksi membuktikannya: USDC, stablecoin
+    // bermcap $9,35 miliar, menghabiskan 50 pemeriksaan lalu berakhir sebagai
+    // `stagnant_timeout:low_metrics` — jatah yang seharusnya dipakai kandidat yang masih mungkin.
+    it('rejects an oversized market cap before any temporary gate can intercept it', () => {
+        const permanent = at('mcap_too_high');
+        expect(permanent).toBeGreaterThan(-1);
+
+        for (const temporary of [
+            'low_metrics:liquidity',
+            'low_metrics:volume5m',
+            'low_metrics:buys5m',
+            'mcap_too_low',
+        ]) {
+            expect({ temporary, before: permanent < at(temporary) }).toEqual({
+                temporary,
+                before: true,
+            });
+        }
+    });
+
+    it('still lets the zero-liquidity hard reject run first', () => {
+        expect(at('zero_liquidity')).toBeLessThan(at('mcap_too_high'));
+    });
+
+    // Satu nama untuk tiga gerbang membuat 675 penolakan dalam 7 hari tidak bisa dibedakan, dan
+    // tidak ada ambang yang bisa disetel dari angka yang tidak bisa dipisahkan.
+    it('keeps the three low_metrics gates distinguishable', () => {
+        for (const reason of [
+            'low_metrics:liquidity',
+            'low_metrics:volume5m',
+            'low_metrics:buys5m',
+        ]) {
+            expect({ reason, found: at(reason) > -1 }).toEqual({ reason, found: true });
+        }
+        // Nama polos tidak boleh kembali: dia yang menyembunyikan gerbang mana yang menolak.
+        expect(source).not.toContain("reason: 'low_metrics',");
     });
 });
