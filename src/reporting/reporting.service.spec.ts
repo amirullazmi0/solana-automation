@@ -10,10 +10,16 @@ describe('startup update announcement', () => {
     it('builds a complete English update message with working menu actions', () => {
         const announcement = buildStartupUpdateAnnouncement();
 
-        expect(announcement.message).toContain('BUY AND SELL BANDS ARE LIVE');
+        expect(announcement.message).toContain('BANDS, AND A BOT THAT KEEPS SCORE');
         expect(announcement.message).toContain('Buy band');
         expect(announcement.message).toContain('Sell band');
         expect(announcement.message).toContain('Ranked by reward-to-risk');
+        // Shipping is not done until the broadcast says what changed, and the simulation is the
+        // part a reader would otherwise never notice: it leaves no alert of its own.
+        expect(announcement.message).toContain('Every signal is now simulated');
+        // And it has to be clear the simulation costs nothing, or "simulated trades" reads as
+        // the bot having started trading on its own.
+        expect(announcement.message).toContain('spend nothing');
         // Meta did not go away when zones shipped, and a broadcast that omits it reads as a removal.
         expect(announcement.message).toContain('Meta detection still runs');
         // Commands have to be discoverable from the broadcast: it is the only place most chats will

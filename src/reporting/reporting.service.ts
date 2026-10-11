@@ -52,17 +52,20 @@ export function buildStartupUpdateAnnouncement(): {
 } {
     return {
         message:
-            `📊 *BUY AND SELL BANDS ARE LIVE*\n` +
+            `📊 *BANDS, AND A BOT THAT KEEPS SCORE*\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `✨ A fresh update is now live.\n\n` +
             `🟢 *Buy band* — the demand zone price keeps bouncing off\n` +
             `🔴 *Sell band* — the supply zone price keeps stalling at\n` +
             `📈 *Ranked by reward-to-risk* — room above divided by room below\n` +
+            `🧪 *Every signal is now simulated* — entry, exit and fees recorded,\n` +
+            `    so the bot finally learns whether its calls were right\n` +
             `🧭 *Meta detection still runs* — themes are sorted and scored\n` +
             `🛡️ *All existing safety checks still run first*\n\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `💬 Send /zones for the bands, /meta for the themes.\n` +
             `👀 Bands are view only — the bot does not trade them, you decide.\n` +
+            `🧪 Simulated trades spend nothing — they only keep score.\n` +
             `✅ Your wallet and chat trading settings remain unchanged.\n` +
             `📲 The upgraded protection is active now.`,
         options: {
