@@ -1311,13 +1311,20 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         const signalObservedAt = Date.now();
                         const signalPriceUsd = result.metadata?.priceUsd;
 
-                        // Record the decision as a paper trade, once per signal rather than once
+// Record the decision as a paper trade, once per signal rather than once
                         // per chat, and before the dry-run branch — the simulation exists to learn
                         // from the decision, which was made whether or not anyone acted on it.
                         //
                         // Sizing comes from the first active chat so the simulation measures the
                         // setup actually in use, falling back to config when no chat has settings.
-                        await this.recordPaperTrade(tokenMint, result.metadata, activeChats);
+                        //
+                        // Deliberately NOT awaited. The simulation now prices its entry from a
+                        // fresh DexScreener read, which queues on the shared 500 ms serial lane;
+                        // awaited here it would spend part of the 8-second MAX_BUY_SIGNAL_AGE_MS
+                        // budget the live buy below has to fit inside, and a simulation that can
+                        // cause a real buy to be rejected as stale is worse than no simulation.
+                        // `recordPaperTrade` swallows its own errors, so nothing can reject here.
+                        void this.recordPaperTrade(tokenMint, result.metadata, activeChats);
 
                         for (const chat of activeChats) {
                             const chatDryRun = chat.settings?.dryRun ?? true;

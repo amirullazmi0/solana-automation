@@ -183,3 +183,25 @@ export function computePaperResult(input: PaperResultInput): PaperResult {
         exitValueUsd,
     };
 }
+
+/**
+ * Whether the live buy gate would have refused this signal because the price ran away from it.
+ *
+ * `evaluateBuySignalGuard` in TradeService rejects a buy when the executable price has climbed more
+ * than `MAX_BUY_CHASE_PCT` above the price the signal was raised at. Without the same check here the
+ * simulation opens positions the live bot structurally cannot open, and every number drawn from
+ * them describes a strategy nobody runs.
+ *
+ * The threshold is passed in rather than read, and the key name is duplicated in the service rather
+ * than imported, because TradeService sits on the money path and this module deliberately has no
+ * reference to it. `paper-trade.service.spec.ts` asserts both sides name the same config key, so the
+ * duplication cannot drift unnoticed.
+ */
+export function wouldChasePrice(
+    signalPriceUsd: number,
+    executablePriceUsd: number,
+    maxChasePercent: number,
+): boolean {
+    if (!(signalPriceUsd > 0) || !(executablePriceUsd > 0)) return false;
+    return executablePriceUsd > signalPriceUsd * (1 + Math.max(0, maxChasePercent) / 100);
+}

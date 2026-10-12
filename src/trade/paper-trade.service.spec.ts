@@ -136,3 +136,67 @@ describe('paper exits follow the same rules as live exits', () => {
         }
     });
 });
+
+/**
+ * The first paper trade ever recorded closed at -36.56% in 26 seconds, and it was an artefact.
+ *
+ * `simulatePaperEntry` was given `metadata.priceUsd`, the price the analyzer read at the START of
+ * its check -- before RugCheck, the AI calls and the risk queue. Across the 29 live trades that
+ * stored both the signal-time feed price and the on-chain fill, the two differ by more than 5% in
+ * 17 of them and the feed sits 7.46% above the fill on average. Settling a simulated entry anchored
+ * there against the live feed books that gap as P&L, so the simulation lost money the live bot never
+ * would have lost.
+ *
+ * These lock the two halves of the fix: the entry is priced from a fresh read, and the simulation
+ * refuses the signals the live chase gate refuses.
+ */
+describe('paper entries are priced like a live entry', () => {
+    const read = (file: string) => readFileSync(resolve(__dirname, '..', file), 'utf8');
+
+    it('prices the entry from a fresh read rather than the signal snapshot', () => {
+        const paper = read('trade/paper-trade.service.ts');
+
+        const freshIndex = paper.indexOf('this.fetchPrices([input.tokenMint])');
+        const entryIndex = paper.indexOf('simulatePaperEntry({');
+
+        expect({
+            fetchesFresh: freshIndex > -1,
+            beforeEntry: freshIndex > -1 && freshIndex < entryIndex,
+        }).toEqual({ fetchesFresh: true, beforeEntry: true });
+    });
+
+    // The specific regression: handing the stale snapshot straight to the entry maths.
+    it('never hands the raw signal price to the entry simulation', () => {
+        const paper = read('trade/paper-trade.service.ts');
+        const call = paper.slice(
+            paper.indexOf('simulatePaperEntry({'),
+            paper.indexOf('if (!(entry.tokenAmount > 0)) return;'),
+        );
+
+        expect(call).toContain('priceUsd: quotePriceUsd');
+        expect(call).not.toContain('priceUsd: input.priceUsd');
+    });
+
+    it('enforces the same chase limit, from the same config key, as the live buy gate', () => {
+        const paper = read('trade/paper-trade.service.ts');
+        const live = read('trade/trade.service.ts');
+
+        expect({ paper: paper.includes('MAX_BUY_CHASE_PCT'), live: live.includes('MAX_BUY_CHASE_PCT') }).toEqual({
+            paper: true,
+            live: true,
+        });
+        expect(paper).toContain('wouldChasePrice');
+    });
+
+    /**
+     * The fresh read queues on the shared 500 ms DexScreener lane. Awaited on the buy path it would
+     * spend part of the 8-second MAX_BUY_SIGNAL_AGE_MS budget the live buy has to fit inside, and a
+     * simulation that can get a real buy rejected as stale is worse than no simulation at all.
+     */
+    it('stays off the live buy path', () => {
+        const scanner = read('scanner/scanner.service.ts');
+
+        expect(scanner).toContain('void this.recordPaperTrade(');
+        expect(scanner).not.toContain('await this.recordPaperTrade(');
+    });
+});

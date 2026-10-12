@@ -3,6 +3,7 @@ import {
     computePaperResult,
     decidePaperExit,
     simulatePaperEntry,
+    wouldChasePrice,
 } from './paper-trade';
 
 const SOL_USD = 120;
@@ -170,5 +171,44 @@ describe('computePaperResult with the shared fee definition', () => {
             roundTripFeeSol: FEE_SOL,
         });
         expect(result.profitUsd).toBe(0);
+    });
+});
+
+describe('wouldChasePrice', () => {
+    // 5% is the live default for MAX_BUY_CHASE_PCT.
+    it('refuses a price that has run further than the limit', () => {
+        expect(wouldChasePrice(100, 106, 5)).toBe(true);
+        expect(wouldChasePrice(100, 104.9, 5)).toBe(false);
+    });
+
+    // Exactly at the limit is allowed, matching `>` in the live gate rather than `>=`.
+    it('allows a price sitting exactly on the limit', () => {
+        expect(wouldChasePrice(100, 105, 5)).toBe(false);
+    });
+
+    // A price that fell is the common case on this bot's signals and must never be refused: the
+    // live bot simply fills cheaper, which is the whole reason the stale snapshot was costing money.
+    it('never refuses a price that moved down', () => {
+        expect(wouldChasePrice(100, 64, 5)).toBe(false);
+        expect(wouldChasePrice(100, 0.01, 5)).toBe(false);
+    });
+
+    // Refusing on missing data would silently stop recording signals, which is the failure that
+    // left meta-trend with nothing to learn from in the first place.
+    it('does not refuse when either price is missing or nonsense', () => {
+        for (const [signal, quote] of [
+            [0, 100],
+            [100, 0],
+            [-1, 100],
+            [Number.NaN, 100],
+            [100, Number.NaN],
+        ]) {
+            expect(wouldChasePrice(signal, quote, 5)).toBe(false);
+        }
+    });
+
+    it('treats a negative limit as zero tolerance rather than inverting it', () => {
+        expect(wouldChasePrice(100, 101, -5)).toBe(true);
+        expect(wouldChasePrice(100, 100, -5)).toBe(false);
     });
 });

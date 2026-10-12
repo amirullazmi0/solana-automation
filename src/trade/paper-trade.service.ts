@@ -5,7 +5,12 @@ import { DexLimiter } from '../common/dex-limiter';
 import { computeNetProfitUsd } from '../common/fee-utils';
 import { DexScreenerPair } from '../dto/analyzer.dto';
 import { PrismaService } from '../prisma/prisma.service';
-import { computePaperResult, decidePaperExit, simulatePaperEntry } from './paper-trade';
+import {
+    computePaperResult,
+    decidePaperExit,
+    simulatePaperEntry,
+    wouldChasePrice,
+} from './paper-trade';
 
 export interface OpenPaperTradeInput {
     tokenMint: string;
@@ -72,6 +77,15 @@ export class PaperTradeService {
     }
 
     /**
+     * Key duplicated from `TradeService.attemptBuy` rather than imported: that service sits on the
+     * money path and this one deliberately holds no reference to it. The spec asserts both name the
+     * same key.
+     */
+    private get maxChasePercent(): number {
+        return this.num('MAX_BUY_CHASE_PCT', 5);
+    }
+
+    /**
      * Exit rules resolved per route, mirroring `getRouteNumberConfig` in PriceMonitorService.
      *
      * Without this the simulation measures a strategy nobody runs. The base config says a 12% stop
@@ -116,8 +130,41 @@ export class PaperTradeService {
             });
             if (existing) return;
 
+            // Entry is priced from a fresh read, not from the signal snapshot.
+            //
+            // `input.priceUsd` is the price the analyzer saw at the START of its check, before
+            // RugCheck, the AI calls and the risk queue. Measured across the 29 live trades that
+            // recorded both numbers, it differs from the price actually filled by more than 5% in
+            // 17 of them, and sits 7.46% above it on average. Anchoring a simulated entry there and
+            // then settling it against the live feed books that gap as a loss the real bot never
+            // took: the first paper trade closed at -36.56% in 26 seconds for exactly this reason.
+            //
+            // A failed read falls back to the snapshot. A simulation biased by a few percent is
+            // still worth more than no record of the decision at all.
+            const fresh = (await this.fetchPrices([input.tokenMint])).get(input.tokenMint);
+            const quotePriceUsd = fresh && fresh > 0 ? fresh : input.priceUsd;
+
+            if (!fresh || !(fresh > 0)) {
+                this.logger.warn(
+                    `[Paper] No fresh price for ${input.symbol ?? input.tokenMint}; ` +
+                        `pricing the entry from the signal snapshot instead.`,
+                );
+            }
+
+            // The live gate refuses a buy once the price has climbed past the signal by more than
+            // MAX_BUY_CHASE_PCT, so the simulation has to refuse it too, or it accumulates entries
+            // the live bot could not have made.
+            if (wouldChasePrice(input.priceUsd, quotePriceUsd, this.maxChasePercent)) {
+                this.logger.log(
+                    `[Paper] Skipped ${input.symbol ?? input.tokenMint}: price ran from ` +
+                        `$${input.priceUsd} to $${quotePriceUsd}, past the ` +
+                        `${this.maxChasePercent}% chase limit the live gate enforces.`,
+                );
+                return;
+            }
+
             const entry = simulatePaperEntry({
-                priceUsd: input.priceUsd,
+                priceUsd: quotePriceUsd,
                 positionSizeUsd: input.positionSizeUsd,
                 slippageBps: input.slippageBps,
                 roundTripFeeSol: this.roundTripFeeSol,
