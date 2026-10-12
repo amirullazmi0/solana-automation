@@ -17,6 +17,11 @@ describe('startup update announcement', () => {
         // Shipping is not done until the broadcast says what changed, and the simulation is the
         // part a reader would otherwise never notice: it leaves no alert of its own.
         expect(announcement.message).toContain('Every signal is now simulated');
+        // The first simulated trade ever recorded closed at -36.56% because its entry was priced
+        // from the signal snapshot rather than from execution. Anyone who saw that number needs the
+        // broadcast to say the pricing changed, or they will read the next batch as an improvement
+        // in the strategy when it is a correction to the measurement.
+        expect(announcement.message).toContain('Simulated entries price at execution');
         // And it has to be clear the simulation costs nothing, or "simulated trades" reads as
         // the bot having started trading on its own.
         expect(announcement.message).toContain('spend nothing');

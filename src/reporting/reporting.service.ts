@@ -60,6 +60,9 @@ export function buildStartupUpdateAnnouncement(): {
             `📈 *Ranked by reward-to-risk* — room above divided by room below\n` +
             `🧪 *Every signal is now simulated* — entry, exit and fees recorded,\n` +
             `    so the bot finally learns whether its calls were right\n` +
+            `⏱️ *Simulated entries price at execution* — not at the moment the\n` +
+            `    signal was raised, so the score is no longer charged for a gap\n` +
+            `    a real buy would never have paid\n` +
             `🧭 *Meta detection still runs* — themes are sorted and scored\n` +
             `🛡️ *All existing safety checks still run first*\n\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
