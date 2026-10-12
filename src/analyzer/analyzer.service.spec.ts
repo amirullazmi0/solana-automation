@@ -324,5 +324,11 @@ describe('the overextension gate is wired to both routes', () => {
         expect(config.WHALE_MAX_PRICE_CHANGE_1H).toBeGreaterThan(0);
         // CLAUD signalled at +85.18%; a cap above that would leave the hole open.
         expect(config.WHALE_MAX_PRICE_CHANGE_1H as number).toBeLessThan(85.18);
+
+        // And it stays at or below p90 of what a WHALE candidate actually does. Measured over 30
+        // days of size-worthy candidates, a WHALE token's hourly move has a median of 1.1% and a
+        // p90 of 39.6%, so a cap of 45 -- the MICIN number -- barely binds. Anything above 40 here
+        // is the old hole in a smaller size.
+        expect(config.WHALE_MAX_PRICE_CHANGE_1H as number).toBeLessThanOrEqual(40);
     });
 });

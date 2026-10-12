@@ -151,6 +151,21 @@ dalam sesi yang sama dan 99,8% dari market cap-nya. Pemisah kedua rute cuma umur
 puluh tujuh detik, jadi dia lolos karena kurang dari semenit selisih jam, bukan karena sifat
 tokennya. Sekarang kedua jendela diperiksa di kedua rute.
 
+Cap 1 jam WHALE sengaja **lebih ketat** dari MICIN (30 lawan 45), karena angka yang sama berarti
+hal yang sangat berbeda di kedua rute. Diukur pada 30 hari kandidat yang lolos ukuran dan
+likuiditas:
+
+| rute | n | median 1h | p75 | p90 | maks |
+| --- | --- | --- | --- | --- | --- |
+| MICIN (<2 jam) | 34 | 7.266% | 15.533% | 28.753% | 137.066% |
+| WHALE (>=2 jam) | 19 | 1,1% | 11,6% | 39,6% | 85,2% |
+
+Token MICIN baru lahir, jadi +45% sejam ada di dasar distribusinya. Token WHALE sudah mapan dan
+gerakan sejamnya bermedian 1,1%, sehingga 45 justru duduk di atas p90 -- nyaris tidak mengikat.
+Angka 30 dipilih karena biayanya datar: cap 45 dan 40 menolak 2 dari 19, cap 30 menolak 3, dan
+memperketat sampai 20 tetap menolak 3 yang sama. Tidak ada satu pun kandidat antara 20% dan 30%,
+jadi 30 duduk di tepi celah kosong dan bukan dipaskan ke satu pengamatan tertentu.
+
 Gerbang #15 sengaja terakhir: itu satu-satunya yang butuh panggilan API eksternal, jadi hanya
 dijalankan untuk token yang sudah lolos semua pemeriksaan murah.
 
@@ -467,7 +482,7 @@ Knob berawalan `MICIN_` atau `WHALE_` **menang** atas versi globalnya. Misalnya
 | `MICIN_MAX_PRICE_CHANGE_5M` | 18 | Cap chase harga 5m, rute MICIN |
 | `MICIN_MAX_PRICE_CHANGE_1H` | 45 | Cap chase harga 1 jam, rute MICIN |
 | `WHALE_MAX_PRICE_CHANGE_5M` | 18 | Cap chase harga 5m, rute WHALE |
-| `WHALE_MAX_PRICE_CHANGE_1H` | 45 | Cap chase harga 1 jam, rute WHALE |
+| `WHALE_MAX_PRICE_CHANGE_1H` | 30 | Cap chase harga 1 jam, rute WHALE (lebih ketat dari MICIN, lihat catatan) |
 | `MICIN_SIGNAL_SCORE_FLOOR` | 25 | Signal floor MICIN |
 | `WHALE_SIGNAL_SCORE_FLOOR` | 8 | Signal floor WHALE |
 | `MARKET_REGIME` | `bullish_gas` | Teks bebas yang diinterpolasi ke prompt AI. Hanya `bearish_chaos` yang dicabangkan di kode; nilai lain tidak punya arti struktural |
