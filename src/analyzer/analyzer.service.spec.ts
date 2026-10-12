@@ -5,6 +5,7 @@ import { DexLimiter } from '../common/dex-limiter';
 import {
     AnalyzerService,
     evaluateBearishRebound,
+    evaluateOverextension,
     selectBestDexScreenerPair,
 } from './analyzer.service';
 
@@ -236,5 +237,92 @@ describe('market metric gate ordering', () => {
         }
         // Nama polos tidak boleh kembali: dia yang menyembunyikan gerbang mana yang menolak.
         expect(source).not.toContain("reason: 'low_metrics',");
+    });
+});
+
+/**
+ * CLAUD is the trade this exists for.
+ *
+ * It signalled on 2026-10-12 at `priceChange1h` +85.18%, nearly double the 45% cap MICIN already
+ * enforced, and lost 71% inside the session and 99.8% of its market cap. Nothing was broken in the
+ * sense of throwing: both windows simply only ever ran on the MICIN route, and the routes are split
+ * by nothing but age -- `resolveRoute` sends anything under two hours to MICIN -- while CLAUD's pair
+ * was two hours and forty-seven seconds old. It escaped the cap by under a minute of clock.
+ */
+describe('evaluateOverextension', () => {
+    const caps = { maxPriceChange5mPct: 18, maxPriceChange1hPct: 45 };
+
+    it('rejects the CLAUD entry on either route', () => {
+        expect(evaluateOverextension(0, 85.18, caps)).toBe('overextended_1h');
+    });
+
+    it('rejects a 5m window that has run too far', () => {
+        expect(evaluateOverextension(18.1, 0, caps)).toBe('price_chase');
+    });
+
+    // The 5m window is reported first because it is the tighter, more immediate signal, and a
+    // reason string that names the wrong window sends the next reader to the wrong knob.
+    it('names the 5m window when both windows are breached', () => {
+        expect(evaluateOverextension(50, 200, caps)).toBe('price_chase');
+    });
+
+    it('allows a token sitting exactly on either cap', () => {
+        expect(evaluateOverextension(18, 45, caps)).toBeNull();
+        expect(evaluateOverextension(17.9, 44.9, caps)).toBeNull();
+    });
+
+    // A token that fell must never be refused for being overextended: that is the bearish-rebound
+    // gate's job, and refusing here would silently double up on it.
+    it('never refuses a token whose price went down', () => {
+        expect(evaluateOverextension(-30, -80, caps)).toBeNull();
+    });
+
+    // Zero means off, which is how MICIN_MAX_PRICE_CHANGE_1H shipped before it was given a value.
+    it('treats a cap of zero or below as disabled rather than as refuse-everything', () => {
+        expect(evaluateOverextension(500, 500, { maxPriceChange5mPct: 0, maxPriceChange1hPct: 0 })).toBeNull();
+        expect(evaluateOverextension(500, 500, { maxPriceChange5mPct: -1, maxPriceChange1hPct: -1 })).toBeNull();
+    });
+
+    // Missing data passes and an infinite reading does not: blocking on NaN would stop the bot
+    // on a DexScreener hiccup, while letting Infinity through would invert the gate at the moment
+    // it matters most.
+    it('passes a missing reading but refuses an infinite one', () => {
+        expect(evaluateOverextension(Number.NaN, Number.NaN, caps)).toBeNull();
+        expect(evaluateOverextension(0, Number.POSITIVE_INFINITY, caps)).toBe('overextended_1h');
+        expect(
+            evaluateOverextension(50, 50, { maxPriceChange5mPct: Number.NaN, maxPriceChange1hPct: Number.NaN }),
+        ).toBeNull();
+    });
+});
+
+/**
+ * The gate is only worth anything if it is actually wired to both routes, and the original defect
+ * was exactly that it was not. These read the source, because a unit test on the pure function
+ * cannot see which routes the caller applies it to.
+ */
+describe('the overextension gate is wired to both routes', () => {
+    const source = readFileSync(resolve(__dirname, 'analyzer.service.ts'), 'utf8');
+
+    it('no longer restricts either price window to MICIN', () => {
+        expect(source).not.toContain("route === 'MICIN_ROUTE' && (traction.priceChange5m");
+        expect(source).toContain('evaluateOverextension(');
+    });
+
+    it('reads the cap for whichever route the token took', () => {
+        expect(source).toContain('${routePrefix}_MAX_PRICE_CHANGE_5M');
+        expect(source).toContain('${routePrefix}_MAX_PRICE_CHANGE_1H');
+    });
+
+    // A knob absent from config.json falls back to the code default, and the 1h default is 0, which
+    // means disabled. The gate would then exist and do nothing -- the state WHALE was already in.
+    it('has both WHALE caps set to a live value in config.json', () => {
+        const config = JSON.parse(
+            readFileSync(resolve(__dirname, '..', '..', 'config.json'), 'utf8'),
+        ) as Record<string, unknown>;
+
+        expect(config.WHALE_MAX_PRICE_CHANGE_5M).toBeGreaterThan(0);
+        expect(config.WHALE_MAX_PRICE_CHANGE_1H).toBeGreaterThan(0);
+        // CLAUD signalled at +85.18%; a cap above that would leave the hole open.
+        expect(config.WHALE_MAX_PRICE_CHANGE_1H as number).toBeLessThan(85.18);
     });
 });

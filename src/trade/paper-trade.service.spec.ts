@@ -190,8 +190,9 @@ describe('paper entries are priced like a live entry', () => {
 
     /**
      * The fresh read queues on the shared 500 ms DexScreener lane. Awaited on the buy path it would
-     * spend part of the 8-second MAX_BUY_SIGNAL_AGE_MS budget the live buy has to fit inside, and a
-     * simulation that can get a real buy rejected as stale is worse than no simulation at all.
+     * spend part of the MAX_BUY_SIGNAL_AGE_MS budget (15s in config.json) the live buy has to fit
+     * inside, and a simulation that can get a real buy rejected as stale is worse than no
+     * simulation at all.
      */
     it('stays off the live buy path', () => {
         const scanner = read('scanner/scanner.service.ts');

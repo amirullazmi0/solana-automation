@@ -1320,7 +1320,7 @@ export class ScannerService implements OnModuleInit, OnModuleDestroy {
                         //
                         // Deliberately NOT awaited. The simulation now prices its entry from a
                         // fresh DexScreener read, which queues on the shared 500 ms serial lane;
-                        // awaited here it would spend part of the 8-second MAX_BUY_SIGNAL_AGE_MS
+                        // awaited here it would spend part of the MAX_BUY_SIGNAL_AGE_MS
                         // budget the live buy below has to fit inside, and a simulation that can
                         // cause a real buy to be rejected as stale is worse than no simulation.
                         // `recordPaperTrade` swallows its own errors, so nothing can reject here.

@@ -141,8 +141,15 @@ Urutan sesungguhnya di `checkMarketTraction`. Gerbang murah dulu, yang mahal pal
 
 Setelah rantai ini lulus, `isTokenSafeToBuy` menjalankan lapis berikutnya: keamanan mint dan
 Token-2022, RugCheck (LP lock, skor ternormalisasi, konsentrasi holder), profil creator, cap
-chase harga MICIN (`MICIN_MAX_PRICE_CHANGE_5M`, `MICIN_MAX_PRICE_CHANGE_1H`), signal floor, lalu
-konfirmasi entry.
+cap chase harga per rute (`MICIN_MAX_PRICE_CHANGE_5M` / `_1H`, `WHALE_MAX_PRICE_CHANGE_5M` /
+`_1H`), signal floor, lalu konfirmasi entry.
+
+Cap chase itu dulu hanya berlaku di rute MICIN, dan celah itu nyata harganya. CLAUD lolos pada
+`priceChange1h` **+85,18%** -- hampir dua kali cap 45 yang sudah ditegakkan MICIN -- lalu turun 71%
+dalam sesi yang sama dan 99,8% dari market cap-nya. Pemisah kedua rute cuma umur
+(`resolveRoute`: di bawah dua jam MICIN, selebihnya WHALE) dan pair CLAUD berumur dua jam empat
+puluh tujuh detik, jadi dia lolos karena kurang dari semenit selisih jam, bukan karena sifat
+tokennya. Sekarang kedua jendela diperiksa di kedua rute.
 
 Gerbang #15 sengaja terakhir: itu satu-satunya yang butuh panggilan API eksternal, jadi hanya
 dijalankan untuk token yang sudah lolos semua pemeriksaan murah.
@@ -181,6 +188,8 @@ Muncul di log produksi dan alert Telegram. Kolom knob menunjukkan setelan mana y
 | `noisy_pump` | Lonjakan 5m vertikal tanpa dukungan 15m/1h | `MICIN_SIGNAL_SCORE_FLOOR` |
 | `micin_price_chase` | Harga 5m sudah terbang terlalu jauh | `MICIN_MAX_PRICE_CHANGE_5M` |
 | `micin_overextended_1h` | Harga 1 jam sudah terbang terlalu jauh | `MICIN_MAX_PRICE_CHANGE_1H` |
+| `whale_price_chase` | Harga 5m sudah terbang terlalu jauh | `WHALE_MAX_PRICE_CHANGE_5M` |
+| `whale_overextended_1h` | Harga 1 jam sudah terbang terlalu jauh | `WHALE_MAX_PRICE_CHANGE_1H` |
 | `micin_signal_too_weak` | Whale signal score MICIN di bawah floor | `MICIN_SIGNAL_SCORE_FLOOR` |
 | `whale_signal_too_weak` | Whale signal score WHALE di bawah floor | `WHALE_SIGNAL_SCORE_FLOOR` |
 | `stagnant_timeout` | Token dipantau terlalu lama tanpa lolos | `ANALYZER_MAX_SCAN_DURATION_MIN` |
@@ -455,8 +464,10 @@ Knob berawalan `MICIN_` atau `WHALE_` **menang** atas versi globalnya. Misalnya
 | `MIN_PRICE_CHANGE_5M_PCT` | -2 | Batas penurunan 5m |
 | `BEARISH_REBOUND_1H_FLOOR_PCT` | -16 | Di bawah ini ditolak; menutup jalur dead-cat bounce |
 | `BEARISH_REBOUND_MIN_5M_PCT` | 8 | Rebound 5m minimum bila 1h negatif |
-| `MICIN_MAX_PRICE_CHANGE_5M` | 18 | Cap chase harga 5m |
-| `MICIN_MAX_PRICE_CHANGE_1H` | 45 | Cap chase harga 1 jam |
+| `MICIN_MAX_PRICE_CHANGE_5M` | 18 | Cap chase harga 5m, rute MICIN |
+| `MICIN_MAX_PRICE_CHANGE_1H` | 45 | Cap chase harga 1 jam, rute MICIN |
+| `WHALE_MAX_PRICE_CHANGE_5M` | 18 | Cap chase harga 5m, rute WHALE |
+| `WHALE_MAX_PRICE_CHANGE_1H` | 45 | Cap chase harga 1 jam, rute WHALE |
 | `MICIN_SIGNAL_SCORE_FLOOR` | 25 | Signal floor MICIN |
 | `WHALE_SIGNAL_SCORE_FLOOR` | 8 | Signal floor WHALE |
 | `MARKET_REGIME` | `bullish_gas` | Teks bebas yang diinterpolasi ke prompt AI. Hanya `bearish_chaos` yang dicabangkan di kode; nilai lain tidak punya arti struktural |

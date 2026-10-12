@@ -63,6 +63,8 @@ export function buildStartupUpdateAnnouncement(): {
             `⏱️ *Simulated entries price at execution* — not at the moment the\n` +
             `    signal was raised, so the score is no longer charged for a gap\n` +
             `    a real buy would never have paid\n` +
+            `🚫 *No more buying the top* — a token that has already run past the\n` +
+            `    hourly limit is now refused on BOTH routes, not just the fast one\n` +
             `🧭 *Meta detection still runs* — themes are sorted and scored\n` +
             `🛡️ *All existing safety checks still run first*\n\n` +
             `━━━━━━━━━━━━━━━━━━\n` +

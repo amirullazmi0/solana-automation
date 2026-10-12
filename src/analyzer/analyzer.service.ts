@@ -57,6 +57,46 @@ export function evaluateBearishRebound(
     return { allowed: priceChange5mPct >= config.minRebound5mPct, permanent: false };
 }
 
+export type OverextensionCaps = {
+    /** Percent. Zero or below disables the window, matching how the original MICIN gate behaved. */
+    maxPriceChange5mPct: number;
+    maxPriceChange1hPct: number;
+};
+
+/**
+ * Whether a token has already run too far to be worth entering.
+ *
+ * This existed before, measured on this bot's own trades -- the losers were bought roughly twice as
+ * extended as the winners, 1h +58.1% against +28.5% -- but it was wired to MICIN only, and nothing
+ * checked the hourly extension on a WHALE token at all.
+ *
+ * CLAUD is what that cost. It signalled at +85.18% over the hour, close to twice the 45% cap MICIN
+ * already enforced, and went on to lose 71% within the session and 99.8% of its market cap. The
+ * routes are split purely by age (`resolveRoute`, under two hours is MICIN) and CLAUD's pair was
+ * two hours and forty-seven seconds old: it escaped the cap by less than a minute of clock, not by
+ * anything about the token.
+ *
+ * Route-neutral on purpose. Whichever route a token takes, buying something that has already
+ * doubled inside an hour is the same mistake.
+ */
+export function evaluateOverextension(
+    priceChange5mPct: number,
+    priceChange1hPct: number,
+    caps: OverextensionCaps,
+): 'price_chase' | 'overextended_1h' | null {
+    // NaN and Infinity are treated differently on purpose. NaN means the reading is missing, and
+    // blocking on missing data would stop the bot on a DexScreener hiccup, so it passes -- the same
+    // choice the callers make with `|| 0`. Infinity is not a missing reading, it is one that is
+    // definitively past any cap, and letting it through would invert the gate at the exact moment
+    // it matters most.
+    const over = (value: number, cap: number) =>
+        Number.isFinite(cap) && cap > 0 && !Number.isNaN(value) && value > cap;
+
+    if (over(priceChange5mPct, caps.maxPriceChange5mPct)) return 'price_chase';
+    if (over(priceChange1hPct, caps.maxPriceChange1hPct)) return 'overextended_1h';
+    return null;
+}
+
 @Injectable()
 export class AnalyzerService {
     private readonly logger = new Logger(AnalyzerService.name);
@@ -633,33 +673,35 @@ export class AnalyzerService {
             const micinSignalFloor = Number.parseFloat(
                 this.configService.get<string>('MICIN_SIGNAL_SCORE_FLOOR', '60'),
             );
-            const micinMaxPriceChange5m = Number.parseFloat(
-                this.configService.get<string>('MICIN_MAX_PRICE_CHANGE_5M', '12'),
+// Both windows are now checked on BOTH routes. They used to be MICIN-only, and that gap
+            // is what let CLAUD through at +85.18% over the hour -- nearly double the cap MICIN
+            // already enforced -- to lose 71% in the session and 99.8% of its market cap. The split
+            // between the routes is nothing but age (`resolveRoute`, under two hours is MICIN) and
+            // CLAUD's pair was two hours and forty-seven seconds old, so it escaped the cap by less
+            // than a minute of clock rather than by any property of the token.
+            const routePrefix = route === 'MICIN_ROUTE' ? 'MICIN' : 'WHALE';
+            const overextended = evaluateOverextension(
+                traction.priceChange5m || 0,
+                traction.priceChange1h || 0,
+                {
+                    maxPriceChange5mPct: Number.parseFloat(
+                        this.configService.get<string>(`${routePrefix}_MAX_PRICE_CHANGE_5M`, '12'),
+                    ),
+                    maxPriceChange1hPct: Number.parseFloat(
+                        this.configService.get<string>(`${routePrefix}_MAX_PRICE_CHANGE_1H`, '0'),
+                    ),
+                },
             );
-            if (route === 'MICIN_ROUTE' && (traction.priceChange5m || 0) > micinMaxPriceChange5m) {
+            if (overextended) {
+                const reason = `${routePrefix.toLowerCase()}_${overextended}`;
+                this.logger.warn(
+                    `[${tokenMint}] [ROUTE: ${route}] Overextension gate blocked token. ` +
+                        `5m=${traction.priceChange5m || 0}%, 1h=${traction.priceChange1h || 0}%, ` +
+                        `reason=${reason}.`,
+                );
                 return {
                     safe: false,
-                    reason: 'micin_price_chase',
-                    permanent: false,
-                    metadata: finalMetadata,
-                };
-            }
-            // Across the 15 closed LIVE trades that carry netProfitUsd, the losers were bought
-            // roughly twice as extended as the winners (avg 1h +58.1% vs +28.5%). Only the 5m
-            // window was guarded, so a token that had already doubled over the hour could still
-            // pass on a calm five minutes. This caps the hourly extension as well.
-            const micinMaxPriceChange1h = Number.parseFloat(
-                this.configService.get<string>('MICIN_MAX_PRICE_CHANGE_1H', '0'),
-            );
-            if (
-                route === 'MICIN_ROUTE' &&
-                Number.isFinite(micinMaxPriceChange1h) &&
-                micinMaxPriceChange1h > 0 &&
-                (traction.priceChange1h || 0) > micinMaxPriceChange1h
-            ) {
-                return {
-                    safe: false,
-                    reason: 'micin_overextended_1h',
+                    reason,
                     permanent: false,
                     metadata: finalMetadata,
                 };

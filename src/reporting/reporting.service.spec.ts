@@ -22,6 +22,10 @@ describe('startup update announcement', () => {
         // broadcast to say the pricing changed, or they will read the next batch as an improvement
         // in the strategy when it is a correction to the measurement.
         expect(announcement.message).toContain('Simulated entries price at execution');
+        // CLAUD signalled at +85.18% over the hour and lost 71% in the session. The hourly cap
+        // existed but ran on the MICIN route only, so chats acted on a signal the bot's own
+        // published rule would have refused. Anyone who took that trade is owed the correction.
+        expect(announcement.message).toContain('No more buying the top');
         // And it has to be clear the simulation costs nothing, or "simulated trades" reads as
         // the bot having started trading on its own.
         expect(announcement.message).toContain('spend nothing');
