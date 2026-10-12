@@ -72,6 +72,35 @@ gerbang AS (
     GROUP BY 1
 ),
 
+-- 4b. Gerbang overextension, dipasang 2026-10-12 setelah CLAUD. Dulu cap harga hanya berlaku di
+--     rute MICIN, dan CLAUD lolos di priceChange1h +85,18% lalu kehilangan 99,8% market cap-nya.
+--     Kosong di sini TIDAK berarti gerbangnya mati: dia butuh token WHALE yang lolos semua gerbang
+--     lain lebih dulu, sekitar 2 kandidat layak per minggu. Baca bersama bagian 4c.
+overext AS (
+    SELECT reason AS baris, COUNT(*) AS jumlah, ROUND(AVG("priceChange1h")::numeric, 1) AS ext1h
+    FROM "Watchlist", batas
+    WHERE "lastCheckedAt" > batas.tujuh_hari
+      AND (reason LIKE '%overextended_1h' OR reason LIKE '%price_chase')
+    GROUP BY 1
+),
+
+-- 4c. Berapa banyak token WHALE yang SEHARUSNYA kena gerbang itu. Kalau baris ini terisi sementara
+--     4b kosong berjam-jam, config WHALE_MAX_PRICE_CHANGE_1H belum hidup di container.
+overext_seharusnya AS (
+    SELECT
+        CASE WHEN mcap >= 250000 AND liquidity >= 30000
+             THEN 'b. layak ukuran (kandidat nyata)'
+             ELSE 'a. tidak layak ukuran' END AS baris,
+        COUNT(*) AS jumlah,
+        ROUND(AVG("priceChange1h")::numeric, 1) AS ext1h
+    FROM "Watchlist", batas
+    WHERE "lastCheckedAt" > batas.tujuh_hari
+      AND "pairCreatedAt" IS NOT NULL
+      AND "priceChange1h" > 45
+      AND EXTRACT(epoch FROM ("lastCheckedAt" - "pairCreatedAt")) / 3600 >= 2
+    GROUP BY 1
+),
+
 -- 5. Uang per exit. netProfitUsd, bukan profitUsd: fee ~0,0011 SOL per round trip adalah yang
 --    membedakan menang tipis dari kalah tipis di ukuran posisi ini.
 uang_exit AS (
@@ -137,7 +166,7 @@ denyut AS (
 )
 
 SELECT bagian, baris, jumlah, detail FROM (
-    SELECT 1 AS urut, '1. CORONG 7h' AS bagian, baris, jumlah,
+    SELECT 1::numeric AS urut, '1. CORONG 7h' AS bagian, baris, jumlah,
            persen || '%' AS detail FROM corong
     UNION ALL
     SELECT 2, '2. UKURAN KANDIDAT 7h', baris, jumlah,
@@ -148,6 +177,12 @@ SELECT bagian, baris, jumlah, detail FROM (
     UNION ALL
     SELECT 4, '4. GERBANG low_metrics 48j', baris, jumlah,
            'liq rata $' || COALESCE(liq::text, '-') FROM gerbang
+    UNION ALL
+    SELECT 4.1, '4b. GERBANG OVEREXTENSION 7h', baris, jumlah,
+           'ext1h rata ' || COALESCE(ext1h::text, '-') || '%' FROM overext
+    UNION ALL
+    SELECT 4.2, '4c. WHALE >45% YANG SEHARUSNYA KENA', baris, jumlah,
+           'ext1h rata ' || COALESCE(ext1h::text, '-') || '%' FROM overext_seharusnya
     UNION ALL
     SELECT 5, '5. P&L PER EXIT', baris, jumlah,
            'net $' || COALESCE(net::text, '0') || ' - menang ' || COALESCE(menang::text, '-') || '%' FROM uang_exit
